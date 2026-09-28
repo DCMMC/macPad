@@ -142,6 +142,19 @@ class MetalOutputIdentity(unittest.TestCase):
     def test_unpinned_route_accepts_manifest_verified_output(self):
         self.assertTrue(self.allowed(""))
 
+    def test_ios_16_0_and_16_2_native_llvm_outputs_remain_pinned(self):
+        source = SCRIPT.read_text()
+        for identity in (
+            # Runtime-confirmed on iPad14,5 / iPadOS 16.0.
+            "bc05c6dfc851d5d6acf760c9edde8bb3f449af5e0834cdab81f9e2f4092a0187",
+            "ff2d5117039292640d234037b4bc6f0081bb10d79d63a152ea72b1ec0de71ab1",
+            # Runtime-confirmed on iPad14,4 / iPadOS 16.2. Both outputs also
+            # pass their complete 4119/4119 and 148/148 runtime manifests.
+            "8744686cc7981601f52f658578b9cd94cf9127c86530ee03a1e68883d2e3bb0c",
+            "fa6c9b109e9ab2a7356654bd16ba66715d4ac5a04eea75dec220418a01f90736",
+        ):
+            self.assertIn(identity, source)
+
 
 if __name__ == "__main__":
     unittest.main()

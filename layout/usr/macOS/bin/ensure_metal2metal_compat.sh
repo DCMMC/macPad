@@ -218,7 +218,7 @@ provision_route \
 	"$ROUTE_DIR/mpscore-default.route.plist" \
 	"/System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSCore.framework/Versions/A/Resources/default.metallib" \
 	"/usr/local/share/macws/mpscore/default-compute-macabi.metallib" \
-	bc05c6dfc851d5d6acf760c9edde8bb3f449af5e0834cdab81f9e2f4092a0187 \
+	"bc05c6dfc851d5d6acf760c9edde8bb3f449af5e0834cdab81f9e2f4092a0187 8744686cc7981601f52f658578b9cd94cf9127c86530ee03a1e68883d2e3bb0c" \
 	1 "$APPLE_LLVM_DIS" "$APPLE_LLVM_AS" || exit 1
 
 provision_route \
@@ -229,7 +229,7 @@ provision_route \
 	"$ROUTE_DIR/mpsndarray-default.route.plist" \
 	"/System/Library/Frameworks/MetalPerformanceShaders.framework/Versions/A/Frameworks/MPSNDArray.framework/Versions/A/Resources/default.metallib" \
 	"/usr/local/share/macws/mpsndarray/default-compute-macabi.metallib" \
-	ff2d5117039292640d234037b4bc6f0081bb10d79d63a152ea72b1ec0de71ab1 \
+	"ff2d5117039292640d234037b4bc6f0081bb10d79d63a152ea72b1ec0de71ab1 fa6c9b109e9ab2a7356654bd16ba66715d4ac5a04eea75dec220418a01f90736" \
 	1 "$APPLE_LLVM_DIS" "$APPLE_LLVM_AS" || exit 1
 
 # Office embeds a desktop-target library inside an archive rather than a
