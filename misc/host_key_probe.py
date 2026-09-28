@@ -6,8 +6,8 @@ import socket
 import time
 
 from host_input_matrix import (
-    KEY_DOWN, KEY_UP, MOD_CAPS_LOCK, MOD_COMMAND, MOD_CONTROL, MOD_SHIFT,
-    SOURCE_HARDWARE_KEYBOARD, record, resolve_window,
+    KEY_DOWN, KEY_UP, LATENCY_DIAGNOSTIC, MOD_CAPS_LOCK, MOD_COMMAND,
+    MOD_CONTROL, MOD_SHIFT, SOURCE_HARDWARE_KEYBOARD, record, resolve_window,
 )
 
 
@@ -55,6 +55,10 @@ def main():
     parser.add_argument("--control", action="store_true")
     parser.add_argument("--shift", action="store_true")
     parser.add_argument("--caps-lock", action="store_true")
+    parser.add_argument(
+        "--latency-diagnostic", action="store_true",
+        help=("tag each record for the opt-in AppKit/Unity/world-state "
+              "diagnostic logs; does not change input routing"))
     parser.add_argument(
         "--hold", type=float, default=0.0,
         help=("seconds to keep each key down before key-up; games that sample "
@@ -111,7 +115,9 @@ def main():
                     kind, sequence, args.pid, window, args.width, args.height,
                     args.width / 2, args.height / 2, pressure=code,
                     contact=symbol, source=SOURCE_HARDWARE_KEYBOARD,
-                    modifiers=flags), args.socket)
+                    modifiers=flags,
+                    flags=(LATENCY_DIAGNOSTIC
+                           if args.latency_diagnostic else 0)), args.socket)
                 if kind == KEY_DOWN and args.hold:
                     time.sleep(args.hold)
             sent.append(value)

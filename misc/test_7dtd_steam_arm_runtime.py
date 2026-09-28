@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STEAM_SOURCE = ROOT / "libmachook/Compatibility/MacWSSteamProcess.m"
 PREFLIGHT = ROOT / "layout/usr/macOS/bin/prepare_steam_runtime.sh"
 APP_INPUT = ROOT / "libmachook/AppInputBridge.m"
+KEY_PROBE = ROOT / "misc/host_key_probe.py"
 
 
 class SevenDaysToDieSteamRuntimeTests(unittest.TestCase):
@@ -17,6 +18,7 @@ class SevenDaysToDieSteamRuntimeTests(unittest.TestCase):
         cls.source = STEAM_SOURCE.read_text()
         cls.preflight = PREFLIGHT.read_text()
         cls.app_input = APP_INPUT.read_text()
+        cls.key_probe = KEY_PROBE.read_text()
 
     def test_only_exact_depot_entry_points_redirect_to_arm_runtime(self):
         body = self.source.split(
@@ -141,6 +143,15 @@ class SevenDaysToDieSteamRuntimeTests(unittest.TestCase):
             "BOOL queueForGameTick = MacWSMainBundleUsesQueuedGameInput", 1
         )[1].split("CGFloat normalizedX", 1)[0]
         self.assertIn("queueForGameTick, NO", key_route)
+
+    def test_key_probe_can_opt_in_to_correlated_latency_diagnostics(self):
+        self.assertIn("LATENCY_DIAGNOSTIC", self.key_probe)
+        self.assertIn('"--latency-diagnostic"', self.key_probe)
+        self.assertIn("if args.latency_diagnostic else 0", self.key_probe)
+        self.assertIn("APP-INPUT KEY-EVENT", self.app_input)
+        self.assertIn("APP-INPUT KEY-RETURN", self.app_input)
+        self.assertIn("APP-INPUT UNITY-DID-SEND", self.app_input)
+        self.assertIn("APP-INPUT 7DTD-WORLD-STATE", self.app_input)
 
     def test_vnc_window_target_keeps_desktop_coordinate_affine(self):
         mapping = self.app_input.split(

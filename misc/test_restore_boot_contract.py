@@ -85,6 +85,5 @@ class RestoreBootContract(unittest.TestCase):
         self.assertIn('[ ! -L "$cache_path" ]', repair)
         self.assertIn('[ ! -L "$state_dir" ]', repair)
 
-
 if __name__ == "__main__":
     unittest.main()
