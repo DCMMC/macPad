@@ -8,6 +8,7 @@
 
 @import Foundation;
 @import Darwin;
+@import CydiaSubstrate;
 
 #import <objc/message.h>
 #import <objc/runtime.h>
@@ -114,6 +115,7 @@ typedef const void *(*MacWSEventRef)(id, SEL);
 typedef void (*MacWSPostEvent)(id, SEL, id, BOOL);
 typedef void (*MacWSSendEvent)(id, SEL, id);
 typedef BOOL (*MacWSUnityDidSendEvent)(id, SEL, id);
+typedef uint64_t (*MacWSCGEventSourceFlagsState)(int32_t);
 typedef id (*MacWSNextEvent)(id, SEL, NSUInteger, id, id, BOOL);
 typedef void (*MacWSHandleApplicationEvent)(id, SEL, id);
 typedef void (*MacWSMenuEventLoop)(id, SEL, BOOL, id);
@@ -679,6 +681,11 @@ static double MacWSAppInputGestureHitValueBefore;
 static BOOL MacWSAppInputGestureHitHasValue;
 static MacWSSendEvent MacWSOriginalApplicationSendEvent;
 static MacWSUnityDidSendEvent MacWSOriginalUnityDidSendEvent;
+static MacWSCGEventSourceFlagsState
+    MacWSOriginalCGEventSourceFlagsState;
+static const struct mach_header_64 *MacWSSevenDaysUnityImage;
+static __thread uint64_t MacWSAppInputDispatchModifierFlags;
+static __thread unsigned MacWSAppInputDispatchModifierDepth;
 static _Atomic uint64_t MacWSUnityMouseDiagnosticUntilMicros;
 static _Atomic uint64_t MacWSUnityMouseDiagnosticSequence;
 static MacWSHandleApplicationEvent MacWSOriginalHandleActivatedEvent;
@@ -1636,6 +1643,125 @@ static void MacWSLogUnityNGUIInputState(const char *phase) {
     if (hoverText && api.monoFree) api.monoFree(hoverText);
 }
 
+// Unity 2022.3.62f2 asks CGEventSourceFlagsState(1) while dispatching every
+// AppKit event. That is normally equivalent to the modifierFlags carried by
+// the NSEvent currently being dispatched. It is not equivalent in this
+// launchd-created chroot session: a 7DTD sample captured all 2782/2782 main-
+// thread samples in
+//
+//   UnityPlayer+0xf1de30 -> SLEventSourceFlagsState
+//     -> CGSEventSourceForID -> CGSEventSourceShutdown -> mutex_lock
+//
+// RE-confirmed in the exact Ventura 13.4 SkyLight image: the failed source-ID
+// lookup owns the event-source cache mutex when it calls Shutdown, which tries
+// to acquire the same mutex again. Use the already-authoritative modifier
+// flags from the real NSEvent only at the one RE-confirmed Unity call site.
+// This does not invent a key state or suppress Unity's event handler; every
+// other caller and every call outside the active AppKit dispatch reaches the
+// original CoreGraphics implementation unchanged.
+static uint64_t MacWSSevenDaysCGEventSourceFlagsState(int32_t stateID) {
+    void *signedReturnAddress = __builtin_return_address(0);
+    void *returnAddress = ptrauth_strip(signedReturnAddress,
+                                        ptrauth_key_return_address);
+    if (stateID == 1 && MacWSAppInputDispatchModifierDepth != 0 &&
+        MacWSSevenDaysUnityImage &&
+        (uintptr_t)returnAddress ==
+            (uintptr_t)MacWSSevenDaysUnityImage + 0xf1de34u) {
+        return MacWSAppInputDispatchModifierFlags;
+    }
+    return MacWSOriginalCGEventSourceFlagsState
+        ? MacWSOriginalCGEventSourceFlagsState(stateID) : 0;
+}
+
+static BOOL MacWSMachHeaderHasUUID(const struct mach_header_64 *header,
+                                   const uint8_t expected[16]) {
+    if (!header || header->magic != MH_MAGIC_64) return NO;
+    const uint8_t *cursor = (const uint8_t *)header + sizeof(*header);
+    const uint8_t *end = cursor + header->sizeofcmds;
+    for (uint32_t index = 0; index < header->ncmds; index++) {
+        if (cursor + sizeof(struct load_command) > end) return NO;
+        const struct load_command *command =
+            (const struct load_command *)cursor;
+        if (command->cmdsize < sizeof(*command) ||
+            cursor + command->cmdsize > end) return NO;
+        if (command->cmd == LC_UUID &&
+            command->cmdsize >= sizeof(struct uuid_command)) {
+            const struct uuid_command *uuid =
+                (const struct uuid_command *)command;
+            return memcmp(uuid->uuid, expected, 16) == 0;
+        }
+        cursor += command->cmdsize;
+    }
+    return NO;
+}
+
+static void MacWSInstallSevenDaysModifierStateCompatibility(void) {
+    static _Atomic int installState;
+    if (atomic_load_explicit(&installState, memory_order_acquire) == 2 ||
+        !MacWSMainBundleIsSevenDaysToDie()) return;
+
+    // Exact shipped arm64 UnityPlayer.dylib:
+    // SHA-256 89ddca014c60f0a909e23fe87664f0c5ac70fe1889621a533c252cc8b6985e56
+    // UUID D50F7C77-F422-3DE2-986B-1237215E50F7. The byte witness includes
+    // the complete predicate and the BL whose return address is +0xf1de34.
+    static const uint8_t expectedUUID[16] = {
+        0xd5, 0x0f, 0x7c, 0x77, 0xf4, 0x22, 0x3d, 0xe2,
+        0x98, 0x6b, 0x12, 0x37, 0x21, 0x5e, 0x50, 0xf7,
+    };
+    static const uint8_t expectedCallSite[] = {
+        0xf4, 0x4f, 0xbe, 0xa9, 0xfd, 0x7b, 0x01, 0xa9,
+        0xfd, 0x43, 0x00, 0x91, 0xf3, 0x03, 0x00, 0xaa,
+        0xf4, 0x0f, 0x84, 0x52, 0x1f, 0x00, 0x14, 0x6a,
+        0x61, 0x02, 0x00, 0x54, 0x20, 0x00, 0x80, 0x52,
+        0x00, 0xf2, 0x1a, 0x94, 0x13, 0x00, 0x13, 0x2a,
+    };
+
+    const struct mach_header_64 *unityImage = NULL;
+    uint32_t imageCount = _dyld_image_count();
+    for (uint32_t index = 0; index < imageCount; index++) {
+        const char *name = _dyld_get_image_name(index);
+        if (!name || !strstr(name, "/UnityPlayer.dylib")) continue;
+        const struct mach_header_64 *header =
+            (const struct mach_header_64 *)_dyld_get_image_header(index);
+        if (!MacWSMachHeaderHasUUID(header, expectedUUID) ||
+            memcmp((const uint8_t *)header + 0xf1de10u,
+                   expectedCallSite, sizeof(expectedCallSite)) != 0) {
+            fprintf(stderr,
+                "#### APP-INPUT 7DTD-MODIFIER-COMPAT unsupported-image "
+                "path=%s\n", name);
+            fflush(stderr);
+            atomic_store_explicit(&installState, 3, memory_order_release);
+            return;
+        }
+        unityImage = header;
+        break;
+    }
+    if (!unityImage) return;
+
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &installState, &expected, 1,
+            memory_order_acq_rel, memory_order_acquire)) return;
+    void *target = dlsym(RTLD_DEFAULT, "CGEventSourceFlagsState");
+    if (!target) {
+        atomic_store_explicit(&installState, 3, memory_order_release);
+        return;
+    }
+    MSHookFunction(target, (void *)MacWSSevenDaysCGEventSourceFlagsState,
+                   (void **)&MacWSOriginalCGEventSourceFlagsState);
+    if (!MacWSOriginalCGEventSourceFlagsState) {
+        atomic_store_explicit(&installState, 3, memory_order_release);
+        return;
+    }
+    MacWSSevenDaysUnityImage = unityImage;
+    atomic_store_explicit(&installState, 2, memory_order_release);
+    fprintf(stderr,
+        "#### APP-INPUT 7DTD-MODIFIER-COMPAT installed pid=%d "
+        "unity=%p caller=0xf1de34 state=1 route=current-NSEvent\n",
+        getpid(), unityImage);
+    fflush(stderr);
+}
+
 static void MacWSInstallUnityDidSendEventDiagnostic(void) {
     static BOOL installed;
     if (installed || !MacWSRuntimeDiagnosticsEnabled() ||
@@ -1663,6 +1789,7 @@ static void MacWSInstallUnityDidSendEventDiagnostic(void) {
 // the exact native down/up pair matched above; every unrelated event passes
 // through byte-for-byte unchanged.
 static void MacWSAppInputApplicationSendEvent(id self, SEL command, id event) {
+    MacWSInstallSevenDaysModifierStateCompatibility();
     MacWSInstallUnityDidSendEventDiagnostic();
     NSUInteger type = event ? ((MacWSMsgUInteger)objc_msgSend)(
         event, sel_registerName("type")) : 0;
@@ -1921,8 +2048,21 @@ static void MacWSAppInputApplicationSendEvent(id self, SEL command, id event) {
             }
         }
     }
+    uint64_t previousDispatchModifierFlags =
+        MacWSAppInputDispatchModifierFlags;
+    unsigned previousDispatchModifierDepth =
+        MacWSAppInputDispatchModifierDepth;
+    if (event && MacWSMainBundleIsSevenDaysToDie()) {
+        MacWSAppInputDispatchModifierFlags =
+            ((MacWSMsgUInteger)objc_msgSend)(
+                event, sel_registerName("modifierFlags"));
+        MacWSAppInputDispatchModifierDepth =
+            previousDispatchModifierDepth + 1;
+    }
     if (MacWSOriginalApplicationSendEvent)
         MacWSOriginalApplicationSendEvent(self, command, event);
+    MacWSAppInputDispatchModifierFlags = previousDispatchModifierFlags;
+    MacWSAppInputDispatchModifierDepth = previousDispatchModifierDepth;
     if (systemLatencyMainStart > 0.0) {
         double dispatchEnd = MacWSInputUptimeSeconds();
         MacWSInputRecord latencyRecord = {

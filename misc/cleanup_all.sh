@@ -108,6 +108,23 @@ done
 rm -f /var/mobile/Library/Logs/macws-stray-safety.heartbeat \
       /var/jb/Library/LaunchDaemons/com.macwsguide.stray-safety.plist
 
+# Steam's 7DTD adapter launches the prepared arm64 Unity player rather than
+# the x86 launcher.  The game can outlive Steam after a wedged AppKit event
+# callback, so the general Steam patterns above do not match it.  Recovery
+# owns this exact prepared executable (including the optional Steam argument)
+# and must not leave the old Unity process holding SkyLight input locks across
+# the next GUI start.
+seven_days_exec='/Users/root/Library/Application Support/Steam/steamapps/macws-runtime/7 Days To Die/7DaysToDie-ARM.app/Contents/MacOS/7 Days To Die'
+for pid in $(ps -axo pid=,command= 2>/dev/null |
+    awk -v exact="$seven_days_exec" 'index($0, exact) {print $1}'); do
+  command=$(ps -p "$pid" -o command= 2>/dev/null)
+  case "$command" in
+    "$seven_days_exec"|"$seven_days_exec "*)
+      kill -9 "$pid" 2>/dev/null
+      ;;
+  esac
+done
+
 # A running UIKit application is owned by mobile and may survive root's
 # procursus pkill on this jailbreak. Remove its exact dynamic launchd label,
 # then kill only the executable path if SpringBoard has not reaped it yet.

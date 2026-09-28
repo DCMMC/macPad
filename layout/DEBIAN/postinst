@@ -31,6 +31,7 @@ DISKARBITRATIOND_NATIVE_ENTITLEMENTS=/var/jb/usr/macOS/bin/diskarbitrationd-nati
 INTEROP_LOCATION_ENTITLEMENTS=/var/jb/usr/macOS/bin/interop-location-entitlements.plist
 CODE_REQUIREMENT_WRITER=/var/jb/usr/macOS/bin/write_code_requirement.py
 WEATHER_PREPARER=/var/jb/usr/macOS/bin/prepare_weather_app.py
+WINDOWSERVER_PREPARER=/var/jb/usr/macOS/bin/prepare_ventura_windowserver.py
 LIPO=/var/jb/usr/bin/lipo
 ROOTFS=/var/mnt/rootfs
 WORKSPACE_WALLPAPER_SOURCE=/var/jb/usr/macOS/share/wallpapers/macws-forest-lake.png
@@ -252,6 +253,98 @@ trust_installed_macho() {
         [ -n "$hash" ] && \
             /var/jb/usr/bin/jbctl trustcache add "$hash" 2>/dev/null || true
     done
+}
+
+install_launchservicesd_loader() {
+    loader=/var/jb/usr/macOS/bin/launchservicesd
+    payload_source=/var/jb/usr/macOS/Frameworks/launchservicesd.dylib
+    target="$ROOTFS/System/Library/CoreServices/launchservicesd"
+    payload="$ROOTFS/System/Library/CoreServices/launchservicesd.dylib"
+    backup="${target}.macws-original"
+    temporary="${target}.macws-new.$$"
+    payload_temporary="${payload}.macws-new.$$"
+
+    [ -f "$loader" ] && [ -f "$payload_source" ] && [ -f "$target" ] || {
+        echo 'ERROR: launchservicesd loader transaction is missing an input.' >&2
+        return 1
+    }
+    if [ ! -f "$payload" ]; then
+        rm -f "$payload_temporary"
+        cp -p "$payload_source" "$payload_temporary" || return 1
+        chown root:wheel "$payload_temporary" 2>/dev/null || true
+        chmod 0755 "$payload_temporary" || return 1
+        mv -f "$payload_temporary" "$payload" || return 1
+    fi
+    if ! cmp -s "$loader" "$target"; then
+        # A fresh Ventura rootfs still contains the stock MH_EXECUTE here.
+        # The project deliberately runs that image as the sibling dylib so
+        # the thin arm64 loader can establish the chroot interposition ABI.
+        # Preserve the original once, then replace by inode so AMFI cannot
+        # reuse a stale code-signature blob for the old executable.
+        if [ ! -e "$backup" ]; then
+            cp -p "$target" "$backup" || return 1
+        fi
+        rm -f "$temporary"
+        cp -p "$loader" "$temporary" || return 1
+        chown root:wheel "$temporary" 2>/dev/null || true
+        chmod 0755 "$temporary" || return 1
+        mv -f "$temporary" "$target" || return 1
+        echo 'Installed the thin launchservicesd loader; preserved the stock executable as launchservicesd.macws-original.'
+    fi
+    trust_installed_macho "$target"
+    trust_installed_macho "$payload"
+}
+
+ensure_filecoordinationd_signature() {
+    target="$ROOTFS/usr/sbin/filecoordinationd"
+    backup="${target}.macws-original"
+    temporary="${target}.macws-new.$$"
+    [ -f "$target" ] || return 0
+
+    entitlements=$(/var/jb/usr/bin/ldid -e "$target" 2>/dev/null || true)
+    if ! printf '%s\n' "$entitlements" |
+            grep -Fq '<key>com.apple.private.graphics-restart-no-kill</key>'; then
+        # Runtime-confirmed on the iPad14,4 Office target: the stock Ventura
+        # image repeatedly exited with OS_REASON_EXEC before its first target
+        # log and neither stock CDHash was in Dopamine's trustcache. The same
+        # image stayed running after receiving the normal MacWS launch profile.
+        [ -e "$backup" ] || cp -p "$target" "$backup" || return 1
+        rm -f "$temporary"
+        cp -p "$target" "$temporary" || return 1
+        /var/jb/usr/bin/ldid -S"$ENTITLEMENTS" -M "$temporary" || {
+            rm -f "$temporary"
+            return 1
+        }
+        chown root:wheel "$temporary" 2>/dev/null || true
+        chmod 0755 "$temporary" || return 1
+        mv -f "$temporary" "$target" || return 1
+        echo 'Prepared filecoordinationd for chroot launch; preserved the stock executable.'
+    fi
+    trust_installed_macho "$target"
+}
+
+prepare_windowserver_runtime() {
+    target="$ROOTFS/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer"
+    backup="${target}.macws-original"
+    [ -f "$target" ] || return 0
+    [ -f "$WINDOWSERVER_PREPARER" ] || {
+        echo 'ERROR: verified WindowServer preparation helper is missing.' >&2
+        return 1
+    }
+
+    if /var/jb/usr/bin/python3 "$WINDOWSERVER_PREPARER" --check "$target"; then
+        state=0
+    else
+        state=$?
+    fi
+    if [ "$state" -eq 1 ]; then
+        [ -e "$backup" ] || cp -p "$target" "$backup" || return 1
+        /var/jb/usr/bin/python3 "$WINDOWSERVER_PREPARER" "$target" || return 1
+    elif [ "$state" -ne 0 ]; then
+        # An unknown UUID or malformed image is not safe to rewrite.
+        return "$state"
+    fi
+    ensure_chroot_application_signature "$target"
 }
 
 ensure_interop_signature() {
@@ -770,11 +863,14 @@ if [ -d "$ROOTFS/System/Library" ]; then
         "$ROOTFS/System/Library/CoreServices/Dock.app/Contents/XPCServices/DockHelper.xpc/Contents/MacOS/DockHelper" || exit 1
     ensure_chroot_application_signature \
         "$ROOTFS/System/Library/CoreServices/sharedfilelistd" || exit 1
-    # The project launchservicesd executable is a thin loader. Its already-
-    # signed Ventura payload is dlopen'd before autosignd can run, so restore
-    # that dylib's reboot-volatile CDHash as part of the same package closure.
-    trust_installed_macho \
-        "$ROOTFS/System/Library/CoreServices/launchservicesd.dylib"
+    ensure_filecoordinationd_signature || exit 1
+    prepare_windowserver_runtime || exit 1
+    # A restored rootfs can still contain Ventura's original executable even
+    # though the extracted payload dylib is present. Runtime-confirmed on the
+    # iPad14,4 Office target: launchd recorded LastExitStatus=9 before the
+    # original image's first userspace log. Install and trust the actual thin
+    # loader together with its sibling payload as one recoverable transaction.
+    install_launchservicesd_loader || exit 1
     ensure_chroot_application_signature \
         "$ROOTFS/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/CarbonCore.framework/Versions/A/XPCServices/csnameddatad.xpc/Contents/MacOS/csnameddatad" || exit 1
     ensure_chroot_application_signature \

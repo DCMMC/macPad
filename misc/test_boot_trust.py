@@ -190,6 +190,8 @@ class BootTrustTests(unittest.TestCase):
         method = script.split('restore_cold_boot_trust() {', 1)[1].split('\n}', 1)[0]
         for required in ('Hydra.framework', 'steamapps/macws-runtime',
                          '/Applications/*.app', 'launchservicesd.dylib',
+                         '/var/jb/usr/macOS/bin/launchservicesd',
+                         '/usr/sbin/filecoordinationd',
                          'opt/local/libexec/macws-cursor',
                          '"$ROOTFS$DEFAULTS_BIN"',
                          '"$ROOTFS$LSREGISTER_BIN"',
@@ -199,6 +201,43 @@ class BootTrustTests(unittest.TestCase):
             self.assertIn(required, method)
         self.assertLess(method.index('"$@" || return 1'),
                         method.index('BASE_TRUST_READY=1'))
+
+    def test_fresh_rootfs_installs_recoverable_launchservices_loader(self):
+        maintainer = (ROOT / 'layout/DEBIAN/postinst').read_text()
+        transaction = maintainer.split(
+            'install_launchservicesd_loader() {', 1
+        )[1].split('\n}', 1)[0]
+        self.assertIn('/var/jb/usr/macOS/bin/launchservicesd', transaction)
+        self.assertIn('/var/jb/usr/macOS/Frameworks/launchservicesd.dylib',
+                      transaction)
+        self.assertIn('launchservicesd.macws-original', transaction)
+        self.assertIn('cmp -s "$loader" "$target"', transaction)
+        self.assertIn('mv -f "$temporary" "$target"', transaction)
+        self.assertIn('trust_installed_macho "$target"', transaction)
+        self.assertIn('trust_installed_macho "$payload"', transaction)
+        self.assertIn('install_launchservicesd_loader || exit 1', maintainer)
+
+        repair = (ROOT / 'layout/usr/macOS/bin/postinst.sh').read_text()
+        self.assertIn('LAUNCHSERVICES_TARGET=', repair)
+        self.assertIn('${LAUNCHSERVICES_TARGET}.macws-original', repair)
+        self.assertIn('cmp -s "$LAUNCHSERVICES_LOADER" '
+                      '"$LAUNCHSERVICES_TARGET"', repair)
+
+    def test_fresh_rootfs_prepares_early_windowing_processes(self):
+        maintainer = (ROOT / 'layout/DEBIAN/postinst').read_text()
+        self.assertIn('ensure_filecoordinationd_signature() {', maintainer)
+        self.assertIn('${target}.macws-original', maintainer)
+        self.assertIn('ldid -S"$ENTITLEMENTS" -M "$temporary"', maintainer)
+        self.assertIn('trust_installed_macho "$target"', maintainer)
+        self.assertIn('prepare_windowserver_runtime() {', maintainer)
+        self.assertIn('prepare_ventura_windowserver.py', maintainer)
+        self.assertIn('prepare_windowserver_runtime || exit 1', maintainer)
+
+        repair = (ROOT / 'layout/usr/macOS/bin/postinst.sh').read_text()
+        self.assertIn('ensure_filecoordinationd_signature || exit 1', repair)
+        self.assertIn('prepare_windowserver_runtime || exit 1', repair)
+        makefile = (ROOT / 'Makefile').read_text()
+        self.assertIn('prepare_ventura_windowserver.py', makefile)
 
     def test_missing_hash_must_really_register_and_verify(self):
         class Add:

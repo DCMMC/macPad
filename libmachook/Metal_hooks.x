@@ -23369,7 +23369,80 @@ static macws_qtn_proc_apply_to_self_fn
 static macws_qtn_proc_get_flags_fn g_macws_qtn_proc_get_flags = NULL;
 static uint32_t g_macws_iconservices_emulated_qtn_flags = 0;
 
+static BOOL macws_rebind_iconservices_qtn_authenticated_import(
+        void *resolvedSymbol, void *replacement, uintptr_t slotOffset,
+        void **slotOut, void **beforeOut, void **afterOut) {
+    static const uint8_t iconservicesUUID[16] = {
+        0xc0, 0x89, 0x10, 0x64, 0x16, 0x33, 0x38, 0x83,
+        0xb0, 0x91, 0xb9, 0x0e, 0x64, 0x90, 0xe2, 0x70,
+    };
+    const struct mach_header *mainHeader = NULL;
+    for (uint32_t index = 0; index < _dyld_image_count(); index++) {
+        const struct mach_header *candidate = _dyld_get_image_header(index);
+        if (candidate && candidate->filetype == MH_EXECUTE &&
+            macws_macho_has_uuid(candidate, iconservicesUUID)) {
+            mainHeader = candidate;
+            break;
+        }
+    }
+    if (!mainHeader || !resolvedSymbol || !replacement) return NO;
+
+    unsigned long authGotSize = 0;
+    uint64_t *authGot = (uint64_t *)getsectiondata(
+        (const struct mach_header_64 *)mainHeader,
+        "__DATA_CONST", "__auth_got", &authGotSize);
+    // RE-confirmed via `otool -Iv` and `otool -s` on the exact Ventura 13.4
+    // image above: its authenticated GOT is 0x190 bytes. +0x70 is import
+    // ordinal 45 (_qtn_proc_apply_to_self), and +0x88 is ordinal 48
+    // (_qtn_proc_init_with_self). Their stubs perform
+    // `ldr x16, [x17]; braa x16, x17`, so the ABI discriminator is the
+    // address-diversified slot with constant diversity zero.
+    if (!authGot || authGotSize != 0x190 ||
+        (slotOffset != 0x70 && slotOffset != 0x88)) return NO;
+    uint64_t *slot =
+        (uint64_t *)((uint8_t *)authGot + slotOffset);
+    uintptr_t expected = (uintptr_t)ptrauth_strip(
+        resolvedSymbol, ptrauth_key_function_pointer);
+    uintptr_t before = (uintptr_t)*slot;
+    uintptr_t beforeTarget = (uintptr_t)ptrauth_strip(
+        (void *)before, ptrauth_key_function_pointer);
+    Dl_info targetInfo = {0};
+    if (beforeTarget != expected ||
+        !dladdr((void *)beforeTarget, &targetInfo) ||
+        !targetInfo.dli_fname ||
+        !strstr(targetInfo.dli_fname, "/libquarantine.dylib")) {
+        return NO;
+    }
+
+    uintptr_t discriminator = ptrauth_blend_discriminator(slot, 0);
+    uintptr_t replacementTarget = (uintptr_t)ptrauth_strip(
+        replacement, ptrauth_key_function_pointer);
+    uint64_t signedTarget = (uint64_t)ptrauth_sign_unauthenticated(
+        (void *)replacementTarget, ptrauth_key_function_pointer,
+        discriminator);
+    ModifyExecutableRegion(slot, sizeof(*slot), ^{
+        *slot = signedTarget;
+    });
+    uintptr_t afterTarget = (uintptr_t)ptrauth_strip(
+        (void *)*slot, ptrauth_key_function_pointer);
+    if (slotOut) *slotOut = slot;
+    if (beforeOut) *beforeOut = (void *)before;
+    if (afterOut) *afterOut = (void *)*slot;
+    return afterTarget == replacementTarget;
+}
+
 static int macws_qtn_proc_init_with_self(void *process) {
+    if (macws_runtime_diagnostics_enabled()) {
+        fprintf(stderr,
+            "#### ICONSERVICES qtn self entry process=%p original=%p "
+            "stripped=%p\n",
+            process, g_macws_orig_qtn_proc_init_with_self,
+            g_macws_orig_qtn_proc_init_with_self
+                ? ptrauth_strip(
+                    (void *)g_macws_orig_qtn_proc_init_with_self,
+                    ptrauth_key_function_pointer) : NULL);
+        fflush(stderr);
+    }
     int result = g_macws_orig_qtn_proc_init_with_self
         ? g_macws_orig_qtn_proc_init_with_self(process) : -1;
     int originalError = errno;
@@ -23444,8 +23517,43 @@ static void macws_install_iconservices_quarantine_fallback(void) {
     if (!program || strcmp(program, "iconservicesagent") != 0) return;
     void *symbol = dlsym(RTLD_DEFAULT, "_qtn_proc_init_with_self");
     if (!symbol) return;
-    MSHookFunction(symbol, (void *)macws_qtn_proc_init_with_self,
-                   (void **)&g_macws_orig_qtn_proc_init_with_self);
+    g_macws_orig_qtn_proc_init_with_self =
+        (macws_qtn_proc_init_with_self_fn)symbol;
+    void *initImportSlot = NULL;
+    void *initImportBefore = NULL;
+    void *initImportAfter = NULL;
+    BOOL initImportRebound =
+        macws_rebind_iconservices_qtn_authenticated_import(
+            symbol, (void *)macws_qtn_proc_init_with_self, 0x88,
+            &initImportSlot, &initImportBefore, &initImportAfter);
+    dprintf(STDERR_FILENO,
+        "[macws] iconservicesagent: qtn init authenticated import "
+        "slot=%p target=%p before=%p after=%p rebound=%s\n",
+        initImportSlot,
+        ptrauth_strip(symbol, ptrauth_key_function_pointer),
+        initImportBefore, initImportAfter,
+        initImportRebound ? "YES" : "NO");
+    if (macws_runtime_diagnostics_enabled()) {
+        Dl_info symbolInfo = {0};
+        void *stripped = ptrauth_strip(
+            symbol, ptrauth_key_function_pointer);
+        (void)dladdr(stripped, &symbolInfo);
+        Dl_info importInfo = {0};
+        void *strippedImport = initImportAfter
+            ? ptrauth_strip(
+                initImportAfter, ptrauth_key_function_pointer) : NULL;
+        if (strippedImport) (void)dladdr(strippedImport, &importInfo);
+        fprintf(stderr,
+            "#### ICONSERVICES qtn hook before symbol=%p stripped=%p "
+            "image=%s base=%p import-slot=%p import=%p "
+            "import-stripped=%p "
+            "import-image=%s import-base=%p\n",
+            symbol, stripped,
+            symbolInfo.dli_fname ?: "(unknown)", symbolInfo.dli_fbase,
+            initImportSlot, initImportAfter, strippedImport,
+            importInfo.dli_fname ?: "(unknown)", importInfo.dli_fbase);
+        fflush(stderr);
+    }
     symbol = dlsym(RTLD_DEFAULT, "_qtn_proc_init");
     if (symbol) g_macws_orig_qtn_proc_init = (macws_qtn_proc_init_fn)symbol;
     symbol = dlsym(RTLD_DEFAULT, "_qtn_proc_set_flags");
@@ -23456,8 +23564,22 @@ static void macws_install_iconservices_quarantine_fallback(void) {
         g_macws_qtn_proc_get_flags = (macws_qtn_proc_get_flags_fn)symbol;
     symbol = dlsym(RTLD_DEFAULT, "_qtn_proc_apply_to_self");
     if (symbol) {
-        MSHookFunction(symbol, (void *)macws_qtn_proc_apply_to_self,
-                       (void **)&g_macws_orig_qtn_proc_apply_to_self);
+        g_macws_orig_qtn_proc_apply_to_self =
+            (macws_qtn_proc_apply_to_self_fn)symbol;
+        void *applyImportSlot = NULL;
+        void *applyImportBefore = NULL;
+        void *applyImportAfter = NULL;
+        BOOL applyImportRebound =
+            macws_rebind_iconservices_qtn_authenticated_import(
+                symbol, (void *)macws_qtn_proc_apply_to_self, 0x70,
+                &applyImportSlot, &applyImportBefore, &applyImportAfter);
+        dprintf(STDERR_FILENO,
+            "[macws] iconservicesagent: qtn apply authenticated import "
+            "slot=%p target=%p before=%p after=%p rebound=%s\n",
+            applyImportSlot,
+            ptrauth_strip(symbol, ptrauth_key_function_pointer),
+            applyImportBefore, applyImportAfter,
+            applyImportRebound ? "YES" : "NO");
     }
 }
 

@@ -25,6 +25,7 @@ macws_diagnostic_flag_paths() {
         /tmp/macws_7dtd_drawable_trace \
         /tmp/macws_7dtd_force_serial_submit \
         /tmp/macws_7dtd_jit_trace \
+        /tmp/macws_7dtd_present_trace \
         /tmp/macws_7dtd_render_trace \
         /tmp/macws_7dtd_tail_input_trace \
         /tmp/macws_allow_unsafe_pf550_capture \

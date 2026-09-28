@@ -72,6 +72,8 @@ after-stage::
 		$(THEOS_STAGING_DIR)/usr/macOS/bin/install_stray_exact_metallib.py
 	@install -m 0644 misc/add_macho_load_dylib.py \
 		$(THEOS_STAGING_DIR)/usr/macOS/bin/add_macho_load_dylib.py
+	@install -m 0644 layout/usr/macOS/bin/prepare_ventura_windowserver.py \
+		$(THEOS_STAGING_DIR)/usr/macOS/bin/prepare_ventura_windowserver.py
 	@install -m 0644 misc/patch_electron_pa_ios_va.py \
 		misc/patch_steam_cef126_pa_ios_va.py \
 		misc/refresh_steam_inventory.py \
