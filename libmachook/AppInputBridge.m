@@ -7637,8 +7637,18 @@ static BOOL MacWSMainBundleUsesFullscreenCanvasPresentation(void) {
     // than resizing the 2388x1668 desktop.  Publish that application-level
     // presentation capability here so Host can fit the exact catalog window
     // without guessing from a localized title or a transient rectangle.
+    // Runtime-confirmed on the iPad14,5 7DTD deployment: the prepared native
+    // Unity 2022.3.62f2 process publishes a focused 1366x1024 game window with
+    // bundle identifier com.The-Fun-Pimps.7-Days-To-Die and sends its real
+    // CAMetalDrawable IOSurfaces through the same direct-drawable transport.
+    // Without this capability its catalog flags were 0x49 (Focused, Visible,
+    // Resizable) while the off-screen Steam Helper was 0x20f, so fullscreen
+    // Host selected the helper and kept rendering the 2732x2048 desktop
+    // capture instead of the game's 1366x1024 drawable.
     return [identifier isEqualToString:
-        MacWSRuntimeString("com.annapurnainteractive.Stray")];
+                MacWSRuntimeString("com.annapurnainteractive.Stray")] ||
+        [identifier isEqualToString:
+                MacWSRuntimeString("com.The-Fun-Pimps.7-Days-To-Die")];
 }
 
 static NSSet *MacWSVisibleWindowNumberSnapshot(id application) {
@@ -11379,17 +11389,27 @@ static uint32_t MacWSLogicalWindowGroupID(id window, id application) {
     if (ownNumber <= 0 || (uint64_t)ownNumber > UINT32_MAX) return 0;
     uint32_t groupID = (uint32_t)ownNumber;
 
-    SEL tabGroupSelector = sel_registerName("tabGroup");
+    // Do not use NSWindow.tabGroup as a query. Runtime-confirmed on Ventura
+    // 13.4 with 7DTD's UnityWindow: the public getter enters
+    // -[NSWindow _tabGroup], creates an NSWindowStackController, then blocks
+    // synchronously in IconServices while constructing its tab-bar item. The
+    // metrics publisher must observe AppKit, never mutate it.  The private
+    // getter below returns the already-installed controller (nil for a plain
+    // window); its `windows` collection is the same membership needed for a
+    // stable logical identity.
+    SEL stackControllerSelector = sel_registerName("_windowStackController");
     if (!((MacWSMsgBoolSEL)objc_msgSend)(
             window, sel_registerName("respondsToSelector:"),
-            tabGroupSelector)) return groupID;
-    id tabGroup = ((MacWSMsgID)objc_msgSend)(window, tabGroupSelector);
-    if (!tabGroup) return groupID;
+            stackControllerSelector)) return groupID;
+    id stackController = ((MacWSMsgID)objc_msgSend)(
+        window, stackControllerSelector);
+    if (!stackController) return groupID;
     SEL windowsSelector = sel_registerName("windows");
     if (!((MacWSMsgBoolSEL)objc_msgSend)(
-            tabGroup, sel_registerName("respondsToSelector:"),
+            stackController, sel_registerName("respondsToSelector:"),
             windowsSelector)) return groupID;
-    id groupWindows = ((MacWSMsgID)objc_msgSend)(tabGroup, windowsSelector);
+    id groupWindows = ((MacWSMsgID)objc_msgSend)(
+        stackController, windowsSelector);
     NSUInteger groupCount = [groupWindows count];
 
     // NSWindow.windowNumber is the capture identity, not the user's window
@@ -11399,7 +11419,7 @@ static uint32_t MacWSLogicalWindowGroupID(id window, id application) {
     // smallest number.  Member associations carry the identity across a
     // native merge that replaces the tab-group object.
     id token = objc_getAssociatedObject(
-        tabGroup, &MacWSLogicalWindowGroupAssociationKey);
+        stackController, &MacWSLogicalWindowGroupAssociationKey);
     if (!token) {
         for (NSUInteger index = 0; index < groupCount && !token; index++) {
             token = objc_getAssociatedObject(
@@ -11437,7 +11457,7 @@ static uint32_t MacWSLogicalWindowGroupID(id window, id application) {
             token, sel_registerName("unsignedIntValue"));
     }
     if (token && groupID != 0) {
-        objc_setAssociatedObject(tabGroup,
+        objc_setAssociatedObject(stackController,
             &MacWSLogicalWindowGroupAssociationKey, token,
             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         for (NSUInteger index = 0; index < groupCount; index++) {

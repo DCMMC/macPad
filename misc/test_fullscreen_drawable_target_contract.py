@@ -16,6 +16,23 @@ COMPOSITOR = (ROOT / "MacWSHost/Rendering/MacWSCatalystDrawableCompositor.m").re
 
 
 class FullscreenDrawableTargetContract(unittest.TestCase):
+    def test_explicit_fullscreen_window_survives_cold_catalog_connection(self):
+        route = HOST.split(
+            "- (BOOL)activateMacWindowIDInFullscreenWorkspace:", 1
+        )[1].split("- (void)performSemanticShortcutForDiagnostics:", 1)[0]
+        self.assertIn("_pendingFullscreenActivationWindowID = windowID", route)
+        self.assertIn("_pendingFullscreenActivationOwnerPID = ownerPID", route)
+        self.assertIn("CACurrentMediaTime() + 10.0", route)
+
+        catalog = HOST.split(
+            "- (void)metalView:(MacWSMetalView *)view\n  receivedWindows:", 1
+        )[1].split("// An explicit activation carries", 1)[0]
+        match = catalog.index("fullscreen-window-route matched")
+        selection = catalog.index("frontmostInputApplicationPIDAmongPIDs")
+        self.assertLess(match, selection)
+        self.assertIn("[self activateMacWindow:requested]", catalog)
+        self.assertIn("fullscreen-window-route expired", catalog)
+
     def test_completed_drawable_is_only_a_passive_catalog_retention(self):
         selector = HOST.split("- (void)metalView:(MacWSMetalView *)view\n  receivedWindows:", 1)[1]
         selector = selector.split("// An explicit activation carries", 1)[0]

@@ -88,6 +88,7 @@ class RestoreBootContract(unittest.TestCase):
         self.assertNotIn('chown -R', repair)
         self.assertIn('[ ! -L "$cache_path" ]', repair)
         self.assertIn('[ ! -L "$state_dir" ]', repair)
+
     def test_office_helper_gets_project_policy_before_trust_restore(self):
         postinst = (ROOT / "layout/usr/macOS/bin/postinst.sh").read_text()
         helper = (
@@ -98,6 +99,7 @@ class RestoreBootContract(unittest.TestCase):
             postinst,
         )
         self.assertNotIn("add_all_trustcache \\\n    " + helper, postinst)
+
 
 if __name__ == "__main__":
     unittest.main()

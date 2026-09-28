@@ -155,6 +155,13 @@ class SevenDaysToDieSteamRuntimeTests(unittest.TestCase):
         )[1].split("CGFloat normalizedX", 1)[0]
         self.assertIn("queueForGameTick, NO", key_route)
 
+    def test_native_player_publishes_fullscreen_drawable_capability(self):
+        predicate = self.app_input.split(
+            "static BOOL MacWSMainBundleUsesFullscreenCanvasPresentation", 1
+        )[1].split("static NSSet *MacWSVisibleWindowNumberSnapshot", 1)[0]
+        self.assertIn("com.annapurnainteractive.Stray", predicate)
+        self.assertIn("com.The-Fun-Pimps.7-Days-To-Die", predicate)
+
     def test_modifier_poll_uses_current_event_only_at_exact_unity_callsite(self):
         compatibility = self.app_input.split(
             "static uint64_t MacWSSevenDaysCGEventSourceFlagsState", 1

@@ -1523,6 +1523,10 @@ typedef void (^MacWSCompactMenuSelection)(MacWSMenuItem *item);
     int32_t _fullscreenCatalogRetainedInputPID;
     uint32_t _fullscreenActivatedInputWindowID;
     int32_t _fullscreenActivatedInputOwnerPID;
+    uint32_t _pendingFullscreenActivationWindowID;
+    int32_t _pendingFullscreenActivationOwnerPID;
+    NSString *_pendingFullscreenActivationTitle;
+    CFTimeInterval _pendingFullscreenActivationDeadline;
     BOOL _bootstrapTerminalPending;
     BOOL _bootstrapWindowReplacementPending;
     BOOL _bootstrapWorkspaceStartInFlight;
@@ -2122,9 +2126,29 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         windowID == 0 || ownerPID <= 1) return NO;
     for (MacWSStreamWindow *window in _streamWindows) {
         if (window.descriptor.windowID == windowID &&
-            window.descriptor.ownerPID == ownerPID)
+            window.descriptor.ownerPID == ownerPID) {
+            // A newer exact request supersedes any unresolved cold-catalog
+            // request. Do not let the latter reactivate an older window when
+            // the next catalog arrives.
+            _pendingFullscreenActivationOwnerPID = 0;
+            _pendingFullscreenActivationWindowID = 0;
+            _pendingFullscreenActivationTitle = nil;
+            _pendingFullscreenActivationDeadline = 0.0;
             return [self activateMacWindow:window];
+        }
     }
+    // A URL/new-window request can connect a cold fullscreen Scene before its
+    // first DisplayStream catalog arrives. Runtime-confirmed on the iPad14,5
+    // 7DTD target: the exact 96438/125 request reached this branch, the first
+    // catalog arrived 38 ms later, and the old one-shot implementation forgot
+    // the identity and selected Steam Helper 96255 instead. Retain only the
+    // exact PID/window request for a bounded interval; receivedWindows:
+    // validates both fields against the authoritative catalog before calling
+    // the ordinary activation transaction.
+    _pendingFullscreenActivationWindowID = windowID;
+    _pendingFullscreenActivationOwnerPID = ownerPID;
+    _pendingFullscreenActivationTitle = [title copy];
+    _pendingFullscreenActivationDeadline = CACurrentMediaTime() + 10.0;
     [_metalView requestStreamWindowList];
     [self setNotice:[NSString stringWithFormat:@"%@ 已在当前全屏工作区中打开，正在等待窗口目录更新。",
         title.length ? title : @"macOS 应用"] success:YES];
@@ -6817,6 +6841,45 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     _streamWindows = [windows copy];
     if (_sceneDestructionRequested) return;
     if (_streamMode == MacWSStreamModeFullscreen) {
+        if (_pendingFullscreenActivationOwnerPID > 1 &&
+            _pendingFullscreenActivationWindowID != 0) {
+            MacWSStreamWindow *requested = nil;
+            for (MacWSStreamWindow *window in windows) {
+                if (window.descriptor.ownerPID ==
+                        _pendingFullscreenActivationOwnerPID &&
+                    window.descriptor.windowID ==
+                        _pendingFullscreenActivationWindowID) {
+                    requested = window;
+                    break;
+                }
+            }
+            if (requested) {
+                int32_t requestedPID =
+                    _pendingFullscreenActivationOwnerPID;
+                uint32_t requestedWindow =
+                    _pendingFullscreenActivationWindowID;
+                _pendingFullscreenActivationOwnerPID = 0;
+                _pendingFullscreenActivationWindowID = 0;
+                _pendingFullscreenActivationTitle = nil;
+                _pendingFullscreenActivationDeadline = 0.0;
+                MacWSLog(@"fullscreen-window-route matched pid=%d window=%u "
+                         "flags=%#x source=deferred-exact-catalog",
+                         requestedPID, requestedWindow,
+                         requested.descriptor.flags);
+                [self activateMacWindow:requested];
+            } else if (CACurrentMediaTime() >=
+                       _pendingFullscreenActivationDeadline) {
+                MacWSLog(@"fullscreen-window-route expired pid=%d window=%u "
+                         "title=%@ source=deferred-exact-catalog",
+                         _pendingFullscreenActivationOwnerPID,
+                         _pendingFullscreenActivationWindowID,
+                         _pendingFullscreenActivationTitle ?: @"");
+                _pendingFullscreenActivationOwnerPID = 0;
+                _pendingFullscreenActivationWindowID = 0;
+                _pendingFullscreenActivationTitle = nil;
+                _pendingFullscreenActivationDeadline = 0.0;
+            }
+        }
         NSMutableSet<NSNumber *> *eligiblePIDs = [NSMutableSet set];
         for (MacWSStreamWindow *window in windows) {
             MacWSStreamWindowDescriptor descriptor = window.descriptor;

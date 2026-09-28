@@ -122,6 +122,16 @@ int main(void) { @autoreleasepool {
             self.assertIn('CGSize ' + variable +
                           ' = MacWSOptionalDiagnosticWindowSize(', block)
 
+    def test_logical_group_observes_existing_stack_without_creating_one(self):
+        source = (ROOT / 'libmachook/AppInputBridge.m').read_text()
+        start = source.index('static uint32_t MacWSLogicalWindowGroupID(')
+        end = source.index('\nstatic void MacWSSendDisplayInvalidation(',
+                           start)
+        helper = source[start:end]
+        self.assertIn('sel_registerName("_windowStackController")', helper)
+        self.assertNotIn('sel_registerName("tabGroup")', helper)
+        self.assertIn('sel_registerName("windows")', helper)
+
 
 if __name__ == '__main__':
     unittest.main()
