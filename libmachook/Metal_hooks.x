@@ -453,9 +453,13 @@ static BOOL macws_stray_present_trace_enabled(void) {
     static dispatch_once_t onceToken;
     static BOOL enabled = NO;
     dispatch_once(&onceToken, ^{
-        enabled = macws_is_stray_process() &&
-            (macws_stray_full_render_trace_enabled() ||
-             access("/tmp/macws_stray_present_trace", F_OK) == 0);
+        enabled =
+            (macws_is_stray_process() &&
+             (macws_stray_full_render_trace_enabled() ||
+              access("/tmp/macws_stray_present_trace", F_OK) == 0)) ||
+            (macws_is_7dtd_process() &&
+             (macws_stray_full_render_trace_enabled() ||
+              access("/tmp/macws_7dtd_present_trace", F_OK) == 0));
     });
     return enabled;
 }

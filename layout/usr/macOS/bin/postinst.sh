@@ -1381,10 +1381,13 @@ for application_bundle in /var/mnt/rootfs/Applications/*.app; do
         "$(basename "$application_bundle" .app)"
 done
 # Microsoft Office's applications talk to this helper before an injected app
-# can ask autosignd to repair it.  Its project+native merged signature persists
-# in the rootfs, while Dopamine's dynamic trustcache does not survive a reboot.
-# Re-register the installed image without changing its identifier/entitlements.
-add_all_trustcache \
+# can ask autosignd to repair it.  A freshly expanded Microsoft 16.91 package
+# carries only its vendor application identifier here; runtime inspection on
+# iPad14,4 / iPadOS 16.2 (2026-09-29) showed that the known-working helper also
+# needs the project's native+MacWS merged launch policy.  Establish that
+# persistent invariant once, preserving the vendor identity with ldid -M, then
+# restore every architecture's dynamic trust entry on later boots.
+ensure_project_signature_and_trustcache \
     /var/mnt/rootfs/Library/PrivilegedHelperTools/com.microsoft.office.licensingV2.helper
 # vnc server
 add_all_trustcache /var/mnt/rootfs/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart

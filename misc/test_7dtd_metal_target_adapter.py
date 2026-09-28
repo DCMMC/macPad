@@ -6,6 +6,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = (ROOT / "MTLCompilerBypassOSCheck/Tweak.x").read_text()
+METAL_HOOKS = (ROOT / "libmachook/Metal_hooks.x").read_text()
 
 
 class SevenDaysMetalTargetAdapter(unittest.TestCase):
@@ -45,6 +46,13 @@ class SevenDaysMetalTargetAdapter(unittest.TestCase):
         self.assertIn("memcpy(bytes + workingOffset, targetArgument", self.request_path)
         self.assertIn("OrigMTLCodeGenServiceBuildRequest(", self.request_path)
         self.assertNotIn("vertexFunction must not be nil", self.request_path)
+
+    def test_present_only_trace_is_available_without_full_encoder_trace(self):
+        predicate = METAL_HOOKS.split(
+            "static BOOL macws_stray_present_trace_enabled(void)", 1
+        )[1].split("static BOOL macws_catalyst_direct_drawable_enabled", 1)[0]
+        self.assertIn("macws_is_7dtd_process()", predicate)
+        self.assertIn('access("/tmp/macws_7dtd_present_trace", F_OK)', predicate)
 
 
 if __name__ == "__main__":

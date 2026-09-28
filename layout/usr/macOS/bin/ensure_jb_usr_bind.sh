@@ -26,8 +26,17 @@ canonical_parent=$(realpath "$parent_dir")
     exit 1
 }
 
-if "$system_mount" | grep -Fq "/var/jb/usr on $canonical_target (" ||
-   "$system_mount" | grep -Fq "/var/jb on $canonical_parent ("; then
+# Dopamine's /var/jb is a moving preboot symlink.  mount(8) therefore prints
+# the resolved procursus source (for example
+# /private/preboot/.../procursus/usr), not the stable /var/jb/usr spelling
+# used by this script.  The mountpoint is the invariant: require an actual
+# mount at the canonical target, then verify the exact packaged proxy below.
+# Runtime-confirmed on iPad14,4 / iPadOS 16.2 (2026-09-29): the valid bind was
+# printed as `.../procursus/usr on .../private/var/jb/usr (bindfs, ...)`; the
+# old source-qualified grep missed it and falsely rejected the populated
+# mountpoint as an unsafe directory.
+if "$system_mount" | grep -Fq " on $canonical_target (" ||
+   "$system_mount" | grep -Fq " on $canonical_parent ("; then
     [ -x "$target_dir/$proxy_relative" ] || {
         echo "MacWS: existing /var/jb bind does not expose the XPC proxy" >&2
         exit 1

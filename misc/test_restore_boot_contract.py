@@ -17,6 +17,10 @@ class RestoreBootContract(unittest.TestCase):
         self.assertIn('[ -x "$system_mount" ]', BIND)
         self.assertEqual(BIND.count('if "$system_mount" | grep -Fq'), 1)
         self.assertIn('   "$system_mount" | grep -Fq', BIND)
+        self.assertIn('grep -Fq " on $canonical_target ("', BIND)
+        self.assertIn('grep -Fq " on $canonical_parent ("', BIND)
+        self.assertNotIn(
+            'grep -Fq "/var/jb/usr on $canonical_target ("', BIND)
 
     def test_filtered_restore_recreates_only_the_volatile_tmp_directory(self):
         self.assertIn("ROOTFS=/var/mnt/rootfs", AUTOSIGND)
@@ -84,6 +88,16 @@ class RestoreBootContract(unittest.TestCase):
         self.assertNotIn('chown -R', repair)
         self.assertIn('[ ! -L "$cache_path" ]', repair)
         self.assertIn('[ ! -L "$state_dir" ]', repair)
+    def test_office_helper_gets_project_policy_before_trust_restore(self):
+        postinst = (ROOT / "layout/usr/macOS/bin/postinst.sh").read_text()
+        helper = (
+            "/var/mnt/rootfs/Library/PrivilegedHelperTools/"
+            "com.microsoft.office.licensingV2.helper")
+        self.assertIn(
+            "ensure_project_signature_and_trustcache \\\n    " + helper,
+            postinst,
+        )
+        self.assertNotIn("add_all_trustcache \\\n    " + helper, postinst)
 
 if __name__ == "__main__":
     unittest.main()
