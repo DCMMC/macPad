@@ -1578,12 +1578,16 @@ restore_cold_boot_trust() {
         "$ROOTFS/System/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" \
         /var/jb/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate \
         "$ROOTFS/bin/bash" \
+        "$ROOTFS$DEFAULTS_BIN" \
         "$ROOTFS/System/Library/CoreServices/launchservicesd" \
         "$ROOTFS/System/Library/CoreServices/launchservicesd.dylib" \
+        "$ROOTFS$LSREGISTER_BIN" \
         "$ROOTFS/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/CursorAsset" \
         "$ROOTFS/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/Resources/CursorAsset_base" \
         "$ROOTFS$P_SHAREDFILELISTD" \
         "$ROOTFS/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer" \
+        "$ROOTFS$VNC_BIN" \
+        "$ROOTFS$TERM_BIN" \
         "$ROOTFS/System/Library/PrivateFrameworks/SystemStatusServer.framework/Support/systemstatusd" \
         "$ROOTFS/usr/local/libexec/macws-cfprefsd" \
         "$ROOTFS/usr/sbin/coreaudiod" \
@@ -1766,6 +1770,9 @@ ensure_cfprefsd_dirhelper_tree() {
     local temporary_leaf="$temporary_user/TemporaryItems"
     local temporary_mobile="$temporary_root/folders.501"
     local temporary_mobile_leaf="$temporary_mobile/TemporaryItems"
+    local root_home="$ROOTFS/private/var/root"
+    local root_library="$root_home/Library"
+    local root_preferences="$root_library/Preferences"
     local mobile_home="$ROOTFS/Users/mobile"
     local mobile_library="$mobile_home/Library"
     local mobile_preferences="$mobile_library/Preferences"
@@ -1775,9 +1782,11 @@ ensure_cfprefsd_dirhelper_tree() {
     local mobile_temp_dir="$mobile_user_root/T"
 
     mkdir -p "$temporary_leaf" "$temporary_mobile_leaf" \
+        "$root_preferences" \
         "$mobile_preferences" "$mobile_user_dir" "$mobile_cache_dir" \
         "$mobile_temp_dir" || return 1
     chown root:wheel "$temporary_root" "$temporary_user" "$temporary_leaf" \
+        "$root_home" "$root_library" "$root_preferences" \
         2>/dev/null || true
     chown 501:501 "$temporary_mobile" "$temporary_mobile_leaf" \
         "$mobile_home" "$mobile_library" "$mobile_preferences" \
@@ -1786,6 +1795,7 @@ ensure_cfprefsd_dirhelper_tree() {
         2>/dev/null || return 1
     chmod 1311 "$temporary_root" || return 1
     chmod 0700 "$temporary_user" "$temporary_leaf" || return 1
+    chmod 0700 "$root_home" "$root_library" "$root_preferences" || return 1
     chmod 0700 "$temporary_mobile" "$temporary_mobile_leaf" \
         "$mobile_preferences" || return 1
     chmod 0755 "$mobile_home" "$mobile_library" || return 1

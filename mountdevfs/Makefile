@@ -6,11 +6,10 @@ include $(THEOS)/makefiles/common.mk
 TOOL_NAME = mountdevfs
 
 mountdevfs_FILES = main.c
-# Sign ad-hoc only (no entitlements). mountdevfs must mount(2) devfs; a bare
-# trustcached platform binary is allowed to, but signing it with the project
-# entitlements.plist puts it in a restrictive sandbox profile that DENIES the
-# mount (EPERM "Operation not permitted"). So do NOT add a CODESIGN_FLAGS
-# entitlements file here.
+# Use the same narrow identity as the Dopamine-compatible bindfs helper. The
+# helper's mount authority itself comes from main.c's bounded libjailbreak
+# credential transaction; never sign it with the broad macOS-process profile.
+mountdevfs_CODESIGN_FLAGS = -Sentitlements.plist
 mountdevfs_INSTALL_PATH = /usr/macOS/bin
 
 include $(THEOS_MAKE_PATH)/tool.mk

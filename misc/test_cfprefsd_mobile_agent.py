@@ -79,6 +79,16 @@ class MobileCFPreferencesAgentTests(unittest.TestCase):
         tree = GUI.split("ensure_cfprefsd_dirhelper_tree()", 1)[1].split(
             "ensure_launchservices_session_user_dir()", 1
         )[0]
+        self.assertIn('root_home="$ROOTFS/private/var/root"', tree)
+        self.assertIn('root_preferences="$root_library/Preferences"', tree)
+        self.assertIn(
+            'chown root:wheel "$temporary_root" "$temporary_user" "$temporary_leaf"',
+            tree,
+        )
+        self.assertIn(
+            'chmod 0700 "$root_home" "$root_library" "$root_preferences"',
+            tree,
+        )
         self.assertIn('temporary_mobile="$temporary_root/folders.501"', tree)
         self.assertIn('chown 501:501 "$temporary_mobile"', tree)
         self.assertIn('chmod 0700 "$temporary_mobile" "$temporary_mobile_leaf"', tree)

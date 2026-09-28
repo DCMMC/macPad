@@ -57,6 +57,34 @@ class RestoreBootContract(unittest.TestCase):
             'NathanLR cannot admit the macOS shared-cache closure',
             PACKAGE_POSTINST)
 
+    def test_package_restores_native_host_trust_before_publishing_it(self):
+        declaration = (
+            'HOST_APP=/var/jb/Applications/MacWSHost.app/MacWSHost')
+        trust = 'trust_installed_macho "$HOST_APP"'
+        publish = (
+            '/var/jb/usr/bin/uicache -p '
+            '/var/jb/Applications/MacWSHost.app')
+        self.assertIn(declaration, PACKAGE_POSTINST)
+        self.assertEqual(PACKAGE_POSTINST.count(trust), 1)
+        self.assertLess(PACKAGE_POSTINST.index(trust),
+                        PACKAGE_POSTINST.index(publish))
+
+    def test_package_repairs_only_bounded_nas_owned_runtime_state(self):
+        self.assertIn('normalize_restored_runtime_metadata()',
+                      PACKAGE_POSTINST)
+        self.assertIn(
+            '"$cache_root/dyld_shared_cache_arm64e.01"',
+            PACKAGE_POSTINST)
+        self.assertIn('"$ROOTFS/var/db/macws/boot-trust"',
+                      PACKAGE_POSTINST)
+        self.assertIn('"$ROOTFS/var/db/macws/settings-runtime"',
+                      PACKAGE_POSTINST)
+        repair = PACKAGE_POSTINST.split(
+            'normalize_restored_runtime_metadata() {', 1)[1].split('\n}', 1)[0]
+        self.assertNotIn('chown -R', repair)
+        self.assertIn('[ ! -L "$cache_path" ]', repair)
+        self.assertIn('[ ! -L "$state_dir" ]', repair)
+
 
 if __name__ == "__main__":
     unittest.main()

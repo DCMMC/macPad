@@ -86,6 +86,86 @@ echo "$MACWS_LOCAL_OUTPUT"
         self.assertNotIn('MACWS_AUDIO_RENDER_BRIDGE',
                          job.get('EnvironmentVariables', {}))
 
+    def test_audio_bridge_does_not_inline_hook_shared_cache_text(self):
+        bridge = (ROOT / 'libmachook/AudioRenderBridge.m').read_text()
+        self.assertNotIn('MSHookFunction(', bridge)
+        self.assertIn('dlsym(RTLD_NEXT, "AudioUnitSetProperty")', bridge)
+        for replacement, original in (
+                ('MacWSAudioUnitSetProperty', 'AudioUnitSetProperty'),
+                ('MacWSAudioOutputUnitStart', 'AudioOutputUnitStart'),
+                ('MacWSAudioOutputUnitStop', 'AudioOutputUnitStop'),
+                ('MacWSAudioComponentInstanceDispose',
+                 'AudioComponentInstanceDispose')):
+            self.assertIn(f'DYLD_INTERPOSE({replacement}, {original})',
+                          ' '.join(bridge.split()))
+
+    def test_mountdevfs_uses_only_the_narrow_mount_profile(self):
+        with (ROOT / 'mountdevfs/entitlements.plist').open('rb') as stream:
+            entitlements = plistlib.load(stream)
+        self.assertEqual(entitlements, {
+            'com.apple.private.bindfs-allow': True,
+            'com.apple.private.security.disk-device-access': True,
+            'platform-application': True,
+        })
+        makefile = (ROOT / 'mountdevfs/Makefile').read_text()
+        self.assertIn('mountdevfs_CODESIGN_FLAGS = -Sentitlements.plist',
+                      makefile)
+        self.assertNotIn('-S../entitlements.plist', makefile)
+        source = (ROOT / 'mountdevfs/main.c').read_text()
+        self.assertIn('dlsym(\n            jailbreak, '
+                      '"jbclient_root_steal_ucred")', source)
+        self.assertIn('int result = mount("devfs", mp, 0, NULL);', source)
+        self.assertIn('int restoreStatus = steal(originalCredential, NULL);',
+                      source)
+
+    def test_agx_device_info_preserves_16_4_size_then_falls_back_for_16_3(self):
+        hooks = (ROOT / 'libmachook/mac_hooks.m').read_text()
+        self.assertNotIn(
+            'selector == 0x100 && outStructCnt && *outStructCnt == 0x78) '
+            '*outStructCnt = 0x70;', hooks)
+        for function, following, outer_guard in (
+                ('IOReturn IOConnectCallMethod_new(',
+                 'IOReturn IOConnectCallScalarMethod_new(', '!skip'),
+                ('IOReturn IOConnectCallStructMethod_new(',
+                 'IOReturn IOConnectCallAsyncMethod_new(', '!struct_skip')):
+            body = hooks.split(function, 1)[1].split(following, 1)[0]
+            first_call = body.index('r = IOConnectCall')
+            fallback = body.index('deviceInfoRequestedSize == 0x78')
+            retry_size = body.index('*outStructCnt = 0x70;', fallback)
+            second_call = body.index('r = IOConnectCall', retry_size)
+            self.assertLess(first_call, fallback)
+            self.assertLess(fallback, retry_size)
+            self.assertLess(retry_size, second_call)
+            self.assertIn('r == kIOReturnBadArgument', body[fallback:retry_size])
+            self.assertIn(outer_guard, body[fallback - 100:fallback])
+            self.assertIn('MACWS_AGX_DEVICE_INFO_ABI_NATIVE_78', body)
+            self.assertIn('MACWS_AGX_DEVICE_INFO_ABI_LEGACY_70', body)
+
+        resource_translation = hooks.split(
+            'int patched = 0;', 1
+        )[1].split('struct macws_submit_diag_result', 1)[0]
+        type_zero = resource_translation.split(
+            'if(bc == 0 && agxType == 0) {', 1
+        )[1].split('if(agxType == 0x82', 1)[0]
+        self.assertIn('native_78_layout = atomic_load(',
+                      resource_translation)
+        self.assertIn('if (!native_78_layout) {', type_zero)
+        self.assertIn('if (!native_78_layout && !(f15 & 0x08))', type_zero)
+        self.assertIn('AGXIOC type0 native-0x78 layout preserved', type_zero)
+        self.assertIn('if(agxType == 0x82 && !native_78_layout)',
+                      resource_translation)
+        self.assertIn('macws_probe_agx_device_info_abi(*connect);', hooks)
+
+        submit_policy = hooks.split(
+            'int translated_agx_submit =', 1
+        )[1].split('unsigned queue_qos_diag_sequence', 1)[0]
+        self.assertIn('int native78_submit_layout = translated_agx_submit &&',
+                      submit_policy)
+        self.assertIn('MACWS_AGX_DEVICE_INFO_ABI_NATIVE_78', submit_policy)
+        self.assertIn('int submit_fix_active = translated_agx_submit &&\n'
+                      '        !native78_submit_layout;', submit_policy)
+        self.assertNotIn('native78_raw_submit', hooks)
+
     def test_m2_software_audio_cadence_excludes_callback_work(self):
         bridge = (ROOT / 'libmachook/AudioRenderBridge.m').read_text()
         self.assertIn('strcmp(machine, "iPad14,5") == 0;', bridge)

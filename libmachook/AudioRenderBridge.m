@@ -1,6 +1,5 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <CoreFoundation/CoreFoundation.h>
-#import <substrate.h>
 
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -17,6 +16,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "interpose.h"
 #include "macws_audio_bridge.h"
 
 typedef OSStatus (*MacWSAudioUnitSetPropertyFn)(
@@ -49,12 +49,39 @@ static MacWSAudioOutputUnitStartFn gMacWSOriginalAudioOutputUnitStart;
 static MacWSAudioOutputUnitStopFn gMacWSOriginalAudioOutputUnitStop;
 static MacWSAudioComponentInstanceDisposeFn
     gMacWSOriginalAudioComponentInstanceDispose;
-static _Atomic(bool) gMacWSAudioHookInstalled;
+static pthread_once_t gMacWSAudioSymbolsOnce = PTHREAD_ONCE_INIT;
 static _Atomic(uint32_t) gMacWSAudioProducerSerial = 1;
 static uint64_t gMacWSAudioOwnerSilenceTicks;
 static pthread_mutex_t gMacWSAudioContextsLock = PTHREAD_MUTEX_INITIALIZER;
 static MacWSAudioRenderContext *gMacWSAudioContexts;
 static _Atomic(int) gMacWSSoftwareCadenceMode = -1;
+
+static void MacWSResolveAudioSymbols(void) {
+    // These entry points live in the Ventura shared cache.  Inline-hooking
+    // them with MSHookFunction asks Substrate to discover a function's length
+    // by reading forward through instructions.  Runtime-confirmed on the M1
+    // iPad13,11 cache: AudioUnitSetProperty is adjacent to an unreadable cache
+    // page, so Substrate's findFunctionSize crossed that boundary and SIGBUS'd
+    // every utility process which happened to load AudioToolbox (including
+    // /usr/bin/codesign).  Resolve the un-interposed implementations through
+    // RTLD_NEXT and let dyld's supported __interpose mechanism redirect calls;
+    // no shared-cache text is scanned or modified.
+    gMacWSOriginalAudioUnitSetProperty = (MacWSAudioUnitSetPropertyFn)
+        dlsym(RTLD_NEXT, "AudioUnitSetProperty");
+    gMacWSAudioUnitGetProperty = (MacWSAudioUnitGetPropertyFn)
+        dlsym(RTLD_NEXT, "AudioUnitGetProperty");
+    gMacWSOriginalAudioOutputUnitStart = (MacWSAudioOutputUnitStartFn)
+        dlsym(RTLD_NEXT, "AudioOutputUnitStart");
+    gMacWSOriginalAudioOutputUnitStop = (MacWSAudioOutputUnitStopFn)
+        dlsym(RTLD_NEXT, "AudioOutputUnitStop");
+    gMacWSOriginalAudioComponentInstanceDispose =
+        (MacWSAudioComponentInstanceDisposeFn)
+            dlsym(RTLD_NEXT, "AudioComponentInstanceDispose");
+}
+
+static void MacWSEnsureAudioSymbols(void) {
+    pthread_once(&gMacWSAudioSymbolsOnce, MacWSResolveAudioSymbols);
+}
 
 static BOOL MacWSAudioBridgeProcessEligible(void) {
     const char *program = getprogname();
@@ -438,6 +465,7 @@ static void *MacWSSoftwareAudioCadenceMain(void *reference) {
 }
 
 static OSStatus MacWSAudioOutputUnitStart(AudioUnit unit) {
+    MacWSEnsureAudioSymbols();
     MacWSAudioRenderContext *context = MacWSFindAudioContext(unit);
     if (!context || !MacWSNeedsSoftwareAudioCadence()) {
         return gMacWSOriginalAudioOutputUnitStart
@@ -465,6 +493,7 @@ static OSStatus MacWSAudioOutputUnitStart(AudioUnit unit) {
 }
 
 static OSStatus MacWSAudioOutputUnitStop(AudioUnit unit) {
+    MacWSEnsureAudioSymbols();
     MacWSAudioRenderContext *context = MacWSFindAudioContext(unit);
     if (!context || !MacWSNeedsSoftwareAudioCadence()) {
         return gMacWSOriginalAudioOutputUnitStop
@@ -482,7 +511,8 @@ static OSStatus MacWSAudioOutputUnitStop(AudioUnit unit) {
 }
 
 static OSStatus MacWSAudioComponentInstanceDispose(
-        AudioComponentInstance instance) {
+    AudioComponentInstance instance) {
+    MacWSEnsureAudioSymbols();
     MacWSAudioRenderContext *context = MacWSFindAudioContext(instance);
     if (context) {
         // Do not forward a second stop during ordinary M1 disposal.  Only the
@@ -513,6 +543,7 @@ static OSStatus MacWSAudioUnitSetProperty(
         AudioUnit unit, AudioUnitPropertyID property,
         AudioUnitScope scope, AudioUnitElement element,
         const void *data, UInt32 dataSize) {
+    MacWSEnsureAudioSymbols();
     if (!gMacWSOriginalAudioUnitSetProperty) return kAudio_ParamError;
     if (property != kAudioUnitProperty_SetRenderCallback ||
         scope != kAudioUnitScope_Input || !data ||
@@ -570,30 +601,14 @@ static OSStatus MacWSAudioUnitSetProperty(
 
 void MacWSInstallAudioRenderBridge(void) {
     if (!MacWSAudioBridgeProcessEligible()) return;
-    bool expected = false;
-    if (!atomic_compare_exchange_strong(
-            &gMacWSAudioHookInstalled, &expected, true))
-        return;
-    void *setProperty = dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
-    gMacWSAudioUnitGetProperty = (MacWSAudioUnitGetPropertyFn)
-        dlsym(RTLD_DEFAULT, "AudioUnitGetProperty");
-    void *start = dlsym(RTLD_DEFAULT, "AudioOutputUnitStart");
-    void *stop = dlsym(RTLD_DEFAULT, "AudioOutputUnitStop");
-    void *dispose = dlsym(RTLD_DEFAULT, "AudioComponentInstanceDispose");
-    if (!setProperty || !gMacWSAudioUnitGetProperty || !start || !stop ||
-        !dispose) {
-        atomic_store(&gMacWSAudioHookInstalled, false);
-        return;
-    }
-    MSHookFunction(setProperty, (void *)MacWSAudioUnitSetProperty,
-                   (void **)&gMacWSOriginalAudioUnitSetProperty);
-    MSHookFunction(start, (void *)MacWSAudioOutputUnitStart,
-                   (void **)&gMacWSOriginalAudioOutputUnitStart);
-    MSHookFunction(stop, (void *)MacWSAudioOutputUnitStop,
-                   (void **)&gMacWSOriginalAudioOutputUnitStop);
-    MSHookFunction(dispose, (void *)MacWSAudioComponentInstanceDispose,
-                   (void **)&gMacWSOriginalAudioComponentInstanceDispose);
+    MacWSEnsureAudioSymbols();
 }
+
+DYLD_INTERPOSE(MacWSAudioUnitSetProperty, AudioUnitSetProperty)
+DYLD_INTERPOSE(MacWSAudioOutputUnitStart, AudioOutputUnitStart)
+DYLD_INTERPOSE(MacWSAudioOutputUnitStop, AudioOutputUnitStop)
+DYLD_INTERPOSE(MacWSAudioComponentInstanceDispose,
+               AudioComponentInstanceDispose)
 
 __attribute__((constructor)) static void MacWSInitializeAudioRenderBridge(void) {
     // Audio output is a production capability, including applications

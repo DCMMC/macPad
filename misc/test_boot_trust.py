@@ -191,6 +191,10 @@ class BootTrustTests(unittest.TestCase):
         for required in ('Hydra.framework', 'steamapps/macws-runtime',
                          '/Applications/*.app', 'launchservicesd.dylib',
                          'opt/local/libexec/macws-cursor',
+                         '"$ROOTFS$DEFAULTS_BIN"',
+                         '"$ROOTFS$LSREGISTER_BIN"',
+                         '"$ROOTFS$VNC_BIN"',
+                         '"$ROOTFS$TERM_BIN"',
                          '--resource-index', '--manifest'):
             self.assertIn(required, method)
         self.assertLess(method.index('"$@" || return 1'),
