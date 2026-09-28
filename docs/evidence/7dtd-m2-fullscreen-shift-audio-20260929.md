@@ -111,3 +111,46 @@ This runtime-confirms that the game owns the PCM ring, publishes at roughly
 48 kHz, and that the native AudioQueue callback consumes it. It validates the
 software-to-hardware callback path; physical audibility was not measured by a
 microphone in this run.
+
+## Consecutive Steam generations and duplicate-player load
+
+The final package exposed a separate lifecycle defect after the initial
+stress run. Two consecutive Steam clients were started with `-applaunch
+251570`. The first client exited without stopping its checked-in game, then
+the replacement Steam client launched the same signed runtime again. The
+runtime process inventory was:
+
+```text
+30667     1 ... 62.0% .../7DaysToDie-ARM.app/.../7 Days To Die -from-steam
+31118 30695 ... 59.3% .../7DaysToDie-ARM.app/.../7 Days To Die -from-steam
+```
+
+The Host independently received completed 1366x1024 direct drawables from
+both PID 30667/layer 41 and PID 31118/layer 78. `lsappinfo` and the AppKit
+window catalog showed PID 30667 as the foreground, onscreen instance; its
+audio-ring owner token was also `0x77cb` (30667). PID 31118 was offscreen but
+still consumed a comparable CPU share and submitted frames. This is
+runtime-confirmed by `/var/mobile/Library/Logs/MacWSHost.log`,
+`/var/jb/var/mobile/steam-runtime.log`, `ps`, and `lsappinfo` on the target.
+
+The signed-runtime fallback now restores LaunchServices' normal
+single-instance invariant at the correct upstream layer. Before launching the
+exact 7DTD arm64 runtime, it asks `NSRunningApplication` for the bundle's
+already checked-in applications, verifies the exact executable path, live PID,
+and non-terminated state, then returns that real application object to Steam.
+It neither fabricates launch success nor kills/replaces a valid game. The
+manually observed duplicate PID 31118 was retired after recording the above
+witnesses; PID 30667 remained live, onscreen, and the only 7DTD producer.
+
+The rebuilt package was then installed and a fresh Steam generation was
+started while PID 30667 remained checked in. Fresh Steam PID 35659 emitted:
+
+```text
+[MacWSSteamProcess] existing 7DTD runtime reused pid=30667 executable=/Users/root/Library/Application Support/Steam/steamapps/macws-runtime/7 Days To Die/7DaysToDie-ARM.app/Contents/MacOS/7 Days To Die
+Game process added ... ProcID 30667
+```
+
+The post-launch process inventory contained exactly one matching arm64 game
+runtime (PID 30667). This runtime-confirms that the installed implementation
+prevents a replacement Steam generation from creating the duplicate player
+that had been consuming CPU and submitting invisible frames.

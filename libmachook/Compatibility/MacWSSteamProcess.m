@@ -656,6 +656,46 @@ static bool MacWSIsSevenDaysToDieARMRuntimeExecutable(
          "7DaysToDie-ARM.app/Contents/MacOS/"];
 }
 
+static id MacWSExistingSevenDaysRuntimeApplication(
+        NSURL *runtimeApplicationURL, NSString *executablePath) {
+    if (!runtimeApplicationURL ||
+        !MacWSIsSevenDaysToDieARMRuntimeExecutable(executablePath)) return nil;
+
+    NSBundle *bundle = [NSBundle bundleWithURL:runtimeApplicationURL];
+    NSString *bundleIdentifier = bundle.bundleIdentifier;
+    Class runningApplicationClass = NSClassFromString(@"NSRunningApplication");
+    SEL applicationsSelector = NSSelectorFromString(
+        @"runningApplicationsWithBundleIdentifier:");
+    if (!bundleIdentifier.length ||
+        ![runningApplicationClass respondsToSelector:applicationsSelector]) {
+        return nil;
+    }
+
+    NSArray *applications = ((id (*)(id, SEL, id))objc_msgSend)(
+        runningApplicationClass, applicationsSelector, bundleIdentifier);
+    SEL processSelector = NSSelectorFromString(@"processIdentifier");
+    SEL terminatedSelector = NSSelectorFromString(@"isTerminated");
+    SEL executableURLSelector = NSSelectorFromString(@"executableURL");
+    for (id application in applications) {
+        if (![application respondsToSelector:processSelector] ||
+            ![application respondsToSelector:executableURLSelector]) continue;
+        if ([application respondsToSelector:terminatedSelector] &&
+            ((BOOL (*)(id, SEL))objc_msgSend)(
+                application, terminatedSelector)) continue;
+        pid_t processIdentifier = ((pid_t (*)(id, SEL))objc_msgSend)(
+            application, processSelector);
+        NSURL *candidateExecutableURL = ((id (*)(id, SEL))objc_msgSend)(
+            application, executableURLSelector);
+        if (processIdentifier <= 1 ||
+            ![candidateExecutableURL.path isEqualToString:executablePath]) {
+            continue;
+        }
+        if (kill(processIdentifier, 0) != 0 && errno == ESRCH) continue;
+        return application;
+    }
+    return nil;
+}
+
 static NSString *MacWSInsertLibraryForSteamExecutable(
         NSString *executablePath) {
     // Steam's LaunchServices configuration does not retain dyld's insertion
@@ -1078,6 +1118,34 @@ static id MacWSSteamLaunchApplicationAtURL(
             ? CFBundleCopyExecutableURL(runtimeBundle) : NULL;
         NSString *runtimeExecutablePath = runtimeExecutableURL
             ? [(__bridge NSURL *)runtimeExecutableURL path] : nil;
+        // Runtime-confirmed on iPad14,5 after two consecutive Steam
+        // `-applaunch 251570` generations: PID 30667 had already completed
+        // its AppKit/LaunchServices check-in when the replacement Steam
+        // process launched PID 31118 from the same runtime bundle. Both
+        // players then submitted 1366x1024 direct drawables with comparable
+        // sustained CPU load. Stock LaunchServices normally treats an
+        // already-running application as the result of a second open. The
+        // signed-runtime fallback must preserve that single-instance
+        // invariant explicitly because Steam asked to open the x86 launcher
+        // bundle, not the already-running arm64 runtime bundle.
+        id existingRuntimeApplication =
+            MacWSExistingSevenDaysRuntimeApplication(
+                runtimeApplicationURL, runtimeExecutablePath);
+        if (existingRuntimeApplication) {
+            pid_t existingPID = ((pid_t (*)(id, SEL))objc_msgSend)(
+                existingRuntimeApplication,
+                NSSelectorFromString(@"processIdentifier"));
+            fprintf(stderr,
+                    "[MacWSSteamProcess] existing 7DTD runtime reused "
+                    "pid=%d executable=%s\n",
+                    existingPID,
+                    runtimeExecutablePath.UTF8String ?: "(null)");
+            fflush(stderr);
+            if (runtimeExecutableURL) CFRelease(runtimeExecutableURL);
+            if (runtimeBundle) CFRelease(runtimeBundle);
+            if (error) *error = nil;
+            return existingRuntimeApplication;
+        }
         NSMutableDictionary *runtimeConfiguration = configuration
             ? [configuration mutableCopy] : [NSMutableDictionary dictionary];
         NSDictionary *runtimeEnvironment =

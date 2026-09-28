@@ -63,6 +63,30 @@ class SevenDaysToDieSteamRuntimeTests(unittest.TestCase):
         self.assertNotIn("MACWS_AGX_CRASH_DIAG", environment)
         self.assertNotIn("MACWS_JIT_MPROTECT_TRACE", environment)
 
+    def test_second_steam_generation_reuses_checked_in_arm_runtime(self):
+        helper = self.source.split(
+            "static id MacWSExistingSevenDaysRuntimeApplication", 1
+        )[1].split("static NSString *MacWSInsertLibraryForSteamExecutable", 1)[0]
+        self.assertIn(
+            "MacWSIsSevenDaysToDieARMRuntimeExecutable(executablePath)",
+            helper,
+        )
+        self.assertIn("runningApplicationsWithBundleIdentifier:", helper)
+        self.assertIn("isTerminated", helper)
+        self.assertIn("executableURL", helper)
+        self.assertIn("kill(processIdentifier, 0)", helper)
+
+        launch = self.source.split(
+            "static id MacWSSteamLaunchApplicationAtURL", 1
+        )[1].split("static id MacWSSteamOpenURL", 1)[0]
+        reuse = launch.index("MacWSExistingSevenDaysRuntimeApplication(")
+        runtime_launch = launch.index(
+            "gMacWSOriginalNSWorkspaceLaunchApplication(\n"
+            "                workspace, selector, runtimeApplicationURL"
+        )
+        self.assertLess(reuse, runtime_launch)
+        self.assertIn("existing 7DTD runtime reused", launch)
+
     def test_preflight_requires_real_arm64_runtime_and_resolved_resources(self):
         body = self.preflight.split("prepare_7dtd_arm_runtime()", 1)[1].split(
             "retire_breakpad_backlog()", 1
