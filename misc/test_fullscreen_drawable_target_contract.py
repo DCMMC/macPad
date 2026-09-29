@@ -112,6 +112,63 @@ class FullscreenDrawableTargetContract(unittest.TestCase):
         self.assertIn("!CGRectContainsPoint(canvas, point)", hit_test)
         self.assertIn("if (pidOut) *pidOut = self.targetPID", hit_test)
 
+    def test_target_direct_drawable_owns_input_visibility_sample(self):
+        monitor = (ROOT / "MacWSHost/MacWSPerformanceMonitor.m").read_text()
+        direct = monitor.split(
+            "- (void)recordDirectDrawableSubmissionForOwnerPID:", 1
+        )[1].split("- (void)recordSubmissionForStream:", 1)[0]
+        for witness in (
+            "isTarget && _pendingInputMachTime",
+            "completionTime >= _pendingInputMachTime",
+            "_pendingInputTargetPID == ownerPID",
+            "inputMachTime = _pendingInputMachTime",
+            "MacWSPerfRingAppend(&strongSelf->_inputToPresent, latency)",
+            "strongSelf->_directInputVisibilitySamples++",
+        ):
+            self.assertIn(witness, direct)
+
+        self.assertIn(
+            '@"composited_input_visibility_samples"', monitor
+        )
+        self.assertIn(
+            '@"direct_input_visibility_samples"', monitor
+        )
+
+        render = VIEW.split("- (void)drawInMTKView:", 1)[1].split(
+            "- (BOOL)resolveFullscreenLayerAtPoint:", 1
+        )[0]
+        direct_call = render.rindex(
+            "recordDirectDrawableSubmissionForOwnerPID:record.ownerPID"
+        )
+        base_call = render.rindex(
+            "recordSubmissionForStream:performanceStreamID"
+        )
+        self.assertLess(direct_call, base_call)
+
+        base = monitor.split(
+            "- (void)recordSubmissionForStream:", 1
+        )[1].split("- (NSDictionary<NSString *, id> *)snapshotWithReason:", 1)[0]
+        self.assertIn(
+            "if (!directTargetAuthoritative &&", base
+        )
+        self.assertIn(
+            "(_finalCompositeActive &&", base
+        )
+        self.assertIn(
+            "directTargetAuthoritative:fullscreenDirectAuthoritative", render
+        )
+
+        route = VIEW.split(
+            "- (BOOL)routeFullscreenInputRecord:", 1
+        )[1].split("- (void)handleTouch:", 1)[0]
+        self.assertIn("BOOL directVisualAuthority", route)
+        self.assertIn(
+            "[self authoritativeFullscreenDrawableFrame] != nil", route
+        )
+        self.assertIn(
+            "!directVisualAuthority ? dockPID : visualPID", route
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

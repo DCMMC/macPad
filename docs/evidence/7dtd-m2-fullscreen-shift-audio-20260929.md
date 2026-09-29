@@ -154,3 +154,49 @@ The post-launch process inventory contained exactly one matching arm64 game
 runtime (PID 30667). This runtime-confirms that the installed implementation
 prevents a replacement Steam generation from creating the duplicate player
 that had been consuming CPU and submitting invisible frames.
+
+## Fullscreen direct-drawable input visibility
+
+The first fullscreen input profile incorrectly correlated the synthetic tap
+with Dock PID 29743, even though runtime logs identified PID 30667/window 41
+as the controller-validated fullscreen direct-drawable authority. A diagnostic
+snapshot made the mismatch explicit while the game continued to submit:
+
+```text
+direct_target_unique_submissions=1395
+inputs_attempted=24 inputs_sent=24
+pending_input_target_pid=29743 input_visibility_pending=true
+direct_input_visibility_samples=0
+composited_input_visibility_samples=0
+```
+
+The Host now keeps Dock as the global pointer transport endpoint but uses the
+resolved visual game PID for performance correlation whenever the renderer's
+existing `authoritativeFullscreenDrawableFrame` invariant is satisfied. It
+also prevents hidden DisplayStream layers from claiming an input sample while
+that direct drawable is authoritative. This does not bypass input delivery or
+fabricate a response: a sample is recorded only when a producer-completed,
+monotonically newer game sequence reaches the real Host CAMetalDrawable
+presentation callback.
+
+After installing package SHA-256
+`d481d1cb506294bd89984b489e9d4a363d469f7a5af05dc2ea2b4cbffe634973`,
+a 24-click, 10 Hz pressure run produced 24 direct samples, zero composited
+samples, and zero transport errors. Its median was 24.86 ms and p95 was
+116.47 ms, showing that the burst still has a long tail. A second profile of
+five individually spaced taps produced:
+
+```text
+direct_input_visibility_samples=5
+composited_input_claims=0
+input_transport_errors=0
+input dispatch -> visible: mean=23.40 ms p50=23.38 ms p95=27.61 ms max=27.61 ms
+game direct visible: 114.12 FPS, 1% low=59.96 FPS, missing_sequences=0
+thermal_state=nominal
+```
+
+These figures are runtime-confirmed by
+`/var/mobile/Library/Logs/MacWSPerformance/latest.json`. They measure a
+synthetic Host-dispatch-to-present path on the animated title screen, not
+physical finger latency and not in-world gameplay FPS. The 10 Hz pressure-run
+tail remains visible rather than being averaged away.

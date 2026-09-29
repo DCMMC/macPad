@@ -82,6 +82,7 @@ typedef NS_ENUM(NSInteger, MacWSPerformanceHUDMode) {
                       captureTime:(uint64_t)captureTime
                       receiptTime:(uint64_t)receiptTime
                        submitTime:(uint64_t)submitTime
+        directTargetAuthoritative:(BOOL)directTargetAuthoritative
                     commandBuffer:(id<MTLCommandBuffer>)commandBuffer
                          drawable:(id<MTLDrawable>)drawable;
 

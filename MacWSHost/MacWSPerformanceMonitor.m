@@ -163,6 +163,12 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     uint64_t _inputsAttempted;
     uint64_t _inputsSent;
     uint64_t _inputTransportErrors;
+    uint64_t _directInputPendingCandidates;
+    uint64_t _directInputRejectedBeforeCompletion;
+    uint64_t _directTargetUniqueSubmissions;
+    uint64_t _compositedInputClaims;
+    uint64_t _directInputVisibilitySamples;
+    uint64_t _compositedInputVisibilitySamples;
     uint64_t _estimatedDroppedVsyncs;
     uint64_t _hitchCount;
     uint64_t _stallCount;
@@ -329,6 +335,12 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     _inputsAttempted = 0;
     _inputsSent = 0;
     _inputTransportErrors = 0;
+    _directInputPendingCandidates = 0;
+    _directInputRejectedBeforeCompletion = 0;
+    _directTargetUniqueSubmissions = 0;
+    _compositedInputClaims = 0;
+    _directInputVisibilitySamples = 0;
+    _compositedInputVisibilitySamples = 0;
     _estimatedDroppedVsyncs = 0;
     _hitchCount = 0;
     _stallCount = 0;
@@ -552,6 +564,8 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     if (ownerPID <= 1 || sequence == 0 || completionTime == 0 || !drawable ||
         !atomic_load(&_instrumentationActive)) return;
     __block uint64_t measurementGeneration = 0;
+    __block uint64_t inputMachTime = 0;
+    __block uint16_t inputKind = 0;
     os_unfair_lock_lock(&_lock);
     MacWSPerfDirectSource *source =
         [self directSourceForOwnerPID:ownerPID create:YES];
@@ -563,6 +577,28 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     source->target = source->target || isTarget;
     source->lastSubmittedSequence = sequence;
     measurementGeneration = _measurementGeneration;
+    if (isTarget) _directTargetUniqueSubmissions++;
+    // Runtime-confirmed on iPad14,5: the fullscreen 7DTD drawable was the
+    // visible pixel authority at ~115 Hz while the retained WindowServer
+    // FinalComposite advanced at ~10 Hz.  Pairing its input with the base
+    // stream therefore reported 66.8 ms against pixels hidden beneath the
+    // authoritative direct layer.  A producer completion after the input is
+    // the first direct frame that can contain that input's result; consume
+    // the pending sample here so the hidden base fallback cannot claim it.
+    if (isTarget && _pendingInputMachTime &&
+        (_pendingInputTargetPID <= 1 ||
+         _pendingInputTargetPID == ownerPID)) {
+        _directInputPendingCandidates++;
+        if (completionTime >= _pendingInputMachTime) {
+            inputMachTime = _pendingInputMachTime;
+            inputKind = _pendingInputKind;
+            _pendingInputMachTime = 0;
+            _pendingInputKind = 0;
+            _pendingInputTargetPID = 0;
+        } else {
+            _directInputRejectedBeforeCompletion++;
+        }
+    }
     os_unfair_lock_unlock(&_lock);
 
     __weak typeof(self) weakSelf = self;
@@ -594,6 +630,15 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
         current->lastPresentedSequence = sequence;
         current->uniqueFramesPresented++;
         strongSelf->_directDrawableFramesPresented++;
+        if (inputMachTime) {
+            double latency = MacWSPerfMachMilliseconds(
+                inputMachTime, mach_absolute_time());
+            MacWSPerfRingAppend(&strongSelf->_inputToPresent, latency);
+            strongSelf->_directInputVisibilitySamples++;
+            if (inputKind < MacWSPerfInputKindCapacity)
+                MacWSPerfRingAppend(
+                    &strongSelf->_inputToPresentByKind[inputKind], latency);
+        }
         os_unfair_lock_unlock(&strongSelf->_lock);
     }];
 }
@@ -601,10 +646,11 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
 - (void)recordSubmissionForStream:(uint64_t)streamID
                          sequence:(uint64_t)sequence
                       captureTime:(uint64_t)captureTime
-                      receiptTime:(uint64_t)receiptTime
-                       submitTime:(uint64_t)submitTime
-                    commandBuffer:(id<MTLCommandBuffer>)commandBuffer
-                         drawable:(id<MTLDrawable>)drawable {
+                       receiptTime:(uint64_t)receiptTime
+                        submitTime:(uint64_t)submitTime
+        directTargetAuthoritative:(BOOL)directTargetAuthoritative
+                     commandBuffer:(id<MTLCommandBuffer>)commandBuffer
+                          drawable:(id<MTLDrawable>)drawable {
     if (!commandBuffer || !drawable ||
         !atomic_load(&_instrumentationActive)) return;
     __block uint64_t inputMachTime = 0;
@@ -629,7 +675,8 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
         if (source->dirtySinceSubmission &&
             source->lastReceiptTime >= _resetMachTime)
             dirtyFrameAfterReset = YES;
-        if (source->dirtySinceSubmission && _pendingInputMachTime &&
+        if (!directTargetAuthoritative &&
+            source->dirtySinceSubmission && _pendingInputMachTime &&
             source->lastReceiptTime >= _pendingInputMachTime &&
             (_pendingInputTargetPID <= 1 ||
              source->ownerPID == _pendingInputTargetPID ||
@@ -647,6 +694,7 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     if (_pendingInputMachTime && inputTargetUpdated) {
         inputMachTime = _pendingInputMachTime;
         inputKind = _pendingInputKind;
+        _compositedInputClaims++;
         _pendingInputMachTime = 0;
         _pendingInputKind = 0;
         _pendingInputTargetPID = 0;
@@ -734,6 +782,7 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
             double latency = MacWSPerfMachMilliseconds(
                 inputMachTime, callbackTime);
             MacWSPerfRingAppend(&strongSelf->_inputToPresent, latency);
+            strongSelf->_compositedInputVisibilitySamples++;
             if (inputKind < MacWSPerfInputKindCapacity)
                 MacWSPerfRingAppend(
                     &strongSelf->_inputToPresentByKind[inputKind], latency);
@@ -778,6 +827,12 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     uint64_t inputsAttempted = _inputsAttempted;
     uint64_t inputsSent = _inputsSent;
     uint64_t inputErrors = _inputTransportErrors;
+    uint64_t directInputCandidates = _directInputPendingCandidates;
+    uint64_t directInputRejected = _directInputRejectedBeforeCompletion;
+    uint64_t directTargetSubmissions = _directTargetUniqueSubmissions;
+    uint64_t compositedInputClaims = _compositedInputClaims;
+    uint64_t directInputSamples = _directInputVisibilitySamples;
+    uint64_t compositedInputSamples = _compositedInputVisibilitySamples;
     uint64_t dropped = _estimatedDroppedVsyncs;
     uint64_t hitches = _hitchCount;
     uint64_t stalls = _stallCount;
@@ -785,6 +840,9 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     uint64_t staleCaptureSamples = _staleCaptureSamples;
     uint64_t lastStream = _lastSubmittedStream;
     uint64_t lastSequence = _lastSubmittedSequence;
+    BOOL inputVisibilityPending = _pendingInputMachTime != 0;
+    uint16_t pendingInputKind = _pendingInputKind;
+    int32_t pendingInputTargetPID = _pendingInputTargetPID;
     BOOL finalCompositeActive = _finalCompositeActive;
     uint64_t baseTransportStreamID = _baseTransportStreamID;
     uint64_t baseTransportSequence = _baseTransportSequence;
@@ -987,6 +1045,18 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
             @"inputs_attempted": @(inputsAttempted),
             @"inputs_sent": @(inputsSent),
             @"input_transport_errors": @(inputErrors),
+            @"direct_input_pending_candidates": @(directInputCandidates),
+            @"direct_input_rejected_before_completion":
+                @(directInputRejected),
+            @"direct_target_unique_submissions":
+                @(directTargetSubmissions),
+            @"composited_input_claims": @(compositedInputClaims),
+            @"direct_input_visibility_samples": @(directInputSamples),
+            @"composited_input_visibility_samples":
+                @(compositedInputSamples),
+            @"input_visibility_pending": @(inputVisibilityPending),
+            @"pending_input_kind": @(pendingInputKind),
+            @"pending_input_target_pid": @(pendingInputTargetPID),
             @"last_stream": @(lastStream),
             @"last_sequence": @(lastSequence),
         },
@@ -1002,7 +1072,7 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
             @"Observed frame interval remains available for autonomous animation/WebGL workloads that do not emit input.",
             @"Source cadence is tracked independently by producer stream/owner; the aggregate includes every active desktop layer and must not be used to score one target app.",
             @"Content IOSurface frames and lease-free layer geometry transactions have separate counters.",
-            @"Input latency pairs the oldest unrepresented Host input with a subsequently captured target-owned frame, or with the authoritative WindowServer final-composite base when that transport is active.",
+            @"Input latency pairs the oldest unrepresented Host input with a subsequently completed target-owned direct drawable when present; otherwise it uses a subsequently captured target-owned frame or the authoritative WindowServer final-composite base.",
             @"Synthetic transport probes do not measure physical finger-to-UIKit recognizer latency.",
             @"Game FPS is target direct_drawable.host_visible_average_fps: only unique producer sequences that reach a real Host drawable presentation are counted; repeated presentation of one retained IOSurface is excluded.",
         ],

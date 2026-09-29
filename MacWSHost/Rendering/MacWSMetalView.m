@@ -3417,10 +3417,10 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         ? performanceFrame.descriptor.displayTime : 0;
     uint64_t performanceReceiptTime = performanceFrame
         ? performanceFrame.receiptTime : submitTime;
-    [_performanceMonitor recordSubmissionForStream:performanceStreamID
-        sequence:performanceSequence captureTime:performanceCaptureTime
-        receiptTime:performanceReceiptTime submitTime:submitTime
-        commandBuffer:commandBuffer drawable:drawable];
+    // Give a newly completed target-owned direct drawable first claim on a
+    // pending input sample.  In fullscreen game mode this exact texture is
+    // the visible authority; the retained FinalComposite underneath it is a
+    // lower-cadence fallback and must not inflate input-to-visible latency.
     for (MacWSCatalystDrawableFrame *directFrame in
             submittedCatalystFrames) {
         MacWSCatalystDrawableRecord record = directFrame.record;
@@ -3429,6 +3429,11 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
             sequence:record.sequence completionTime:record.completionTime
             isTarget:self.targetPID == record.ownerPID drawable:drawable];
     }
+    [_performanceMonitor recordSubmissionForStream:performanceStreamID
+        sequence:performanceSequence captureTime:performanceCaptureTime
+        receiptTime:performanceReceiptTime submitTime:submitTime
+        directTargetAuthoritative:fullscreenDirectAuthoritative
+        commandBuffer:commandBuffer drawable:drawable];
     [commandBuffer presentDrawable:drawable];
     if (submittedCatalystFrames.count) {
         NSArray<MacWSCatalystDrawableFrame *> *leasedCatalystFrames =
@@ -4212,10 +4217,18 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
                 // global WindowServer/Dock transaction, including a
                 // compositor-only Mission Control card retirement. Ordinary
                 // physical input remains correlated with the visual app so
-                // app-owned content latency keeps its existing meaning.
+                // app-owned content latency keeps its existing meaning. A
+                // controller-validated fullscreen direct drawable is also
+                // app-owned visible output, even though Dock remains the
+                // transport endpoint for its global pointer event. Preserve
+                // that visual PID for the latency correlation; Mission
+                // Control cards still use Dock because they have no such
+                // authoritative application drawable.
+                BOOL directVisualAuthority = visualPID == self.targetPID &&
+                    [self authoritativeFullscreenDrawableFrame] != nil;
                 *presentationTargetPID =
-                    (record->flags & MacWSInputFlagLatencyDiagnostic)
-                        ? dockPID : visualPID;
+                    (record->flags & MacWSInputFlagLatencyDiagnostic) &&
+                    !directVisualAuthority ? dockPID : visualPID;
             }
             if (visualPID > 1 &&
                 visualPID != dockPID &&
