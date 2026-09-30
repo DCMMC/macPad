@@ -3174,6 +3174,21 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         baseCatalystFrame.record.ownerPID == self.targetPID &&
         baseCatalystFrame.record.producerPID !=
             baseCatalystFrame.record.ownerPID;
+    // Window-mode Chromium publishes the exact focused client IOSurface. If
+    // it matches the retained base frame pixel-for-pixel and the independently
+    // joined PID/window heartbeat is fresh, that drawable completely replaces
+    // the captured base. Sampling the old DisplayStream texture first only to
+    // overdraw every pixel doubled Host's full-resolution fragment work.
+    BOOL focusedWindowDirectAuthoritative = directSurface && !finalComposite &&
+        focusedLayerDirect && self.targetWindowID != 0 &&
+        _directDrawableHeartbeatPID == self.targetPID &&
+        _directDrawableHeartbeatLayerID == self.targetWindowID &&
+        _lastDirectDrawableHeartbeatTime > 0.0 &&
+        directHeartbeatAge >= 0.0 && directHeartbeatAge <= 3.0 &&
+        baseCatalystFrame.record.width ==
+            _surfaceFrame.descriptor.contentWidth &&
+        baseCatalystFrame.record.height ==
+            _surfaceFrame.descriptor.contentHeight;
     // A catalog-validated fullscreen canvas has no AppKit title bar to
     // preserve. A descendant Chromium/Electron producer likewise publishes
     // the client IOSurface for the exact focused layer rather than an AppKit
@@ -3257,10 +3272,10 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     MTLRenderPassDescriptor *pass = view.currentRenderPassDescriptor;
     id<CAMetalDrawable> drawable = view.currentDrawable;
     if (!pass || !drawable) return;
-    if (fullscreenDirectAuthoritative) {
-        // The exact fullscreen drawable will cover the semantic game canvas.
-        // Clear any letterbox outside it and do not shade the retained desktop
-        // final composite underneath a layer that is already authoritative.
+    if (fullscreenDirectAuthoritative || focusedWindowDirectAuthoritative) {
+        // The exact direct drawable will cover the semantic game/window
+        // canvas. Clear any area outside it and do not shade the retained
+        // base underneath a layer that is already authoritative.
         pass.colorAttachments[0].loadAction = MTLLoadActionClear;
         pass.colorAttachments[0].clearColor =
             MTLClearColorMake(0.0, 0.0, 0.0, 1.0);
@@ -3282,7 +3297,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         }
     }
     BOOL fusedFocusedDirect = NO;
-    if (!fullscreenDirectAuthoritative) {
+    if (!fullscreenDirectAuthoritative &&
+        !focusedWindowDirectAuthoritative) {
         [encoder setVertexBytes:vertices length:sizeof(vertices) atIndex:0];
         [encoder setFragmentTexture:_sourceTexture atIndex:0];
         if (focusedDirectCompositeLayer) {
@@ -3344,11 +3360,12 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         }
     } else if (!_reportedDirectDrawableBaseElision) {
         _reportedDirectDrawableBaseElision = YES;
-        MacWSLog(@"runtime-confirmed direct-fullscreen-base-elided pid=%d "
-                 "layer=%u drawable=%ux%u heartbeat-age-ms=%.1f",
+        MacWSLog(@"runtime-confirmed direct-base-elided pid=%d "
+                 "layer=%u mode=%@ drawable=%ux%u heartbeat-age-ms=%.1f",
                  self.targetPID, _directDrawableHeartbeatLayerID,
-                 fullscreenDirectFrame.record.width,
-                 fullscreenDirectFrame.record.height,
+                 fullscreenDirectAuthoritative ? @"fullscreen" : @"window",
+                 baseCatalystFrame.record.width,
+                 baseCatalystFrame.record.height,
                  directHeartbeatAge * 1000.0);
     }
 
@@ -3358,6 +3375,14 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     // the captured traffic lights/title bar and the exact existing viewport.
     if (directSurface && !finalComposite &&
         !fullscreenDirectAuthoritative && baseCatalystFrame.texture) {
+        // The base-elision path above intentionally skips its texture draw,
+        // including the pipeline binding which that draw used to establish
+        // for this encoder. MacWSEncodeCatalystDrawable only supplies the
+        // direct vertices/texture; make its required render state explicit
+        // here. Runtime-confirmed on iPad13,6: leaving the encoder unbound
+        // crashed AGXMetal13_3 at drawPrimitives (MacWSHost crash reports
+        // 2026-09-30 15:56:33 and 16:00:42, fault address 0x388).
+        [encoder setRenderPipelineState:_pipeline];
         CGFloat baseWidth = _surfaceFrame.descriptor.contentWidth;
         CGFloat baseHeight = _surfaceFrame.descriptor.contentHeight;
         CGRect basePixels = CGRectMake(0, 0, baseWidth, baseHeight);
@@ -3850,7 +3875,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     [_performanceMonitor recordSubmissionForStream:performanceStreamID
         sequence:performanceSequence captureTime:performanceCaptureTime
         receiptTime:performanceReceiptTime submitTime:submitTime
-        directTargetAuthoritative:fullscreenDirectAuthoritative
+        directTargetAuthoritative:(fullscreenDirectAuthoritative ||
+                                   focusedWindowDirectAuthoritative)
         commandBuffer:commandBuffer drawable:drawable];
     [commandBuffer presentDrawable:drawable];
     if (_scheduledCatalystDrawableFrame &&

@@ -160,7 +160,8 @@ class FullscreenDrawableTargetContract(unittest.TestCase):
             "(_finalCompositeActive &&", base
         )
         self.assertIn(
-            "directTargetAuthoritative:fullscreenDirectAuthoritative", render
+            "directTargetAuthoritative:(fullscreenDirectAuthoritative ||",
+            render,
         )
 
         route = VIEW.split(

@@ -191,11 +191,21 @@
     NSMutableArray<MacWSCatalystDrawableFrame *> *pending =
         _pendingFrames[ownerKey];
     if (!pending) {
-        pending = [NSMutableArray arrayWithCapacity:2];
+        pending = [NSMutableArray arrayWithCapacity:3];
         _pendingFrames[ownerKey] = pending;
     }
     [pending addObject:frame];
-    while (pending.count > 2)
+    // Runtime-confirmed by the 2026-09-30 TestUFO focused-layer profile on
+    // iPad13,6: the producer delivered 2,640 unique frames in 21.79 seconds,
+    // enough to fill every 120-Hz panel slot, but a two-entry FIFO discarded
+    // burst arrivals and then left 197/2,607 scheduler ticks empty. The
+    // visible result was 110.54 fps with a 16.67-ms p95. Retain one entry for
+    // each IOSurface in Chromium's real three-surface pool so short producer /
+    // panel phase crossings are absorbed instead of becoming a visible missed
+    // vblank. This does not allocate another texture or synthesize a frame;
+    // the existing three-entry texture cache remains the matching lifetime
+    // bound and every dequeued record is still a real completed generation.
+    while (pending.count > 3)
         [pending removeObjectAtIndex:0];
     // Notification delivery is synchronous. Mark the delivery envelope only
     // after the IOSurface-backed texture and frame lease both exist; the

@@ -146,7 +146,7 @@ env	MACWS_MPS_PROBE_TRACE_SUBMIT	off	standalone MPS probe	Logs bounded command s
 env	MACWS_CATALYST_REGISTER_APPLICATION	on	Maps UIKit carrier child	Completes Maps' stock UIKitServices application-support handshake; UIKitSystem validates the real child audit token and complete exec generation before FrontBoard registration.
 env	MACWS_CATALYST_REQUEST_INITIAL_SCENE	on	Maps UIKit carrier child	Requests Maps' initial UIKitMac scene after the validated UIKitServices registration; set only by MacWSCatalystLauncher, not globally.
 env	MACWS_CATALYST_DIRECT_DRAWABLE	on	generic Catalyst carrier child	Publishes completed CAMetalLayer IOSurfaces through a typed Mach message when SkyLight exact-window capture omits the client area; Host imports and composites the same native AGX surface without RFB or CPU readback.
-env	MACWS_FOCUSED_LAYER_DIRECT	off	Chromium/Electron A/B	Enables the focus-authorized CALayer IOSurface zero-copy path for an explicit comparison; the original setContents call and WindowServer composition remain intact.
+env	MACWS_FOCUSED_LAYER_DIRECT	on	Chromium/Electron production	Focus-authorized CALayer IOSurface zero-copy is enabled by default after exact PID/window/size validation; set 0 to disable for diagnosis. The original setContents call remains intact.
 env	MACWS_CATALYST_TRACE	off	Catalyst diagnostic	Emits verbose UIKitMac/FuseBoard lifecycle inventories; never enable in production.
 env	MACWS_DNS_DEBUG	off	DNS compatibility diagnostic	Logs local getaddrinfo failure and bounded hostd fallback results; production fallback remains active but quiet.
 env	APPLICATION_SUPPORT_SERVICE_MACH_NAME	auto	Maps UIKit carrier child	Routes Maps' UIKitServices client to the private macOS-booter FrontBoard endpoint published by UIKitSystem; set only by MacWSCatalystLauncher.
@@ -398,7 +398,7 @@ flag	/tmp/macws_vnc_share	off	obsolete production switch	Ignored and removed on 
 flag	/tmp/macws_vnc_test	off	diagnostic	Synthetic VNC gradient.
 flag	/private/tmp/macws_xpc_proxy_trace	off	XPC proxy diagnostic	Logs the real process/service environment for compatibility-service attribution; production startup removes it.
 flag	/tmp/macws_coexist_pace_us	off	diagnostic pacing override	Only explicit --pace-us experiments write this numeric override. Production has a built-in 100000-us idle interval and needs no file.
-flag	/tmp/macws_focused_layer_direct	off	Chromium/Electron A/B	Boot-local equivalent of MACWS_FOCUSED_LAYER_DIRECT for restarting one bounded GPU helper without changing its launch environment.
+flag	/tmp/macws_focused_layer_direct	off	obsolete Chromium/Electron override	No longer read; cleanup removes it. Production is focus-authorized by default and MACWS_FOCUSED_LAYER_DIRECT=0 is the fail-closed diagnostic override.
 state	/tmp/macws_capture_done	transient	VNC startup	PID and generation acknowledgement for the one-shot frame request.
 state	/tmp/macws_graphics_ready	transient	startup	PID witness written after first clean producer completion.
 state	/tmp/.macos_gui.transaction	transient	GUI lifecycle transaction	Boot-local atomic mkdir lock with exact owner PID; overlapping start, restart, and stop operations return 75, while an ownerless stale lock is recoverable.

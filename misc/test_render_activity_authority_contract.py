@@ -16,6 +16,9 @@ DRAWABLE_RECEIVER = (
     ROOT / "MacWSHost" / "Transport" /
     "MacWSCatalystDrawableReceiver.m"
 ).read_text()
+STREAM_CLIENT = (
+    ROOT / "MacWSHost" / "MacWSStreamClient.m"
+).read_text()
 
 
 class RenderActivityAuthorityContract(unittest.TestCase):
@@ -40,10 +43,136 @@ class RenderActivityAuthorityContract(unittest.TestCase):
         ):
             self.assertIn(token, predicate)
         publisher = DISPLAYD.split(
-            "static void PublishFocusedRenderAuthority(", 2
-        )[2].split("static BOOL LayerCanAuthorizeFocusedRender", 1)[0]
+            "static BOOL PublishFocusedRenderAuthorityIdentity(", 1
+        )[1].split("static BOOL PublishFocusedRenderAuthority(", 1)[0]
         self.assertIn("MACWS_RENDER_AUTHORITY_PATH", publisher)
         self.assertIn("MonotonicNanoseconds()", publisher)
+
+    def test_window_mode_base_publishes_same_focused_authority(self):
+        client = DISPLAYD.split(
+            "@interface MacWSDisplayClient : NSObject", 1
+        )[1].split("@end", 1)[0]
+        self.assertIn("catalogFrontmostOwnerPID", client)
+        self.assertIn("catalogFrontmostWindowID", client)
+
+        frame = DISPLAYD.split(
+            "static void PublishFrame(", 1
+        )[1].split("static CGDisplayStreamRef CreateStream", 1)[0]
+        for witness in (
+            "client.mode == MacWSStreamModeWindow",
+            "client.windowID == client.catalogFrontmostWindowID",
+            "client.catalogFrontmostOwnerPID > 1",
+            "PublishFocusedRenderAuthorityIdentity(",
+        ):
+            self.assertIn(witness, frame)
+
+        catalog = DISPLAYD.split(
+            "static void SendWindowList(", 1
+        )[1].split("static void BroadcastWindowList", 1)[0]
+        self.assertIn(
+            "client.catalogFrontmostOwnerPID = frontmostPID", catalog
+        )
+        self.assertIn(
+            "client.catalogFrontmostWindowID = frontmostWindowID", catalog
+        )
+        self.assertIn("client.lastSurfaceWidth", catalog)
+
+        final_composite = DISPLAYD.split(
+            "static void SuspendFullscreenLayerCapturesForFinalComposite", 2
+        )[2].split(
+            "static void ResumeFullscreenLayerCapturesForFallback", 1
+        )[0]
+        self.assertIn(
+            "PublishFocusedWindowClientAuthorityIfAvailable()",
+            final_composite,
+        )
+        self.assertLess(
+            final_composite.index(
+                "PublishFocusedWindowClientAuthorityIfAvailable()"
+            ),
+            final_composite.index("RetireFocusedRenderAuthority()"),
+        )
+
+    def test_focused_window_direct_suspends_only_redundant_base_capture(self):
+        validator = DISPLAYD.split(
+            "static BOOL ValidateDirectDrawableWindowBase(", 1
+        )[1].split("static void ClearDirectDrawableActivity", 1)[0]
+        for token in (
+            "client.mode != MacWSStreamModeWindow",
+            "client.windowID != layerWindowID",
+            "client.catalogFrontmostWindowID != layerWindowID",
+            "client.catalogFrontmostOwnerPID != ownerPID",
+            "widthDifference * 5u > baseWidth",
+            "heightDifference * 5u > baseHeight",
+        ):
+            self.assertIn(token, validator)
+        self.assertIn("BOOL ownsBaseSuspension", validator)
+        self.assertIn("(!client.stream && !ownsBaseSuspension)", validator)
+
+        handler = DISPLAYD.split(
+            "static void HandleDirectDrawableActivity(", 1
+        )[1].split(
+            "static void SuspendFullscreenLayerCapturesForFinalComposite", 1
+        )[0]
+        self.assertIn("ValidateDirectDrawableWindowBase(", handler)
+        self.assertIn("if (!windowBase)", handler)
+        self.assertIn("PublishDirectDrawablePacingLease(", handler)
+        self.assertIn("directDrawableBaseCaptureSuspended = YES", handler)
+        self.assertIn("[strongClient stopStream]", handler)
+
+        clearer = DISPLAYD.split(
+            "static void ClearDirectDrawableActivity(", 2
+        )[2].split("static void ScheduleDirectDrawableExpiry", 1)[0]
+        self.assertIn("resumeWindowBase", clearer)
+        self.assertIn("StartClientStream(client)", clearer)
+
+        subscription = DISPLAYD.split(
+            "static void StartSubscription(", 1
+        )[1].split("static void ConfigureNativePopupComposite", 1)[0]
+        generic_subscription = subscription.split(
+            "// The generic path replaces the client's entire capture graph",
+            1,
+        )[1]
+        self.assertLess(
+            generic_subscription.index("RetireDirectDrawablePacingLease()"),
+            generic_subscription.index("client.subscriptionActive = YES"),
+        )
+        self.assertLess(
+            generic_subscription.index("client.directDrawableActive = NO"),
+            generic_subscription.index("StartClientStream(client)"),
+        )
+
+        sender = STREAM_CLIENT.split(
+            "- (void)noteDirectDrawableForOwnerPID:", 1
+        )[1].split("- (void)clearDirectDrawableActivity", 1)[0]
+        self.assertIn("self.mode != MacWSStreamModeFullscreen", sender)
+        self.assertIn("self.mode != MacWSStreamModeWindow", sender)
+
+        view = (ROOT / "MacWSHost" / "Rendering" /
+                "MacWSMetalView.m").read_text()
+        draw = view.split("- (void)drawInMTKView:", 1)[1].split(
+            "- (BOOL)resolveFullscreenLayerAtPoint:", 1
+        )[0]
+        self.assertIn("BOOL focusedWindowDirectAuthoritative", draw)
+        self.assertIn("!focusedWindowDirectAuthoritative", draw)
+        self.assertIn('fullscreenDirectAuthoritative ? @"fullscreen" : @"window"',
+                      draw)
+        direct_window_draw = draw.index(
+            "if (directSurface && !finalComposite &&\n"
+            "        !fullscreenDirectAuthoritative && baseCatalystFrame.texture)"
+        )
+        direct_window_encode = draw.index(
+            "if (MacWSEncodeCatalystDrawable(", direct_window_draw
+        )
+        pipeline_bind = draw.index(
+            "[encoder setRenderPipelineState:_pipeline];", direct_window_draw
+        )
+        self.assertLess(
+            pipeline_bind,
+            direct_window_encode,
+            "base elision must not reach drawPrimitives without an explicit "
+            "render pipeline binding",
+        )
 
     def test_generic_producer_requires_authority_ancestry_and_size(self):
         validator = METAL.split(
@@ -148,12 +277,13 @@ class RenderActivityAuthorityContract(unittest.TestCase):
         )
         for token in (
             "MACWS_FOCUSED_LAYER_DIRECT",
-            "/tmp/macws_focused_layer_direct",
             "MacWSFocusedRenderAuthority authority = {0}",
             "int32_t authorityOwner = authority.ownerPID",
             "(IOSurfaceRef)CFRetain(surface)",
         ):
             self.assertIn(token, wrapper)
+        self.assertIn("static BOOL directEnabled = YES", wrapper)
+        self.assertIn('strcmp(value, "0") != 0', wrapper)
         self.assertNotIn(
             "macws_process_descends_from(getpid(), authorityOwner)", wrapper)
 
@@ -236,11 +366,12 @@ class RenderActivityAuthorityContract(unittest.TestCase):
         ):
             self.assertIn(token, validator)
 
-    def test_drawable_receiver_drains_signaled_mach_port(self):
+    def test_drawable_receiver_yields_between_signaled_mach_messages(self):
         handler = DRAWABLE_RECEIVER.split(
             "dispatch_source_set_event_handler(DrawableSource, ^{", 1
         )[1].split("});\n        dispatch_resume(DrawableSource);", 1)[0]
-        self.assertIn("for (;;)", handler)
+        self.assertIn("messageBudget = 0; messageBudget < 1", handler)
+        self.assertNotIn("for (;;)", handler)
         self.assertIn("mach_msg(", handler)
         self.assertIn("if (received == MACH_RCV_TIMED_OUT) break;", handler)
         self.assertIn("CFRelease(surface);", handler)
@@ -301,8 +432,16 @@ class RenderActivityAuthorityContract(unittest.TestCase):
 
         compositor = (ROOT / "MacWSHost" / "Rendering" /
                       "MacWSCatalystDrawableCompositor.m").read_text()
-        self.assertIn("while (pending.count > 2)", compositor)
+        self.assertIn("arrayWithCapacity:3", compositor)
+        self.assertIn("while (pending.count > 3)", compositor)
         self.assertIn("dequeueFrameForOwnerPID:", compositor)
+
+        receiver = (ROOT / "MacWSHost" / "Transport" /
+                    "MacWSCatalystDrawableReceiver.m").read_text()
+        self.assertIn(
+            "messageBudget = 0; messageBudget < 1", receiver
+        )
+        self.assertNotIn("for (;;) {", receiver)
 
     def test_generic_agx_present_avoids_game_direct_drawable_path(self):
         wrapper = METAL.split(

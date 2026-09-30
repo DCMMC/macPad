@@ -167,6 +167,7 @@ static void SuspendFullscreenLayerCapturesForFinalComposite(void);
 static void ResumeFullscreenLayerCapturesForFallback(void);
 static void ClearDirectDrawableActivity(MacWSDisplayClient *client,
                                         NSString *reason);
+static void StartClientStream(MacWSDisplayClient *client);
 static NSDictionary<NSNumber *, NSData *> *CopyWindowMetrics(int32_t pid);
 
 extern int proc_pidinfo(int pid, int flavor, uint64_t arg, void *buffer,
@@ -224,7 +225,8 @@ static void RetireFocusedRenderAuthority(void) {
     (void)unlink(MACWS_RENDER_AUTHORITY_PATH);
 }
 
-static void PublishFocusedRenderAuthority(MacWSTransientLayer *layer);
+static BOOL PublishFocusedRenderAuthority(MacWSTransientLayer *layer);
+static BOOL PublishFocusedWindowClientAuthorityIfAvailable(void);
 
 static void DisplayLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 static BOOL MacWSDisplayDiagnosticsEnabled(void) {
@@ -453,33 +455,25 @@ static int MacWSCompareFrameInterval(const void *left, const void *right) {
 }
 @end
 
-static void PublishFocusedRenderAuthority(MacWSTransientLayer *layer) {
-    if (!layer || layer.retiring || layer.ownerPID <= 1 ||
-        layer.windowID == 0 || !layer.latestSurface) {
-        RetireFocusedRenderAuthority();
-        return;
-    }
-    size_t width = IOSurfaceGetWidth(layer.latestSurface);
-    size_t height = IOSurfaceGetHeight(layer.latestSurface);
+static BOOL PublishFocusedRenderAuthorityIdentity(
+        int32_t ownerPID, uint32_t windowID, size_t width, size_t height) {
     uint64_t now = MonotonicNanoseconds();
-    if (!now || width == 0 || height == 0 || width > UINT32_MAX ||
-        height > UINT32_MAX) {
-        RetireFocusedRenderAuthority();
-        return;
-    }
+    if (!now || ownerPID <= 1 || windowID == 0 || width == 0 ||
+        height == 0 || width > UINT32_MAX || height > UINT32_MAX)
+        return NO;
     if (FocusedRenderAuthorityDescriptor < 0) {
         FocusedRenderAuthorityDescriptor = open(
             MACWS_RENDER_AUTHORITY_PATH,
             O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
     }
-    if (FocusedRenderAuthorityDescriptor < 0) return;
+    if (FocusedRenderAuthorityDescriptor < 0) return NO;
     MacWSRenderAuthorityRecord record = {
         .magic = MACWS_RENDER_AUTHORITY_MAGIC,
         .version = MACWS_RENDER_AUTHORITY_VERSION,
         .size = sizeof(record),
         .timestampNS = now,
-        .ownerPID = layer.ownerPID,
-        .layerWindowID = layer.windowID,
+        .ownerPID = ownerPID,
+        .layerWindowID = windowID,
         .width = (uint32_t)width,
         .height = (uint32_t)height,
     };
@@ -487,7 +481,19 @@ static void PublishFocusedRenderAuthority(MacWSTransientLayer *layer) {
                sizeof(record), 0) != sizeof(record) ||
         ftruncate(FocusedRenderAuthorityDescriptor, sizeof(record)) != 0) {
         RetireFocusedRenderAuthority();
+        return NO;
     }
+    return YES;
+}
+
+static BOOL PublishFocusedRenderAuthority(MacWSTransientLayer *layer) {
+    if (!layer || layer.retiring || layer.ownerPID <= 1 ||
+        layer.windowID == 0 || !layer.latestSurface)
+        return NO;
+    return PublishFocusedRenderAuthorityIdentity(
+        layer.ownerPID, layer.windowID,
+        IOSurfaceGetWidth(layer.latestSurface),
+        IOSurfaceGetHeight(layer.latestSurface));
 }
 
 static BOOL LayerCanAuthorizeFocusedRender(MacWSTransientLayer *layer) {
@@ -547,6 +553,13 @@ static BOOL LayerNeedsIndependentFinalCompositeCapture(
 @property(nonatomic) CGFloat windowBackingScale;
 @property(nonatomic) size_t lastSurfaceWidth;
 @property(nonatomic) size_t lastSurfaceHeight;
+// SendWindowList derives this exact identity from WindowServer's live
+// front-to-back on-screen list joined to AppInput's focused-window metrics.
+// A window-mode capture needs the same authority as the fullscreen layer
+// graph; otherwise ordinary Chromium/video damage remains on WindowServer's
+// 100-ms static-desktop completion cadence.
+@property(nonatomic) int32_t catalogFrontmostOwnerPID;
+@property(nonatomic) uint32_t catalogFrontmostWindowID;
 // CGDisplayStreamStop is asynchronous.  A generation token keeps a delayed
 // exact-window recreation from resurrecting an obsolete Scene subscription.
 @property(nonatomic) uint64_t geometryRestartGeneration;
@@ -570,6 +583,12 @@ static BOOL LayerNeedsIndependentFinalCompositeCapture(
 @property(nonatomic) uint32_t directDrawableWidth;
 @property(nonatomic) uint32_t directDrawableHeight;
 @property(nonatomic) CFTimeInterval directDrawableLastRejectionLogTime;
+// A focused exact-window subscription has no MacWSTransientLayer wrapper.
+// Track ownership of its base CGDisplayStream suspension on the client so a
+// lost/changed Host heartbeat can restart that exact stream independently.
+@property(nonatomic) BOOL directDrawableBaseCaptureSuspended;
+@property(nonatomic) BOOL directDrawableBaseCaptureSuspensionPending;
+@property(nonatomic) BOOL directDrawablePacingLeasePublished;
 // Exact focused identities from the last catalog this client received.
 // Retain the decision that Host acted on even if SkyLight changes the same
 // window's presentation level before the first direct drawable heartbeat.
@@ -601,6 +620,21 @@ static BOOL LayerNeedsIndependentFinalCompositeCapture(
     _sequence = 0;
 }
 @end
+
+static BOOL PublishFocusedWindowClientAuthorityIfAvailable(void) {
+    for (MacWSDisplayClient *client in [Clients copy]) {
+        if (!client.subscriptionActive || client.deliveryPaused ||
+            client.mode != MacWSStreamModeWindow || client.windowID == 0 ||
+            client.windowID != client.catalogFrontmostWindowID ||
+            client.catalogFrontmostOwnerPID <= 1 ||
+            client.lastSurfaceWidth == 0 || client.lastSurfaceHeight == 0)
+            continue;
+        return PublishFocusedRenderAuthorityIdentity(
+            client.catalogFrontmostOwnerPID, client.windowID,
+            client.lastSurfaceWidth, client.lastSurfaceHeight);
+    }
+    return NO;
+}
 
 static BOOL MacWSLayerSurfaceMatchesSize(MacWSTransientLayer *layer,
                                          size_t width, size_t height) {
@@ -1282,6 +1316,20 @@ static void SendWindowList(MacWSDisplayClient *client) {
         frontmostWindowID = windowID;
         break;
     }
+    client.catalogFrontmostOwnerPID = frontmostPID;
+    client.catalogFrontmostWindowID = frontmostWindowID;
+    // A catalog refresh can establish focus after the exact-window stream has
+    // already delivered and retained its dimensions. Refresh the same
+    // authority immediately instead of waiting for unrelated future damage.
+    // If no active window-mode client matches, the existing two-second
+    // freshness check remains the fail-closed revocation boundary.
+    if (client.mode == MacWSStreamModeWindow &&
+        client.windowID == frontmostWindowID && frontmostPID > 1 &&
+        client.lastSurfaceWidth != 0 && client.lastSurfaceHeight != 0) {
+        (void)PublishFocusedRenderAuthorityIdentity(
+            frontmostPID, frontmostWindowID,
+            client.lastSurfaceWidth, client.lastSurfaceHeight);
+    }
     NSRunningApplication *workspaceFrontmost =
         NSWorkspace.sharedWorkspace.frontmostApplication;
     NSMutableDictionary<NSNumber *, NSNumber *> *focusedWindowOwners =
@@ -1643,6 +1691,22 @@ static void PublishFrame(MacWSDisplayClient *client,
     if (!layer) {
         client.lastSurfaceWidth = width;
         client.lastSurfaceHeight = height;
+        // Runtime-confirmed by the 2026-09-30 TestUFO profile on iPad13,6:
+        // the page produced 118 fps internally, but the exact-window stream
+        // and Host presented at 9.86 fps with a 101.49-ms source median.
+        // GPU execution was only 0.42 ms. The window-mode base never entered
+        // PublishFocusedRenderAuthority, so no authenticated render-activity
+        // record could wake the 100-ms idle completion loop. Publish the same
+        // exact PID/window/surface-size authority used by fullscreen capture;
+        // Metal_hooks and WindowServer still independently validate geometry,
+        // freshness and producer ancestry before raising compositor cadence.
+        if (client.mode == MacWSStreamModeWindow &&
+            client.windowID == client.catalogFrontmostWindowID &&
+            client.catalogFrontmostOwnerPID > 1) {
+            (void)PublishFocusedRenderAuthorityIdentity(
+                client.catalogFrontmostOwnerPID, client.windowID,
+                width, height);
+        }
     }
     if (!layer && client.mode == MacWSStreamModeWindow &&
         client.windowBackingScale <= 0.0) {
@@ -2707,19 +2771,68 @@ static MacWSTransientLayer *ValidatedDirectDrawableLayer(
     return layer;
 }
 
+static BOOL ValidateDirectDrawableWindowBase(
+        MacWSDisplayClient *client, int32_t ownerPID,
+        uint32_t layerWindowID, uint32_t width, uint32_t height,
+        NSString **rejectionReason) {
+    if (rejectionReason) *rejectionReason = nil;
+    BOOL ownsBaseSuspension = client && client.directDrawableActive &&
+        client.directDrawableOwnerPID == ownerPID &&
+        client.directDrawableLayerWindowID == layerWindowID &&
+        (client.directDrawableBaseCaptureSuspended ||
+         client.directDrawableBaseCaptureSuspensionPending);
+    if (!client || !client.subscriptionActive || client.deliveryPaused ||
+        client.mode != MacWSStreamModeWindow || client.windowID == 0 ||
+        (!client.stream && !ownsBaseSuspension)) {
+        if (rejectionReason) *rejectionReason = @"window-client-state";
+        return NO;
+    }
+    if (ownerPID <= 1 || layerWindowID == 0 || width < 320 || height < 240 ||
+        width > MACWS_STREAM_MAX_DIMENSION ||
+        height > MACWS_STREAM_MAX_DIMENSION) {
+        if (rejectionReason) *rejectionReason = @"malformed-window-identity";
+        return NO;
+    }
+    if (client.windowID != layerWindowID ||
+        client.catalogFrontmostWindowID != layerWindowID ||
+        client.catalogFrontmostOwnerPID != ownerPID) {
+        if (rejectionReason) *rejectionReason = @"window-focus-identity";
+        return NO;
+    }
+    size_t baseWidth = client.lastSurfaceWidth;
+    size_t baseHeight = client.lastSurfaceHeight;
+    uint64_t widthDifference = width > baseWidth
+        ? width - baseWidth : baseWidth - width;
+    uint64_t heightDifference = height > baseHeight
+        ? height - baseHeight : baseHeight - height;
+    if (baseWidth == 0 || baseHeight == 0 ||
+        widthDifference * 5u > baseWidth ||
+        heightDifference * 5u > baseHeight) {
+        if (rejectionReason) *rejectionReason = @"window-focused-size";
+        return NO;
+    }
+    return YES;
+}
+
 static void ClearDirectDrawableActivity(MacWSDisplayClient *client,
                                         NSString *reason) {
     if (!client) return;
     BOOL wasActive = client.directDrawableActive;
     int32_t ownerPID = client.directDrawableOwnerPID;
     uint32_t layerWindowID = client.directDrawableLayerWindowID;
+    BOOL resumeWindowBase = client.directDrawableBaseCaptureSuspended ||
+        client.directDrawableBaseCaptureSuspensionPending;
+    BOOL retirePacingLease = client.directDrawablePacingLeasePublished;
     client.directDrawableActive = NO;
     client.directDrawableDeadline = 0;
     client.directDrawableOwnerPID = 0;
     client.directDrawableLayerWindowID = 0;
     client.directDrawableWidth = 0;
     client.directDrawableHeight = 0;
-    if (wasActive) RetireDirectDrawablePacingLease();
+    client.directDrawableBaseCaptureSuspended = NO;
+    client.directDrawableBaseCaptureSuspensionPending = NO;
+    client.directDrawablePacingLeasePublished = NO;
+    if (retirePacingLease) RetireDirectDrawablePacingLease();
     NSUInteger resumed = 0;
     for (MacWSTransientLayer *layer in
             [client.transientLayers.allValues copy]) {
@@ -2736,6 +2849,12 @@ static void ClearDirectDrawableActivity(MacWSDisplayClient *client,
             StartTransientLayer(layer);
             if (layer.stream) resumed++;
         }
+    }
+    if (resumeWindowBase && client.subscriptionActive &&
+        !client.deliveryPaused && client.mode == MacWSStreamModeWindow &&
+        client.windowID != 0 && !client.stream) {
+        StartClientStream(client);
+        if (client.stream) resumed++;
     }
     if (wasActive || resumed) {
         DisplayLog(@"direct-drawable-capture-cleared owner-pid=%d layer=%u "
@@ -2807,10 +2926,20 @@ static void HandleDirectDrawableActivity(MacWSDisplayClient *client,
         widthValue > MACWS_STREAM_MAX_DIMENSION || heightValue == 0 ||
         heightValue > MACWS_STREAM_MAX_DIMENSION) return;
     NSString *rejectionReason = nil;
-    MacWSTransientLayer *layer = ValidatedDirectDrawableLayer(
-        client, (int32_t)ownerValue, (uint32_t)layerValue,
-        (uint32_t)widthValue, (uint32_t)heightValue, &rejectionReason);
-    if (!layer) {
+    BOOL windowBase = client.mode == MacWSStreamModeWindow;
+    MacWSTransientLayer *layer = nil;
+    BOOL validated = NO;
+    if (windowBase) {
+        validated = ValidateDirectDrawableWindowBase(
+            client, (int32_t)ownerValue, (uint32_t)layerValue,
+            (uint32_t)widthValue, (uint32_t)heightValue, &rejectionReason);
+    } else {
+        layer = ValidatedDirectDrawableLayer(
+            client, (int32_t)ownerValue, (uint32_t)layerValue,
+            (uint32_t)widthValue, (uint32_t)heightValue, &rejectionReason);
+        validated = layer != nil;
+    }
+    if (!validated) {
         CFTimeInterval now = CFAbsoluteTimeGetCurrent();
         if (now - client.directDrawableLastRejectionLogTime >= 1.0) {
             client.directDrawableLastRejectionLogTime = now;
@@ -2849,12 +2978,71 @@ static void HandleDirectDrawableActivity(MacWSDisplayClient *client,
     client.directDrawableLayerWindowID = (uint32_t)layerValue;
     client.directDrawableWidth = (uint32_t)widthValue;
     client.directDrawableHeight = (uint32_t)heightValue;
-    PublishDirectDrawablePacingLease(
-        client.directDrawableOwnerPID,
-        client.directDrawableLayerWindowID,
-        client.directDrawableWidth,
-        client.directDrawableHeight);
+    // Fullscreen game loops continue producing independently, so their
+    // validated drawable lets WindowServer return to its 100-ms desktop
+    // cadence. Chromium requestAnimationFrame is currently driven by the
+    // WindowServer completion clock; keep its authenticated 120-Hz render
+    // activity intact while removing only the redundant exact-window capture.
+    if (!windowBase) {
+        PublishDirectDrawablePacingLease(
+            client.directDrawableOwnerPID,
+            client.directDrawableLayerWindowID,
+            client.directDrawableWidth,
+            client.directDrawableHeight);
+        client.directDrawablePacingLeasePublished = YES;
+    }
     ScheduleDirectDrawableExpiry(client);
+    if (identityChanged) {
+        DisplayLog(@"direct-drawable-activity-validated owner-pid=%lld "
+                   "layer=%llu size=%llux%llu mode=%@ timeout-ms=%.0f",
+                   (long long)ownerValue, (unsigned long long)layerValue,
+                   (unsigned long long)widthValue,
+                   (unsigned long long)heightValue,
+                   windowBase ? @"window-base" : @"fullscreen-layer",
+                   MacWSDirectDrawableLeaseSeconds * 1000.0);
+    }
+
+    if (windowBase) {
+        if (client.directDrawableBaseCaptureSuspended ||
+            client.directDrawableBaseCaptureSuspensionPending) return;
+        client.directDrawableBaseCaptureSuspensionPending = YES;
+        __weak MacWSDisplayClient *weakWindowClient = client;
+        EnqueueRetiredTransientStop(^{
+            MacWSDisplayClient *strongClient = weakWindowClient;
+            if (!strongClient) return;
+            strongClient.directDrawableBaseCaptureSuspensionPending = NO;
+            if (!strongClient.directDrawableActive ||
+                !strongClient.subscriptionActive ||
+                strongClient.deliveryPaused ||
+                strongClient.mode != MacWSStreamModeWindow ||
+                strongClient.windowID !=
+                    strongClient.directDrawableLayerWindowID ||
+                strongClient.catalogFrontmostWindowID !=
+                    strongClient.directDrawableLayerWindowID ||
+                strongClient.catalogFrontmostOwnerPID !=
+                    strongClient.directDrawableOwnerPID ||
+                strongClient.directDrawableDeadline <=
+                    CFAbsoluteTimeGetCurrent()) return;
+            uint64_t oldStreamID = strongClient.streamID;
+            strongClient.directDrawableBaseCaptureSuspended = YES;
+            if (strongClient.stream) {
+                strongClient.streamID = NextStreamID++;
+                if (strongClient.streamID == 0)
+                    strongClient.streamID = NextStreamID++;
+                [strongClient stopStream];
+            }
+            DisplayLog(@"direct-drawable-base-capture-suspended "
+                       "owner-pid=%d window=%u old-stream=%llu "
+                       "generation=%llu size=%ux%u",
+                       strongClient.directDrawableOwnerPID,
+                       strongClient.directDrawableLayerWindowID,
+                       (unsigned long long)oldStreamID,
+                       (unsigned long long)strongClient.streamID,
+                       strongClient.directDrawableWidth,
+                       strongClient.directDrawableHeight);
+        });
+        return;
+    }
     if (layer.directDrawableCaptureSuspended ||
         layer.directDrawableCaptureSuspensionPending) return;
 
@@ -2891,14 +3079,6 @@ static void HandleDirectDrawableActivity(MacWSDisplayClient *client,
                    strongClient.directDrawableWidth,
                    strongClient.directDrawableHeight);
     });
-    if (identityChanged) {
-        DisplayLog(@"direct-drawable-activity-validated owner-pid=%lld "
-                   "layer=%llu size=%llux%llu timeout-ms=%.0f",
-                   (long long)ownerValue, (unsigned long long)layerValue,
-                   (unsigned long long)widthValue,
-                   (unsigned long long)heightValue,
-                   MacWSDirectDrawableLeaseSeconds * 1000.0);
-    }
 }
 
 static void SuspendFullscreenLayerCapturesForFinalComposite(void) {
@@ -2965,7 +3145,12 @@ static void SuspendFullscreenLayerCapturesForFinalComposite(void) {
     // process ask WindowServer for an active completion cadence. It does not
     // itself raise the cadence: without a fresh, window-sized Metal present,
     // the compositor remains at the 100-ms idle pace.
-    PublishFocusedRenderAuthority(focusedRenderAuthority);
+    BOOL publishedAuthority =
+        PublishFocusedRenderAuthority(focusedRenderAuthority);
+    if (!publishedAuthority)
+        publishedAuthority =
+            PublishFocusedWindowClientAuthorityIfAvailable();
+    if (!publishedAuthority) RetireFocusedRenderAuthority();
     if (scheduled) {
         DisplayLog(@"layer-capture-suspend-batch count=%lu interval-ms=16 "
                    "reason=final-composite-authoritative",
@@ -3271,11 +3456,30 @@ static void StartSubscription(MacWSDisplayClient *client,
             return;
         }
     }
+    // The generic path replaces the client's entire capture graph below. Do
+    // not carry a direct-drawable lease or an owned suspension across that
+    // generation: an old asynchronous expiry could otherwise restart/retire
+    // resources belonging to the new subscription. We intentionally do not
+    // resume the old exact stream here because StartClientStream creates the
+    // replacement after the mode/window identity is committed.
+    if (client.directDrawablePacingLeasePublished)
+        RetireDirectDrawablePacingLease();
+    client.directDrawableActive = NO;
+    client.directDrawableDeadline = 0;
+    client.directDrawableOwnerPID = 0;
+    client.directDrawableLayerWindowID = 0;
+    client.directDrawableWidth = 0;
+    client.directDrawableHeight = 0;
     client.subscriptionActive = YES;
     client.deliveryPaused = NO;
     client.frameAcknowledged = NO;
     client.mode = mode;
     client.windowID = mode == MacWSStreamModeWindow ? windowID : 0;
+    client.catalogFrontmostOwnerPID = 0;
+    client.catalogFrontmostWindowID = 0;
+    client.directDrawableBaseCaptureSuspended = NO;
+    client.directDrawableBaseCaptureSuspensionPending = NO;
+    client.directDrawablePacingLeasePublished = NO;
     client.windowBackingScale = 0.0;
     [client stopTransientLayers];
     StartClientStream(client);

@@ -242,7 +242,8 @@
     dispatch_async(self.queue, ^{
         if (!self.connection || !self.isConnected ||
             !self.subscriptionActive ||
-            self.mode != MacWSStreamModeFullscreen) return;
+            (self.mode != MacWSStreamModeFullscreen &&
+             self.mode != MacWSStreamModeWindow)) return;
         xpc_object_t request = xpc_dictionary_create(NULL, NULL, 0);
         xpc_dictionary_set_string(
             request, MACWS_STREAM_KEY_OP,

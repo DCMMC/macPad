@@ -94,15 +94,14 @@ typedef struct __attribute__((packed)) {
     uint32_t height;
 } MacWSRenderAuthorityRecord;
 
-// macwsdisplayd publishes this only after the Host's direct-drawable
-// heartbeat has matched a live, focused SkyLight layer carrying
-// AppInputBridge's FullscreenCanvas capability. The drawable may use the
-// game's configured render resolution rather than the desktop pixel size. It
-// lets
-// WindowServer pace the now-redundant physical desktop composite without
-// trusting a marker created by the game itself.  Freshness is monotonic and
-// fail-closed so a dead Host/display service naturally restores the ordinary
-// render cadence.
+// macwsdisplayd publishes this only for a fullscreen Host after its
+// direct-drawable heartbeat has matched a live, focused SkyLight layer
+// carrying AppInputBridge's FullscreenCanvas capability. A focused
+// exact-window direct drawable uses the same Host/displayd validation to
+// suspend its redundant capture, but deliberately does not publish this
+// pacing lease because Chromium requestAnimationFrame still consumes the
+// WindowServer completion clock. Freshness is monotonic and fail-closed so a
+// dead Host/display service naturally restores the ordinary cadence/capture.
 typedef struct __attribute__((packed)) {
     uint32_t magic;
     uint16_t version;

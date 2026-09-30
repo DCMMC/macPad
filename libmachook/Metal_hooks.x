@@ -1955,7 +1955,8 @@ static void macws_chromium_layer_set_contents_activity(
         &authority);
     if (!authorized) return;
 
-    // A/B-gated zero-copy transport for Chromium/Electron.  The producer's
+    // Focus-authorized zero-copy transport for Chromium/Electron. The
+    // producer's
     // public CALayer boundary already owns the completed IOSurface which will
     // be consumed by WindowServer. Transfer that same immutable generation to
     // Host instead of waiting for WindowServer to wrap it in another AGX
@@ -1964,12 +1965,14 @@ static void macws_chromium_layer_set_contents_activity(
     // focused owner/window authority; the original setContents: call above is
     // always preserved.
     static dispatch_once_t directOnce;
-    static BOOL directEnabled = NO;
+    static BOOL directEnabled = YES;
     dispatch_once(&directOnce, ^{
         const char *value = getenv("MACWS_FOCUSED_LAYER_DIRECT");
-        directEnabled = value
-            ? strcmp(value, "0") != 0
-            : access("/tmp/macws_focused_layer_direct", F_OK) == 0;
+        // The hook is installed only in an authenticated Chromium GPU helper,
+        // and every frame above has already passed displayd's fresh focused
+        // PID/window/geometry authority. Keep an explicit kill switch for
+        // diagnosis; production no longer depends on a mutable marker.
+        directEnabled = !value || strcmp(value, "0") != 0;
     });
     if (!directEnabled) return;
 
