@@ -167,15 +167,38 @@ class RenderActivityAuthorityContract(unittest.TestCase):
             "- (BOOL)resolveFullscreenLayerAtPoint:", 1
         )[0]
         self.assertIn("BOOL focusedWindowDirectAuthoritative", draw)
-        self.assertIn("!focusedWindowDirectAuthoritative", draw)
         self.assertIn('fullscreenDirectAuthoritative ? @"fullscreen" : @"window"',
                       draw)
         self.assertIn("BOOL focusedDirectAuthorityLive", draw)
         self.assertIn("directHeartbeatAge <= 3.0", draw)
+        self.assertIn(
+            "baseCatalystFrame.record.width == "
+            "_directDrawableHeartbeatWidth",
+            draw,
+        )
+        self.assertIn(
+            "baseCatalystFrame.record.height == "
+            "_directDrawableHeartbeatHeight",
+            draw,
+        )
+        scheduler = draw.split(
+            "if (_directDrawableContinuousPacing)", 1
+        )[1].split("BOOL drewCatalystDrawable", 1)[0]
+        self.assertIn("_directDrawableHeartbeatWidth", scheduler)
+        self.assertIn("_directDrawableHeartbeatHeight", scheduler)
+        self.assertIn("for (;;)", scheduler)
+
+        fused_join = draw.split(
+            "MacWSSurfaceFrame *focusedDirectCompositeLayer = nil;", 1
+        )[1].split("if (directSurface)", 1)[0]
+        self.assertIn("descriptor.destinationWidth", fused_join)
+        self.assertIn("baseCatalystFrame.record.width", fused_join)
+        self.assertIn("descriptor.destinationHeight", fused_join)
+        self.assertIn("baseCatalystFrame.record.height", fused_join)
         direct_window_draw = draw.index(
             "if (directSurface && !finalComposite &&\n"
             "        !fullscreenDirectAuthoritative &&\n"
-            "        focusedWindowDirectAuthoritative)"
+            "        focusedWindowDirectAuthoritative && !fusedFocusedDirect)"
         )
         direct_window_encode = draw.index(
             "if (MacWSEncodeCatalystDrawable(", direct_window_draw
@@ -189,6 +212,18 @@ class RenderActivityAuthorityContract(unittest.TestCase):
             "base elision must not reach drawPrimitives without an explicit "
             "render pipeline binding",
         )
+        titlebar = draw.split(
+            "CGFloat catalystTitlebarHeightPixels =", 1
+        )[1].split("MacWSSurfaceFrame *focusedDirectCompositeLayer", 1)[0]
+        self.assertIn("? 0.0 : 48.0", titlebar)
+        self.assertNotIn("focusedLayerDirect", titlebar)
+        window_fused = draw.split(
+            "if (focusedWindowDirectAuthoritative && "
+            "_directCompositePipeline)", 1
+        )[1].split("} else if (focusedDirectCompositeLayer)", 1)[0]
+        self.assertIn("catalystTitlebarHeightPixels", window_fused)
+        self.assertIn("directTop", window_fused)
+        self.assertIn("_directCompositePipeline", window_fused)
 
         final_direct = draw.split(
             "if (directSurface && finalComposite && _overlayFrames.count &&",
@@ -205,6 +240,15 @@ class RenderActivityAuthorityContract(unittest.TestCase):
         self.assertIn("heightDifference > 2u", callback)
         self.assertIn("direct-drawable-authority-cleared", callback)
         self.assertIn("[_streamClient clearDirectDrawableActivity]", callback)
+        self.assertIn("BOOL geometryChanged", callback)
+        self.assertIn("_directDrawableHeartbeatWidth = direct.width", callback)
+        self.assertIn("_directDrawableHeartbeatHeight = direct.height", callback)
+        join_miss = callback.split("} else {", 1)[1]
+        self.assertIn("[_streamClient requestWindowList]", join_miss)
+        self.assertIn(
+            "refreshTime - _lastDirectDrawableCatalogRefreshTime >= 0.25",
+            join_miss,
+        )
 
     def test_generic_producer_requires_authority_ancestry_and_size(self):
         validator = METAL.split(
@@ -394,9 +438,45 @@ class RenderActivityAuthorityContract(unittest.TestCase):
             "MacWSStreamWindowFocused",
             "MacWSStreamWindowVisible",
             "MacWSStreamWindowOnScreen",
-            'rejectionReason = @"focused-size"',
+            'rejectionReason = @"catalog-size"',
+            "layer.catalogPixelWidth",
+            "layer.catalogPixelHeight",
+            "widthDifference > 2u",
+            "heightDifference > 2u",
         ):
             self.assertIn(token, validator)
+        self.assertNotIn("widthDifference * 5u", validator)
+        self.assertNotIn("heightDifference * 5u", validator)
+        self.assertIn("validatedDestination", validator)
+        self.assertIn(
+            "runtime-confirmed direct-drawable-catalog-geometry",
+            DISPLAYD,
+        )
+
+        layer = DISPLAYD.split(
+            "@interface MacWSTransientLayer : NSObject", 1
+        )[1].split("@end", 1)[0]
+        self.assertIn("latestPublishedStreamID", layer)
+        self.assertIn("latestPublishedSequence", layer)
+        geometry = DISPLAYD.split(
+            "static void AppendLayerGeometry(", 1
+        )[1].split("static void SendLayerGeometryBatch", 1)[0]
+        self.assertIn(".streamID = layer.latestPublishedStreamID", geometry)
+        self.assertIn(".sequence = geometrySequence", geometry)
+        self.assertIn(
+            "layer.streamID == layer.latestPublishedStreamID", geometry
+        )
+        self.assertNotIn(".streamID = layer.streamID", geometry)
+
+        list_request = DISPLAYD.split(
+            'strcmp(operation, MACWS_STREAM_OP_LIST_WINDOWS) == 0', 1
+        )[1].split(
+            'strcmp(operation, MACWS_STREAM_OP_SUBSCRIBE) == 0', 1
+        )[0]
+        self.assertLess(
+            list_request.index("SendWindowList(client)"),
+            list_request.index("ScheduleTransientReconcile(0)"),
+        )
 
     def test_drawable_receiver_uses_bounded_two_message_catch_up(self):
         handler = DRAWABLE_RECEIVER.split(

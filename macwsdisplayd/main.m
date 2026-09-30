@@ -320,6 +320,14 @@ static void WriteFinalCompositeState(NSString *state, pid_t producerPID,
 // source if that final producer becomes unavailable.
 @property(nonatomic) MacWSStreamWindowFlags windowFlags;
 @property(nonatomic) CGRect destinationBounds;
+// Current WindowServer catalog geometry for this exact window.  The retained
+// latestSurface can intentionally belong to an older generation after its
+// duplicate capture stream is suspended; it must never authenticate a new
+// direct-drawable size during resize.
+@property(nonatomic) CGRect catalogBounds;
+@property(nonatomic) CGFloat catalogBackingScale;
+@property(nonatomic) uint32_t catalogPixelWidth;
+@property(nonatomic) uint32_t catalogPixelHeight;
 @property(nonatomic) CGRect popupCompositeSource;
 @property(nonatomic) uint64_t popupCompositeMinimumTime;
 @property(nonatomic) BOOL popupCompositeEligible;
@@ -327,6 +335,13 @@ static void WriteFinalCompositeState(NSString *state, pid_t producerPID,
 @property(nonatomic) uint64_t lastPopupCompositeSequence;
 @property(nonatomic) uint64_t streamID;
 @property(nonatomic) uint64_t sequence;
+// Ordered identity of the retained frame actually delivered to Host. Capture
+// cancellation advances streamID to invalidate late CGDisplayStream callbacks,
+// but Host still owns the preceding stream generation until a replacement
+// frame is published. Geometry for latestSurface must extend that delivered
+// generation rather than the cancellation generation.
+@property(nonatomic) uint64_t latestPublishedStreamID;
+@property(nonatomic) uint64_t latestPublishedSequence;
 @property(nonatomic) uint64_t firstDisplayTime;
 @property(nonatomic) uint64_t droppedFrames;
 @property(nonatomic) NSUInteger missCount;
@@ -450,6 +465,8 @@ static int MacWSCompareFrameInterval(const void *left, const void *right) {
 - (void)stopStream {
     [self stopCapturePreservingSurface];
     self.latestSurface = NULL;
+    self.latestPublishedStreamID = 0;
+    self.latestPublishedSequence = 0;
     _latestDisplayTime = 0;
     _snapshotComplete = NO;
 }
@@ -1804,6 +1821,10 @@ static void PublishFrame(MacWSDisplayClient *client,
         .destinationWidth = destinationWidth,
         .destinationHeight = destinationHeight,
     };
+    if (layer) {
+        layer.latestPublishedStreamID = descriptor.streamID;
+        layer.latestPublishedSequence = descriptor.sequence;
+    }
     if (layer) layer.lastPopupCompositeSequence = nativePopup
         ? FinalCompositeRecord.sequence : 0;
     if (nativePopup && !layer.popupCompositeReported) {
@@ -2188,6 +2209,19 @@ static void AppendLayerGeometry(NSMutableData *batch,
     if (!batch || !client || !layer || !layer.latestSurface ||
         layer.retiring || batch.length / sizeof(MacWSStreamLayerGeometry) >=
             MACWS_STREAM_MAX_LAYER_GEOMETRY) return;
+    // streamID is also the asynchronous capture-generation token. Stopping a
+    // duplicate capture advances it before preserving latestSurface, whereas
+    // Host's retained descriptor still belongs to the preceding generation.
+    // Runtime-confirmed at 1790783193: displayd sent resize geometry on stream
+    // 3 while Host retained stream 2, so the ordered supersession predicate
+    // correctly rejected it and direct composition could not recover. Extend
+    // the last descriptor actually published to Host; if capture is still on
+    // that generation, advance its sequence too so the next content frame is
+    // ordered after this transaction.
+    if (layer.latestPublishedStreamID == 0 ||
+        layer.latestPublishedSequence == 0 ||
+        layer.latestPublishedSequence == UINT64_MAX) return;
+    uint64_t geometrySequence = layer.latestPublishedSequence + 1;
     uint32_t flags = MacWSStreamFrameOverlay |
         ([layer.ownerName isEqualToString:@"Dock"]
             ? MacWSStreamFrameGlobalSystemSurface : 0) |
@@ -2197,8 +2231,8 @@ static void AppendLayerGeometry(NSMutableData *batch,
         .magic = MACWS_STREAM_MAGIC,
         .version = MACWS_STREAM_VERSION,
         .size = sizeof(MacWSStreamLayerGeometry),
-        .streamID = layer.streamID,
-        .sequence = ++layer.sequence,
+        .streamID = layer.latestPublishedStreamID,
+        .sequence = geometrySequence,
         .displayTime = displayTime,
         .windowID = client.windowID,
         .layerWindowID = layer.windowID,
@@ -2213,11 +2247,11 @@ static void AppendLayerGeometry(NSMutableData *batch,
         .flags = flags,
     };
     if (!MacWSStreamLayerGeometryIsValid(&geometry, sizeof(geometry))) {
-        // Do not consume an invalid sequence. The next real content frame or
-        // valid geometry transaction remains contiguous and authoritative.
-        layer.sequence--;
         return;
     }
+    layer.latestPublishedSequence = geometrySequence;
+    if (layer.streamID == layer.latestPublishedStreamID)
+        layer.sequence = geometrySequence;
     [layer recordActiveFrameAtDisplayTime:displayTime];
     layer.latestDisplayTime = displayTime;
     [batch appendBytes:&geometry length:sizeof(geometry)];
@@ -2672,8 +2706,10 @@ static void StartTransientLayer(MacWSTransientLayer *layer) {
 
 static MacWSTransientLayer *ValidatedDirectDrawableLayer(
         MacWSDisplayClient *client, int32_t ownerPID, uint32_t layerWindowID,
-        uint32_t width, uint32_t height, NSString **rejectionReason) {
+        uint32_t width, uint32_t height, NSString **rejectionReason,
+        CGRect *validatedDestination) {
     if (rejectionReason) *rejectionReason = nil;
+    if (validatedDestination) *validatedDestination = CGRectZero;
     if (!client || !client.subscriptionActive || client.deliveryPaused ||
         client.mode != MacWSStreamModeFullscreen || !client.workspaceCanvas) {
         if (rejectionReason) *rejectionReason = @"client-state";
@@ -2741,33 +2777,51 @@ static MacWSTransientLayer *ValidatedDirectDrawableLayer(
     }
     size_t canvasWidth = IOSurfaceGetWidth(client.workspaceCanvas);
     size_t canvasHeight = IOSurfaceGetHeight(client.workspaceCanvas);
-    CGRect destination = layer.destinationBounds;
     CGRect canvas = CGRectMake(0, 0, canvasWidth, canvasHeight);
     if (width < 320 || height < 240) {
         if (rejectionReason) *rejectionReason = @"drawable-size";
         return nil;
     }
+    uint64_t widthDifference = width > layer.catalogPixelWidth
+        ? width - layer.catalogPixelWidth
+        : layer.catalogPixelWidth - width;
+    uint64_t heightDifference = height > layer.catalogPixelHeight
+        ? height - layer.catalogPixelHeight
+        : layer.catalogPixelHeight - height;
+    // Runtime-confirmed on iPad13,6 at 1790781496: after Code resized from
+    // 1600x1000 to 1800x1100, latestSurface correctly remained the retained
+    // 1600x1000 fallback while WindowServer's current catalog and the new
+    // descendant drawable were both 1800x1100.  The former 20% comparison
+    // against latestSurface admitted mismatched generations, leaving Host's
+    // direct rectangle stuck at the old size.  The current catalog is the
+    // upstream geometry authority; tolerate only backing-rounding pixels.
+    if (layer.catalogPixelWidth == 0 || layer.catalogPixelHeight == 0 ||
+        CGRectIsEmpty(layer.catalogBounds) ||
+        !isfinite(layer.catalogBackingScale) ||
+        layer.catalogBackingScale < 0.5 ||
+        layer.catalogBackingScale > 8.0 ||
+        widthDifference > 2u || heightDifference > 2u) {
+        if (rejectionReason) *rejectionReason = @"catalog-size";
+        return nil;
+    }
+    CGRect destination = fullscreenCanvas
+        ? canvas
+        : CGRectMake(
+            (layer.catalogBounds.origin.x -
+             CGDisplayBounds(CGMainDisplayID()).origin.x) *
+                layer.catalogBackingScale,
+            (layer.catalogBounds.origin.y -
+             CGDisplayBounds(CGMainDisplayID()).origin.y) *
+                layer.catalogBackingScale,
+            width, height);
     if (CGRectIsNull(destination) || CGRectIsEmpty(destination) ||
         CGRectGetWidth(destination) < 320.0 ||
         CGRectGetHeight(destination) < 240.0 ||
         !CGRectContainsRect(CGRectInset(canvas, -0.5, -0.5), destination)) {
-        if (rejectionReason) *rejectionReason = @"destination";
+        if (rejectionReason) *rejectionReason = @"catalog-destination";
         return nil;
     }
-    if (!fullscreenCanvas) {
-        size_t surfaceWidth = IOSurfaceGetWidth(layer.latestSurface);
-        size_t surfaceHeight = IOSurfaceGetHeight(layer.latestSurface);
-        uint64_t widthDifference = width > surfaceWidth
-            ? width - surfaceWidth : surfaceWidth - width;
-        uint64_t heightDifference = height > surfaceHeight
-            ? height - surfaceHeight : surfaceHeight - height;
-        if (surfaceWidth == 0 || surfaceHeight == 0 ||
-            widthDifference * 5u > surfaceWidth ||
-            heightDifference * 5u > surfaceHeight) {
-            if (rejectionReason) *rejectionReason = @"focused-size";
-            return nil;
-        }
-    }
+    if (validatedDestination) *validatedDestination = destination;
     return layer;
 }
 
@@ -2935,6 +2989,7 @@ static void HandleDirectDrawableActivity(MacWSDisplayClient *client,
     NSString *rejectionReason = nil;
     BOOL windowBase = client.mode == MacWSStreamModeWindow;
     MacWSTransientLayer *layer = nil;
+    CGRect validatedDestination = CGRectZero;
     BOOL validated = NO;
     if (windowBase) {
         validated = ValidateDirectDrawableWindowBase(
@@ -2943,7 +2998,8 @@ static void HandleDirectDrawableActivity(MacWSDisplayClient *client,
     } else {
         layer = ValidatedDirectDrawableLayer(
             client, (int32_t)ownerValue, (uint32_t)layerValue,
-            (uint32_t)widthValue, (uint32_t)heightValue, &rejectionReason);
+            (uint32_t)widthValue, (uint32_t)heightValue, &rejectionReason,
+            &validatedDestination);
         validated = layer != nil;
     }
     if (!validated) {
@@ -2982,6 +3038,31 @@ static void HandleDirectDrawableActivity(MacWSDisplayClient *client,
                 [NSString stringWithFormat:@"validation-rejected-%@",
                     rejectionReason ?: @"unknown"]);
         return;
+    }
+
+    if (!windowBase && layer &&
+        !CGRectEqualToRect(layer.destinationBounds,
+                           validatedDestination)) {
+        CGRect previousDestination = layer.destinationBounds;
+        layer.destinationBounds = validatedDestination;
+        NSMutableData *geometryBatch = [NSMutableData dataWithCapacity:
+            sizeof(MacWSStreamLayerGeometry)];
+        AppendLayerGeometry(geometryBatch, client, layer,
+                            mach_absolute_time());
+        SendLayerGeometryBatch(client, geometryBatch);
+        DisplayLog(@"runtime-confirmed direct-drawable-catalog-geometry "
+                   "owner-pid=%d layer=%u old=(%.0f,%.0f %.0fx%.0f) "
+                   "new=(%.0f,%.0f %.0fx%.0f) drawable=%ux%u",
+                   layer.ownerPID, layer.windowID,
+                   previousDestination.origin.x,
+                   previousDestination.origin.y,
+                   previousDestination.size.width,
+                   previousDestination.size.height,
+                   validatedDestination.origin.x,
+                   validatedDestination.origin.y,
+                   validatedDestination.size.width,
+                   validatedDestination.size.height,
+                   (uint32_t)widthValue, (uint32_t)heightValue);
     }
 
     BOOL identityChanged = !client.directDrawableActive ||
@@ -3709,6 +3790,12 @@ static void ReconcileTransientStreams(void) {
                      MacWSStreamWindowFullscreenCanvas);
                 if ([info[(id)kCGWindowIsOnscreen] boolValue])
                     layer.windowFlags |= MacWSStreamWindowOnScreen;
+                layer.catalogBounds = candidateBounds;
+                layer.catalogBackingScale = scale;
+                layer.catalogPixelWidth = (uint32_t)llround(
+                    candidateBounds.size.width * scale);
+                layer.catalogPixelHeight = (uint32_t)llround(
+                    candidateBounds.size.height * scale);
                 if (urgentRetireConfirmation &&
                     layer.skyLightLayer >=
                         CGWindowLevelForKey(kCGPopUpMenuWindowLevelKey) &&
@@ -4219,6 +4306,12 @@ static void HandleRequest(MacWSDisplayClient *client, xpc_object_t request) {
         SendStatus(client, MACWS_STREAM_EVENT_READY, @"ready", YES);
     } else if (strcmp(operation, MACWS_STREAM_OP_LIST_WINDOWS) == 0) {
         SendWindowList(client);
+        // A Host direct-drawable join miss requests this synchronization
+        // barrier when a producer has already committed a new resize
+        // generation. Refresh the retained fullscreen layer from the same
+        // live WindowServer catalog before the next activity heartbeat; the
+        // strict size validator must not be weakened to bridge stale state.
+        ScheduleTransientReconcile(0);
         // LIST_WINDOWS is the client's post-connection synchronization
         // barrier. Runtime-confirmed on 2026-08-29: the new Host received the
         // ready and catalog events but none of the IOSurface events emitted

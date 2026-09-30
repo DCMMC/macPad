@@ -98,7 +98,9 @@ class FullscreenDrawableTargetContract(unittest.TestCase):
             "_directDrawableHeartbeatPID != self.targetPID",
             "_reportedFullscreenCanvasWindowID !=",
             "MacWSAppInputEndpointReady(self.targetPID)",
-            "frame.texture ? frame : nil",
+            "geometryMatchesHeartbeat ? frame : nil",
+            "frame.record.width == _directDrawableHeartbeatWidth",
+            "frame.record.height == _directDrawableHeartbeatHeight",
         ):
             self.assertIn(witness, authority)
         render = VIEW.split("- (void)drawInMTKView:", 1)[1].split(
