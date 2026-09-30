@@ -68,16 +68,16 @@ void MacWSStartCatalystDrawableReceiver(void) {
         dispatch_source_set_event_handler(DrawableSource, ^{
           // The receive source and MTKView's display link share UIKit's main
           // queue. Draining the Mach port to EAGAIN in one callback lets a
-          // burst of completed producer frames run ahead of the panel-clock
-          // callback: TestUFO reached Host in 0.14 ms at p50, yet receipt to
-          // submission was 10.88 ms at p50 and the three-frame queue filled
-          // while 155/2,656 display ticks found no frame. Consume one message
-          // per source invocation. A nonempty receive port keeps the level-
-          // triggered source pending, so libdispatch schedules the remainder
-          // while giving the display link a run-loop opportunity between
-          // messages. This preserves every authenticated completed frame and
-          // does not add another timer or worker queue.
-          for (NSUInteger messageBudget = 0; messageBudget < 1;
+          // producer burst run ahead of the panel-clock callback, but a
+          // one-message budget cannot catch up after an input-heavy main-queue
+          // interval. Runtime-confirmed by the 2026-09-30 1000-fish profile:
+          // the one-message receiver missed 51 producer sequences in 42.2 s
+          // while 215 input events competed for that queue. Consume at most
+          // two messages per invocation. This bounded catch-up is smaller
+          // than the three-surface producer pool and still forces libdispatch
+          // to yield before a third message, preserving a display-link
+          // opportunity while giving the Mach queue bounded catch-up room.
+          for (NSUInteger messageBudget = 0; messageBudget < 2;
                messageBudget++) {
             _Alignas(8) uint8_t bytes[
                 sizeof(MacWSCatalystDrawableMachMessage) +

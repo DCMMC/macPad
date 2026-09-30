@@ -374,11 +374,11 @@ class RenderActivityAuthorityContract(unittest.TestCase):
         ):
             self.assertIn(token, validator)
 
-    def test_drawable_receiver_yields_between_signaled_mach_messages(self):
+    def test_drawable_receiver_uses_bounded_two_message_catch_up(self):
         handler = DRAWABLE_RECEIVER.split(
             "dispatch_source_set_event_handler(DrawableSource, ^{", 1
         )[1].split("});\n        dispatch_resume(DrawableSource);", 1)[0]
-        self.assertIn("messageBudget = 0; messageBudget < 1", handler)
+        self.assertIn("messageBudget = 0; messageBudget < 2", handler)
         self.assertNotIn("for (;;)", handler)
         self.assertIn("mach_msg(", handler)
         self.assertIn("if (received == MACH_RCV_TIMED_OUT) break;", handler)
@@ -447,7 +447,7 @@ class RenderActivityAuthorityContract(unittest.TestCase):
         receiver = (ROOT / "MacWSHost" / "Transport" /
                     "MacWSCatalystDrawableReceiver.m").read_text()
         self.assertIn(
-            "messageBudget = 0; messageBudget < 1", receiver
+            "messageBudget = 0; messageBudget < 2", receiver
         )
         self.assertNotIn("for (;;) {", receiver)
 
