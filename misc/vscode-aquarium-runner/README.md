@@ -26,6 +26,26 @@ only duplicate benchmark webviews before deciding whether a new one is needed.
 This prevents repeated benchmark launches from accumulating independent
 Chromium renderers and native-AGX resource graphs.
 
+The private socket route is also transactional during a running session. Each
+accepted URL closes the preceding socket-owned webview (plus any restored
+`WebGL Aquarium` tabs) before opening its replacement, and concurrent requests
+are serialized around that close/open boundary. A controller can send the
+exact `macws-control:close-test-webviews-v1` payload after collecting evidence
+to close the final test page as well. The supported controller-side command is:
+
+```bash
+python3 misc/macws_vscode_web_control.py \
+  --host <device> --port 2222 --control-path <ssh-socket> close
+```
+
+Pass that command as `macws_frame_power_profile.py --cleanup-command ...` so
+the page is retired after both successful and failed profiling runs. User-opened
+editor tabs and Simple Browser pages that were not created by this socket are
+not cleanup targets. The extension atomically publishes the bounded current
+state at `/private/tmp/macws_vscode_webview_lifecycle.json`; its cumulative
+opened/closed counters and live owned/Aquarium counts are the runtime witness
+for test-page cleanup without enabling a DevTools port.
+
 The dedicated `agx-native-production1` benchmark profile also uses
 `../vscode-production-settings.json`. Copy it to
 `/tmp/macws-vscode-profile-agx-native-production1/User/settings.json` inside

@@ -1,5 +1,7 @@
 import importlib.util
 from pathlib import Path
+import shlex
+import sys
 import unittest
 
 
@@ -17,6 +19,17 @@ COMPARE_SPEC.loader.exec_module(COMPARE)
 
 
 class FramePowerProfileContract(unittest.TestCase):
+    def test_cleanup_command_is_argv_only_and_reports_failure(self):
+        success = PROFILE.run_cleanup_command(
+            f"{shlex.quote(sys.executable)} -c " +
+            shlex.quote("print('closed')"))
+        self.assertEqual(success["returncode"], 0)
+        self.assertEqual(success["stdout"].strip(), "closed")
+        failure = PROFILE.run_cleanup_command(
+            "/definitely/missing/macws-cleanup-command")
+        self.assertIsNone(failure["returncode"])
+        self.assertIn("error", failure)
+
     def test_process_cpu_summary_uses_cumulative_time_and_target_tree(self):
         before = {
             "captured_wall_time": 10.0,

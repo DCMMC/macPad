@@ -18,6 +18,7 @@ Example (reuse an authenticated SSH control socket):
 from __future__ import annotations
 
 import argparse
+import atexit
 import hashlib
 import json
 import pathlib
@@ -26,6 +27,7 @@ import shlex
 import statistics
 import struct
 import subprocess
+import sys
 import time
 
 
@@ -701,6 +703,22 @@ def finish_workload(process, timeout: float) -> dict | None:
     }
 
 
+def run_cleanup_command(command: str | None) -> dict | None:
+    if not command:
+        return None
+    try:
+        result = subprocess.run(
+            shlex.split(command), capture_output=True, text=True, timeout=30,
+        )
+        return {
+            "returncode": result.returncode,
+            "stdout": result.stdout[-5000:],
+            "stderr": result.stderr[-5000:],
+        }
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {"returncode": None, "error": str(error)}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", required=True)
@@ -714,6 +732,11 @@ def main():
         "--workload-command",
         help=("optional local argv string launched immediately after Host "
               "reset; shell syntax is not interpreted"))
+    parser.add_argument(
+        "--cleanup-command",
+        help=("optional local argv string run after all scored evidence is "
+              "captured and also at interpreter exit after a failed run; "
+              "shell syntax is not interpreted"))
     parser.add_argument("--require-nominal", action="store_true")
     parser.add_argument("--screenshot", action="store_true")
     parser.add_argument("--skip-footprint", action="store_true")
@@ -721,6 +744,23 @@ def main():
     args = parser.parse_args()
     if not 3 <= args.seconds <= 60:
         parser.error("--seconds must be between 3 and 60")
+
+    cleanup_state = {"ran": False, "result": None}
+
+    def cleanup_once():
+        if cleanup_state["ran"] or not args.cleanup_command:
+            return cleanup_state["result"]
+        cleanup_state["ran"] = True
+        cleanup_state["result"] = run_cleanup_command(args.cleanup_command)
+        if cleanup_state["result"].get("returncode") != 0:
+            print(
+                "MacWS profiler cleanup command failed: " +
+                json.dumps(cleanup_state["result"], ensure_ascii=False),
+                file=sys.stderr,
+            )
+        return cleanup_state["result"]
+
+    atexit.register(cleanup_once)
 
     remote = Remote(args.host, args.user, args.port, args.control_path)
     started_wall = time.time()
@@ -777,6 +817,8 @@ def main():
             "sha256": hashlib.sha256(payload).hexdigest(),
         }
 
+    cleanup = cleanup_once()
+
     result = {
         "schema": PROFILE_SCHEMA,
         "label": args.label,
@@ -803,6 +845,7 @@ def main():
             process_cpu_before, process_cpu_after, args.target_pid),
         "memory_delta": memory_delta(process_before, process_after),
         "workload": workload,
+        "cleanup": cleanup,
         "screenshot": screenshot,
         "observer_errors": {
             "powermetrics_stderr": power_stderr[-5000:],
@@ -847,6 +890,8 @@ def main():
     }, ensure_ascii=False, indent=2))
     if not power_samples:
         raise SystemExit(2)
+    if cleanup and cleanup.get("returncode") != 0:
+        raise SystemExit(3)
 
 
 if __name__ == "__main__":

@@ -431,6 +431,8 @@ socket	/private/tmp/macws_app_input.%d.sock	transient	GUI client	Per-process App
 socket	/private/tmp/macws_host_input.lock	transient	native host	Single broker ownership lock.
 socket	/private/tmp/macws_host_input.sock	transient	native host	Native-host input datagram endpoint.
 socket	/private/tmp/macws_input_target.sock	transient	macwsinputd	System input target-selection endpoint.
+socket	/private/tmp/macws_vscode_url.sock	transient	VS Code web-link bridge	Private length-framed HTTP(S)/bounded-control endpoint; each URL transaction replaces the preceding socket-owned test webview.
+state	/private/tmp/macws_vscode_webview_lifecycle.json	auto	VS Code web-link bridge	Atomic bounded current receipt with cumulative opened/closed counters and live owned/Aquarium tab counts; no per-frame writes.
 artifact	/tmp/macws_fast_submit_error_%d_%u	off	diagnostic	Bounded fast-ring error dump directory; production cleanup removes all.
 artifact	/tmp/macws_submit_error_%d_%u	off	diagnostic	Heap-ring error dump directory; production cleanup removes all.
 artifact	/tmp/macws_submit_kcmd_%u_%u_%s.bin	off	diagnostic	Raw translated command dump.

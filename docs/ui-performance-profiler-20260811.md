@@ -46,8 +46,16 @@ python3 misc/macws_frame_power_profile.py \
   --control-path /tmp/macpad-power-lan-ssh.sock \
   --label aquarium-1k --seconds 30 --target-pid 12345 \
   --require-nominal --screenshot \
+  --cleanup-command "python3 misc/macws_vscode_web_control.py --host 192.168.1.2 --port 2222 --control-path /tmp/macpad-power-lan-ssh.sock close" \
   --output /tmp/macws-aquarium-1k.json
 ```
+
+For a VS Code web workload, the cleanup command is part of the measurement
+contract rather than optional housekeeping. It closes the final socket-owned
+Simple Browser webview after screenshots, process snapshots, and thermal
+evidence are captured; an `atexit` guard runs the same bounded command if the
+profile aborts earlier. The JSON report records the command result, and a
+requested cleanup failure makes the profiler exit nonzero.
 
 Compare an A/B pair with explicit FPS and energy-per-visible-frame gates:
 

@@ -3,7 +3,72 @@ const fs = require("fs");
 const net = require("net");
 
 const urlSocketPath = "/private/tmp/macws_vscode_url.sock";
+const lifecycleReceiptPath = "/private/tmp/macws_vscode_webview_lifecycle.json";
 const maximumURLBytes = 8192;
+const closeTestWebviewsRequest = "macws-control:close-test-webviews-v1";
+const ownedWebTabs = new Set();
+let requestQueue = Promise.resolve();
+const lifecycleStats = {
+  schema: "macws-vscode-webview-lifecycle-v1",
+  requests: 0,
+  openedTabs: 0,
+  closedTabs: 0,
+};
+
+function allTabs() {
+  return vscode.window.tabGroups.all.flatMap(group => group.tabs);
+}
+
+function restoredAquariumTabs() {
+  // The private URL route cannot recover object identity after VS Code has
+  // restored a previous session.  The Aquarium document title is the narrow
+  // persistent ownership witness; ordinary Simple Browser pages and editor
+  // tabs remain outside this cleanup boundary.
+  return allTabs().filter(tab => tab.label === "WebGL Aquarium");
+}
+
+function writeLifecycleReceipt(event) {
+  const temporaryPath = `${lifecycleReceiptPath}.${process.pid}`;
+  const receipt = {
+    ...lifecycleStats,
+    event,
+    timestamp: new Date().toISOString(),
+    ownedTabs: [...ownedWebTabs].filter(tab => allTabs().includes(tab)).length,
+    visibleAquariumTabs: restoredAquariumTabs().length,
+  };
+  try {
+    fs.writeFileSync(temporaryPath, `${JSON.stringify(receipt)}\n`, {mode: 0o600});
+    fs.renameSync(temporaryPath, lifecycleReceiptPath);
+  } catch (error) {
+    try { fs.unlinkSync(temporaryPath); } catch (_) {}
+    console.error("MACWS webview lifecycle receipt failed", error);
+  }
+}
+
+async function closeTestWebviews() {
+  const liveTabs = new Set(allTabs());
+  for (const tab of ownedWebTabs) {
+    if (!liveTabs.has(tab)) ownedWebTabs.delete(tab);
+  }
+  const candidates = [...new Set([
+    ...[...ownedWebTabs].filter(tab => liveTabs.has(tab)),
+    ...restoredAquariumTabs(),
+  ])];
+  if (candidates.length === 0) {
+    writeLifecycleReceipt("close-none");
+    console.log("MACWS test webview cleanup closed 0 tab(s)");
+    return 0;
+  }
+  const closed = await vscode.window.tabGroups.close(candidates, true);
+  if (!closed) {
+    throw new Error(`failed to close ${candidates.length} MacWS test webview(s)`);
+  }
+  for (const tab of candidates) ownedWebTabs.delete(tab);
+  lifecycleStats.closedTabs += candidates.length;
+  writeLifecycleReceipt("close");
+  console.log(`MACWS test webview cleanup closed ${candidates.length} tab(s)`);
+  return candidates.length;
+}
 
 function validatedWebURL(value) {
   if (typeof value !== "string" || value.length === 0) return undefined;
@@ -20,8 +85,42 @@ function validatedWebURL(value) {
 async function openWebURL(value) {
   const url = validatedWebURL(value);
   if (!url) throw new Error("MacWS rejected an invalid web URL");
+
+  // simpleBrowser.show always creates a new webview.  Replace the preceding
+  // socket-owned page instead of accumulating one Chromium renderer and AGX
+  // resource graph for every profiling request.  Also retire Aquarium tabs
+  // restored from the disposable profile before opening an ordinary page.
+  await closeTestWebviews();
+  const before = new Set(allTabs());
   await vscode.commands.executeCommand("simpleBrowser.show", url);
-  console.log("MACWS web URL accepted by Simple Browser");
+  const created = allTabs().filter(tab => !before.has(tab));
+  for (const tab of created) ownedWebTabs.add(tab);
+  if (created.length === 0) {
+    throw new Error("Simple Browser resolved without publishing a new tab");
+  }
+  lifecycleStats.openedTabs += created.length;
+  writeLifecycleReceipt("open");
+  console.log(
+    `MACWS web URL accepted by Simple Browser; tracking ${created.length} new tab(s)`,
+  );
+}
+
+function handleURLRequest(value) {
+  if (value === closeTestWebviewsRequest) return closeTestWebviews();
+  return openWebURL(value);
+}
+
+function enqueueURLRequest(value) {
+  // A burst of controller requests must not take its before/after tab
+  // snapshots concurrently.  Keep the queue live after a rejected request so
+  // one bad URL cannot permanently disable the private endpoint.
+  lifecycleStats.requests += 1;
+  const operation = requestQueue.then(
+    () => handleURLRequest(value),
+    () => handleURLRequest(value),
+  );
+  requestQueue = operation.catch(() => undefined);
+  return operation;
 }
 
 function removeOwnedSocket() {
@@ -70,7 +169,7 @@ function createURLServer() {
       }
       completed = true;
       const value = bytes.toString("utf8");
-      openWebURL(value).then(
+      enqueueURLRequest(value).then(
         () => socket.end(Buffer.from([1])),
         (error) => {
           completed = false;
@@ -103,18 +202,7 @@ async function openAquarium() {
   // execution still activates the extension and creates a normal webview
   // panel.  This keeps the workbench renderer alive instead of navigating it
   // away through CDP, which VS Code immediately detects and replaces.
-  await vscode.commands.executeCommand("simpleBrowser.show", url);
-}
-
-function restoredAquariumTabs() {
-  // simpleBrowser.show always creates a new webview panel.  VS Code also
-  // restores the previous panels from the disposable profile, so calling it
-  // unconditionally on every startup grows one full Chromium/WebGL renderer
-  // per launch.  Match only this benchmark's exact page title and webview
-  // input; ordinary editor and Simple Browser tabs remain untouched.
-  return vscode.window.tabGroups.all
-    .flatMap(group => group.tabs)
-    .filter(tab => tab.label === "WebGL Aquarium");
+  await openWebURL(url);
 }
 
 async function ensureOneAquarium(createIfMissing = true) {
@@ -129,6 +217,7 @@ async function ensureOneAquarium(createIfMissing = true) {
   // an ownership fix, not a memory-pressure fallback: every duplicate is a
   // complete renderer and native-AGX resource graph created by this extension.
   const keeper = restored.find(tab => tab.isActive) ?? restored.at(-1);
+  ownedWebTabs.add(keeper);
   const duplicates = restored.filter(tab => tab !== keeper);
   if (duplicates.length > 0) {
     const closed = await vscode.window.tabGroups.close(duplicates, true);
@@ -182,4 +271,12 @@ function activate(context) {
 
 function deactivate() {}
 
-module.exports = { activate, deactivate };
+module.exports = {
+  activate,
+  deactivate,
+  _test: {
+    closeTestWebviews,
+    enqueueURLRequest,
+    openWebURL,
+  },
+};
