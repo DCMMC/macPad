@@ -2978,19 +2978,24 @@ static void HandleDirectDrawableActivity(MacWSDisplayClient *client,
     client.directDrawableLayerWindowID = (uint32_t)layerValue;
     client.directDrawableWidth = (uint32_t)widthValue;
     client.directDrawableHeight = (uint32_t)heightValue;
-    // Fullscreen game loops continue producing independently, so their
-    // validated drawable lets WindowServer return to its 100-ms desktop
-    // cadence. Chromium requestAnimationFrame is currently driven by the
-    // WindowServer completion clock; keep its authenticated 120-Hz render
-    // activity intact while removing only the redundant exact-window capture.
-    if (!windowBase) {
-        PublishDirectDrawablePacingLease(
-            client.directDrawableOwnerPID,
-            client.directDrawableLayerWindowID,
-            client.directDrawableWidth,
-            client.directDrawableHeight);
-        client.directDrawablePacingLeasePublished = YES;
-    }
+    // Once the Host has authenticated an exact focused drawable, WindowServer
+    // no longer needs to synthesize 120-Hz desktop completions for that same
+    // pixel authority. This applies to window-mode Chromium as well as native
+    // fullscreen games: runtime-confirmed by
+    // macws-aquarium-1k-single-frame-fastpath-repeat-v37.json on iPad13,6,
+    // where a validated window direct lease kept the producer at 117.91 fps
+    // while WindowServer averaged 3.11% CPU. Removing the window lease raised
+    // WindowServer to 38.08% in
+    // macws-testufo-window-direct-no-duplicate-charging-serious-v1.json,
+    // while producer cadence fell to 109.99 fps. The Host panel scheduler is
+    // independent and remains at 120 Hz; this lease only returns the now-
+    // redundant virtual desktop completion loop to its 100-ms idle cadence.
+    PublishDirectDrawablePacingLease(
+        client.directDrawableOwnerPID,
+        client.directDrawableLayerWindowID,
+        client.directDrawableWidth,
+        client.directDrawableHeight);
+    client.directDrawablePacingLeasePublished = YES;
     ScheduleDirectDrawableExpiry(client);
     if (identityChanged) {
         DisplayLog(@"direct-drawable-activity-validated owner-pid=%lld "

@@ -93,7 +93,7 @@ class RenderActivityAuthorityContract(unittest.TestCase):
             final_composite.index("RetireFocusedRenderAuthority()"),
         )
 
-    def test_focused_window_direct_suspends_only_redundant_base_capture(self):
+    def test_focused_window_direct_suspends_redundant_capture_and_pacing(self):
         validator = DISPLAYD.split(
             "static BOOL ValidateDirectDrawableWindowBase(", 1
         )[1].split("static void ClearDirectDrawableActivity", 1)[0]
@@ -115,8 +115,16 @@ class RenderActivityAuthorityContract(unittest.TestCase):
             "static void SuspendFullscreenLayerCapturesForFinalComposite", 1
         )[0]
         self.assertIn("ValidateDirectDrawableWindowBase(", handler)
-        self.assertIn("if (!windowBase)", handler)
-        self.assertIn("PublishDirectDrawablePacingLease(", handler)
+        lease = handler.split(
+            "client.directDrawableHeight = (uint32_t)heightValue;", 1
+        )[1].split("ScheduleDirectDrawableExpiry(client);", 1)[0]
+        self.assertIn("PublishDirectDrawablePacingLease(", lease)
+        self.assertIn("directDrawablePacingLeasePublished = YES", lease)
+        self.assertNotIn(
+            "if (!windowBase)", lease,
+            "an authenticated exact-window drawable must retire the "
+            "redundant WindowServer 120-Hz completion loop too",
+        )
         self.assertIn("directDrawableBaseCaptureSuspended = YES", handler)
         self.assertIn("[strongClient stopStream]", handler)
 
