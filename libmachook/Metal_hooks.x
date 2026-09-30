@@ -376,6 +376,16 @@ static BOOL macws_process_descends_from(pid_t process, pid_t ancestor) {
     return MacWSProcessDescendsFrom(process, ancestor);
 }
 
+static BOOL macws_render_activity_descriptor_names_path(int descriptor) {
+    if (descriptor < 0) return NO;
+    struct stat opened = {0};
+    struct stat current = {0};
+    if (fstat(descriptor, &opened) != 0 || opened.st_nlink == 0 ||
+        stat(MACWS_RENDER_ACTIVITY_PATH, &current) != 0) return NO;
+    return opened.st_dev == current.st_dev &&
+        opened.st_ino == current.st_ino;
+}
+
 static uint32_t macws_quantize_observed_present_pace(uint32_t observedUS) {
     // Select the fastest conventional cadence which does not materially cap
     // the producer. The 3% tolerance absorbs clock/vblank jitter around a
@@ -597,6 +607,16 @@ static void macws_publish_render_activity(uint64_t now_ns,
                 memory_order_acq_rel, memory_order_acquire)) break;
     }
 
+    // Publication is already limited to 10 Hz. Validate the cached descriptor
+    // here, after that throttle, so unlink/atomic replacement cannot leave a
+    // long-lived Chromium/game process writing an unreachable inode and the
+    // per-present hot path does not gain filesystem work.
+    if (macws_stray_render_activity_fd >= 0 &&
+        !macws_render_activity_descriptor_names_path(
+            macws_stray_render_activity_fd)) {
+        close(macws_stray_render_activity_fd);
+        macws_stray_render_activity_fd = -1;
+    }
     if (macws_stray_render_activity_fd < 0) {
         macws_stray_render_activity_fd = open(
             MACWS_RENDER_ACTIVITY_PATH,

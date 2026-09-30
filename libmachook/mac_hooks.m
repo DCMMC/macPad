@@ -23729,6 +23729,17 @@ static BOOL macws_process_descends_from_pid(pid_t process, pid_t ancestor) {
     return MacWSProcessDescendsFrom(process, ancestor);
 }
 
+static BOOL macws_shared_descriptor_names_path(int descriptor,
+                                                const char *path) {
+    if (descriptor < 0 || !path || !*path) return NO;
+    struct stat opened = {0};
+    struct stat current = {0};
+    if (fstat(descriptor, &opened) != 0 || opened.st_nlink == 0 ||
+        stat(path, &current) != 0) return NO;
+    return opened.st_dev == current.st_dev &&
+        opened.st_ino == current.st_ino;
+}
+
 static BOOL macws_render_activity_is_authorized(
         const MacWSRenderActivityRecord *activity, uint64_t nowNS) {
     if (!activity || !nowNS) return NO;
@@ -23823,6 +23834,16 @@ static uint32_t macws_coexist_activity_pace_us(uint32_t idle_pace_us) {
               sizeof(interaction_ns), 0) == sizeof(interaction_ns) &&
         now_ns >= interaction_ns &&
         now_ns - interaction_ns <= kInteractionWindowNS;
+    if (!interactive && interaction_activity_fd >= 0 &&
+        !macws_shared_descriptor_names_path(
+            interaction_activity_fd, "/private/tmp/macws_vnc_activity")) {
+        // unlink/rename keeps an open descriptor attached to the retired
+        // inode. Drop it only after its timestamp is no longer active, so the
+        // 120-Hz hot path adds no stat calls and the next iteration discovers
+        // the current interaction generation.
+        close(interaction_activity_fd);
+        interaction_activity_fd = -1;
+    }
     BOOL render_record_valid = NO;
     if (now_ns && render_activity_fd >= 0) {
         MacWSRenderActivityRecord record = {0};
@@ -23859,6 +23880,16 @@ static uint32_t macws_coexist_activity_pace_us(uint32_t idle_pace_us) {
     }
     BOOL rendering = render_record_valid && now_ns >= render_ns &&
         now_ns - render_ns <= kInteractionWindowNS;
+    if (!rendering && render_activity_fd >= 0 &&
+        !macws_shared_descriptor_names_path(
+            render_activity_fd, MACWS_RENDER_ACTIVITY_PATH)) {
+        // A producer relaunch can atomically replace the activity file while
+        // WindowServer survives. Never remain pinned to that retired inode;
+        // the producer sends a bounded 10-Hz wake, so reopening on the next
+        // pass recovers without polling the filesystem on active frames.
+        close(render_activity_fd);
+        render_activity_fd = -1;
+    }
     BOOL direct_drawable = NO;
     if (now_ns && direct_drawable_activity_fd >= 0) {
         MacWSDirectDrawableActivityRecord record = {0};

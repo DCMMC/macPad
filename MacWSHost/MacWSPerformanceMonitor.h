@@ -11,6 +11,24 @@ typedef NS_ENUM(NSInteger, MacWSPerformanceHUDMode) {
     MacWSPerformanceHUDModeFull = 2,
 };
 
+// Why a panel-clock tick which already owned a completed direct drawable did
+// or did not put that exact producer frame in the Host command buffer. Keep
+// this enum stable: profile JSON uses the symbolic names below as evidence.
+typedef NS_ENUM(uint8_t, MacWSDirectDrawableScheduleOutcome) {
+    MacWSDirectDrawableScheduleOutcomeUnknown = 0,
+    MacWSDirectDrawableScheduleOutcomeSubmitted,
+    MacWSDirectDrawableScheduleOutcomeNoBaseSurface,
+    MacWSDirectDrawableScheduleOutcomeNotDescendantDrawable,
+    MacWSDirectDrawableScheduleOutcomeHeartbeatMismatch,
+    MacWSDirectDrawableScheduleOutcomeCompositePipelineMissing,
+    MacWSDirectDrawableScheduleOutcomeLayerMissing,
+    MacWSDirectDrawableScheduleOutcomeLayerGeometryMismatch,
+    MacWSDirectDrawableScheduleOutcomeBaseGenerationPending,
+    MacWSDirectDrawableScheduleOutcomeDestinationInvalid,
+    MacWSDirectDrawableScheduleOutcomeWindowBaseMismatch,
+    MacWSDirectDrawableScheduleOutcomeCount,
+};
+
 // A low-overhead, per-Scene profiler for the complete MacWS presentation
 // boundary. The hot path writes only fixed-size rings; sorting, JSON encoding
 // and label layout happen at the bounded 2 Hz HUD/export boundary.
@@ -78,6 +96,11 @@ typedef NS_ENUM(NSInteger, MacWSPerformanceHUDMode) {
 // a completed producer frame. This exposes producer/display phase misses
 // without adding per-frame logging or a second scheduling loop.
 - (void)recordDirectDrawableSchedulerTickWithFrame:(BOOL)hasFrame;
+
+// Classifies only non-empty scheduler ticks. It is deliberately separate
+// from the callback counter so an empty FIFO remains one cheap update.
+- (void)recordDirectDrawableScheduleOutcome:
+    (MacWSDirectDrawableScheduleOutcome)outcome;
 
 // Call before -presentDrawable:. This registers Metal completion and actual
 // drawable-presentation handlers, so the result is visible-frame timing and

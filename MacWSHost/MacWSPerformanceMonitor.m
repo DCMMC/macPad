@@ -169,6 +169,8 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     uint64_t _directDrawableFramesPresented;
     uint64_t _directDrawableSchedulerTicks;
     uint64_t _directDrawableSchedulerEmptyTicks;
+    uint64_t _directDrawableScheduleOutcomes[
+        MacWSDirectDrawableScheduleOutcomeCount];
     uint64_t _commandErrors;
     uint64_t _inputsAttempted;
     uint64_t _inputsSent;
@@ -347,6 +349,8 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     _directDrawableFramesPresented = 0;
     _directDrawableSchedulerTicks = 0;
     _directDrawableSchedulerEmptyTicks = 0;
+    memset(_directDrawableScheduleOutcomes, 0,
+           sizeof(_directDrawableScheduleOutcomes));
     _commandErrors = 0;
     _inputsAttempted = 0;
     _inputsSent = 0;
@@ -686,6 +690,16 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     os_unfair_lock_unlock(&_lock);
 }
 
+- (void)recordDirectDrawableScheduleOutcome:
+        (MacWSDirectDrawableScheduleOutcome)outcome {
+    if (!atomic_load(&_instrumentationActive) ||
+        outcome <= MacWSDirectDrawableScheduleOutcomeUnknown ||
+        outcome >= MacWSDirectDrawableScheduleOutcomeCount) return;
+    os_unfair_lock_lock(&_lock);
+    _directDrawableScheduleOutcomes[outcome]++;
+    os_unfair_lock_unlock(&_lock);
+}
+
 - (void)recordSubmissionForStream:(uint64_t)streamID
                          sequence:(uint64_t)sequence
                       captureTime:(uint64_t)captureTime
@@ -870,6 +884,11 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
         _directDrawableSchedulerTicks;
     uint64_t directDrawableSchedulerEmptyTicks =
         _directDrawableSchedulerEmptyTicks;
+    uint64_t directDrawableScheduleOutcomes[
+        MacWSDirectDrawableScheduleOutcomeCount] = {0};
+    memcpy(directDrawableScheduleOutcomes,
+           _directDrawableScheduleOutcomes,
+           sizeof(directDrawableScheduleOutcomes));
     uint64_t commandErrors = _commandErrors;
     uint64_t inputsAttempted = _inputsAttempted;
     uint64_t inputsSent = _inputsSent;
@@ -1040,6 +1059,29 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
         formatter.dateFormat = @"yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
     });
 
+    NSDictionary *directScheduleOutcomes = @{
+        @"submitted": @(directDrawableScheduleOutcomes[
+            MacWSDirectDrawableScheduleOutcomeSubmitted]),
+        @"no_base_surface": @(directDrawableScheduleOutcomes[
+            MacWSDirectDrawableScheduleOutcomeNoBaseSurface]),
+        @"not_descendant_drawable": @(directDrawableScheduleOutcomes[
+            MacWSDirectDrawableScheduleOutcomeNotDescendantDrawable]),
+        @"heartbeat_mismatch": @(directDrawableScheduleOutcomes[
+            MacWSDirectDrawableScheduleOutcomeHeartbeatMismatch]),
+        @"composite_pipeline_missing": @(directDrawableScheduleOutcomes[
+            MacWSDirectDrawableScheduleOutcomeCompositePipelineMissing]),
+        @"layer_missing": @(directDrawableScheduleOutcomes[
+            MacWSDirectDrawableScheduleOutcomeLayerMissing]),
+        @"layer_geometry_mismatch": @(directDrawableScheduleOutcomes[
+            MacWSDirectDrawableScheduleOutcomeLayerGeometryMismatch]),
+        @"base_generation_pending": @(directDrawableScheduleOutcomes[
+            MacWSDirectDrawableScheduleOutcomeBaseGenerationPending]),
+        @"destination_invalid": @(directDrawableScheduleOutcomes[
+            MacWSDirectDrawableScheduleOutcomeDestinationInvalid]),
+        @"window_base_mismatch": @(directDrawableScheduleOutcomes[
+            MacWSDirectDrawableScheduleOutcomeWindowBaseMismatch]),
+    };
+
     return @{
         @"schema": @"macws-ui-performance-v1",
         @"reason": reason.length ? reason : @"snapshot",
@@ -1107,6 +1149,8 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
                 @(directDrawableSchedulerTicks),
             @"direct_drawable_scheduler_empty_ticks":
                 @(directDrawableSchedulerEmptyTicks),
+            @"direct_drawable_schedule_outcomes":
+                directScheduleOutcomes,
             @"command_errors": @(commandErrors),
             @"inputs_attempted": @(inputsAttempted),
             @"inputs_sent": @(inputsSent),

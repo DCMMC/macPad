@@ -83,21 +83,26 @@
     }
 
     if ([scenario isEqualToString:@"drag"] ||
+        [scenario isEqualToString:@"window-drag"] ||
         [scenario isEqualToString:@"long-drag"]) {
         if (!self.emitPointer) {
             finish(NO, @"拖动测试适配器不可用");
             return;
         }
         BOOL longPress = [scenario isEqualToString:@"long-drag"];
-        const NSInteger steps = 120;
+        BOOL windowDrag = [scenario isEqualToString:@"window-drag"];
+        const NSInteger steps = windowDrag ? 48 : 120;
         const uint64_t stepNanoseconds = NSEC_PER_SEC / 120;
         const uint64_t holdNanoseconds = longPress
             ? 420 * NSEC_PER_MSEC : 0;
         CGPoint start = center;
         CGPoint end = CGPointMake(
-            fmin(width - 1.0, center.x + width * 0.12),
-            fmin(height - 1.0, center.y + height * 0.08));
-        self.emitPointer(MacWSInputKindTouchDown, start, 1.0f, 0);
+            fmin(width - 1.0, center.x + width *
+                (windowDrag ? 0.08 : 0.12)),
+            fmin(height - 1.0, center.y + height *
+                (windowDrag ? 0.06 : 0.08)));
+        uint16_t flags = windowDrag ? self.pointerFlags : 0;
+        self.emitPointer(MacWSInputKindTouchDown, start, 1.0f, flags);
         for (NSInteger index = 1; index <= steps; index++) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                          holdNanoseconds +
@@ -108,14 +113,14 @@
                     start.x + (end.x - start.x) * progress,
                     start.y + (end.y - start.y) * progress);
                 self.emitPointer(
-                    MacWSInputKindTouchMove, point, 1.0f, 0);
+                    MacWSInputKindTouchMove, point, 1.0f, flags);
             });
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                      holdNanoseconds +
                                      (steps + 1) * stepNanoseconds),
                        dispatch_get_main_queue(), ^{
-            self.emitPointer(MacWSInputKindTouchUp, end, 0.0f, 0);
+            self.emitPointer(MacWSInputKindTouchUp, end, 0.0f, flags);
         });
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                      holdNanoseconds +
@@ -124,8 +129,9 @@
                        dispatch_get_main_queue(), ^{
             MacWSLog(@"performance-gesture-end scenario=%@ success=YES",
                      scenario);
-            finish(YES, longPress ? @"长按后 120 Hz 拖动场景已完成"
-                                  : @"120 Hz 拖动场景已完成");
+            finish(YES, windowDrag ? @"120 Hz 窗口拖动场景已完成" :
+                (longPress ? @"长按后 120 Hz 拖动场景已完成"
+                           : @"120 Hz 拖动场景已完成"));
         });
         return;
     }

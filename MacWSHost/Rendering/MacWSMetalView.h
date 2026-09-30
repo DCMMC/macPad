@@ -70,6 +70,11 @@ typedef NS_ENUM(NSUInteger, MacWSHostPresentationResolution) {
 @property(nonatomic, readonly) BOOL nativeWindowResizeGestureActive;
 @property(nonatomic, readonly) BOOL windowConfigurationHasQueuedRequest;
 @property(nonatomic, readonly) BOOL sceneResizeFollowingTargetWindow;
+// A fullscreen pointer/gesture owns one WindowServer transaction from its
+// Begin edge through the matching End/Cancel. Passive catalog and retained
+// layer-order updates may refresh pixels during that interval, but must not
+// replace the semantic keyboard/direct-drawable target underneath it.
+@property(nonatomic, readonly) BOOL fullscreenInputTransactionActive;
 @property(nonatomic, readonly) MacWSPerformanceMonitor *performanceMonitor;
 - (void)setMacWSInputEnabled:(BOOL)enabled
                       reason:(nullable NSString *)reason;

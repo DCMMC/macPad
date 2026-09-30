@@ -1555,6 +1555,7 @@ typedef void (^MacWSCompactMenuSelection)(MacWSMenuItem *item);
     CGSize _appliedSceneRestrictionMinimumSize;
     CGSize _appliedSceneRestrictionMaximumSize;
     int32_t _fullscreenCatalogRetainedInputPID;
+    BOOL _fullscreenInputTargetDeferredForActiveTransaction;
     uint32_t _fullscreenActivatedInputWindowID;
     int32_t _fullscreenActivatedInputOwnerPID;
     uint32_t _pendingFullscreenActivationWindowID;
@@ -7024,6 +7025,9 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         }
         int32_t previousPID = _metalView.targetPID;
         int32_t catalogFallbackPID = visualPID;
+        BOOL retainedActiveInputTransaction =
+            visualPID != previousPID && previousPID > 1 &&
+            _metalView.fullscreenInputTransactionActive;
         BOOL retainedPreviousTarget =
             visualPID != previousPID && previousPID > 1 &&
             MacWSAppInputEndpointReady(previousPID) &&
@@ -7049,8 +7053,23 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
             visualPID != previousPID && previousPID > 1 &&
             _fullscreenActivatedInputOwnerPID == previousPID &&
             [_metalView hasCompletedFullscreenDrawableForPID:previousPID];
-        if (retainedPreviousTarget || activatedFullscreenCanvasPresent ||
-            retainedCompletedFullscreen) {
+        if (retainedActiveInputTransaction) {
+            // Window moves/resizes can change retained layer order before
+            // WindowServer has published the matching catalog generation.
+            // Never replace targetPID while the physical button is held:
+            // setTargetPID: clears the direct-drawable join, and subsequent
+            // global movement can then appear to hit the exposed window
+            // underneath. TouchDown already selected the semantic owner; the
+            // matching Up/Cancel requests a bounded catalog refresh.
+            visualPID = previousPID;
+            frontmost = nil;
+            if (!_fullscreenInputTargetDeferredForActiveTransaction) {
+                _fullscreenInputTargetDeferredForActiveTransaction = YES;
+                MacWSLog(@"fullscreen-input-target retained-active-transaction pid=%d rejected-catalog-fallback-pid=%d",
+                         previousPID, catalogFallbackPID);
+            }
+        } else if (retainedPreviousTarget || activatedFullscreenCanvasPresent ||
+                   retainedCompletedFullscreen) {
             // A fullscreen Metal application may stop publishing its AppKit
             // catalog window while its process-local input endpoint and the
             // full-display stream remain live.  The next ordinary overlay in
@@ -7081,6 +7100,8 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         } else {
             _fullscreenCatalogRetainedInputPID = 0;
         }
+        if (!retainedActiveInputTransaction)
+            _fullscreenInputTargetDeferredForActiveTransaction = NO;
         MacWSStreamWindow *target = frontmost;
         int32_t targetPID = visualPID;
         if (target) {
@@ -8594,6 +8615,7 @@ static void MacWSDeduplicateWindowScenes(void) {
                @"performance-gesture-right-tap",
                @"performance-gesture-hover",
                @"performance-gesture-drag",
+               @"performance-gesture-window-drag",
                @"performance-gesture-long-drag",
                @"performance-gesture-scroll",
                @"performance-gesture-scroll-momentum",

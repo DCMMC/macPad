@@ -16,6 +16,21 @@ COMPOSITOR = (ROOT / "MacWSHost/Rendering/MacWSCatalystDrawableCompositor.m").re
 
 
 class FullscreenDrawableTargetContract(unittest.TestCase):
+    def test_live_final_composite_catalog_precedes_retired_layer_order(self):
+        selector = VIEW.split(
+            "- (int32_t)frontmostInputApplicationPIDAmongPIDs:", 1
+        )[1].split("- (void)logPerformanceSnapshotWithReason:", 1)[0]
+        live_catalog = selector.index(
+            "route=final-composite-live-"
+        )
+        retained_layers = selector.index(
+            "for (NSNumber *key in [[self overlayKeysBackToFront]"
+        )
+        self.assertLess(live_catalog, retained_layers)
+        self.assertIn("[self hasFinalCompositeFrame] && _streamConnected",
+                      selector)
+        self.assertNotIn("final-composite-catalog-fallback", selector)
+
     def test_explicit_fullscreen_window_survives_cold_catalog_connection(self):
         route = HOST.split(
             "- (BOOL)activateMacWindowIDInFullscreenWorkspace:", 1

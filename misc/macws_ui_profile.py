@@ -185,17 +185,20 @@ def wait_for_profile(remote, previous_marker, timeout=8.0):
 
 
 def execute_gesture_suite(remote, dock_pid, target_pid, requested=None):
-    scenarios = [
+    default_scenarios = [
         "tap", "tap-burst", "double-tap", "right-tap", "hover", "drag", "long-drag",
         "scroll", "scroll-momentum", "magnify",
     ]
+    scenarios = list(default_scenarios)
     if dock_pid > 1:
         scenarios.extend((
             "three-up", "three-down", "three-left", "three-right",
             "mission-select",
         ))
     if requested:
-        unknown = [name for name in requested if name not in scenarios]
+        available = set(scenarios)
+        available.add("window-drag")
+        unknown = [name for name in requested if name not in available]
         if unknown:
             raise RuntimeError(f"unknown/unavailable scenarios: {unknown}")
         scenarios = list(requested)
@@ -558,7 +561,7 @@ def main():
     fluid_scenarios = [item for item in gestures
                        if item["scenario"] in {
                            "tap-burst",
-                           "hover", "drag", "long-drag", "scroll",
+                           "hover", "drag", "window-drag", "long-drag", "scroll",
                            "scroll-momentum", "magnify", "three-up",
                            "mission-select",
                            "three-down", "three-left", "three-right",

@@ -127,6 +127,17 @@ static NSMutableDictionary<NSNumber *, NSValue *> *GeometryTargets;
 static CGFloat ObservedWindowBackingScale;
 static CGFloat AppKitMainDisplayBackingScale;
 
+// ProMotion input reaches the global WindowServer route at 120 Hz. AppKit's
+// move/resize notifications are commonly coalesced to 60 Hz, so using the
+// same 16.67-ms interval for the presentation-geometry sampler discarded
+// every other visible pointer position even though the virtual compositor
+// had already been woken at 120 Hz. Query only during the existing bounded
+// interaction/animation burst, but align that burst with the native panel.
+// The in-flight gate below still prevents overlap when a SkyLight query takes
+// longer than one 8.33-ms slot.
+static const double WorkspaceInteractiveGeometryFrameBudgetMS =
+    1000.0 / 120.0;
+
 static inline CFTimeInterval WorkspaceGeometrySamplingDeadline(void) {
     return fmax(WorkspaceAnimationSamplingDeadline,
                 WorkspaceAppKitGeometrySamplingDeadline);
@@ -179,17 +190,29 @@ static uint64_t MonotonicNanoseconds(void) {
     return (uint64_t)value.tv_sec * NSEC_PER_SEC + (uint64_t)value.tv_nsec;
 }
 
-static void PublishDirectDrawablePacingLease(
+static void RetireDirectDrawablePacingLease(void);
+
+static BOOL PublishDirectDrawablePacingLease(
         int32_t ownerPID, uint32_t layerWindowID,
         uint32_t width, uint32_t height) {
     uint64_t now = MonotonicNanoseconds();
-    if (!now || ownerPID <= 1 || !layerWindowID || !width || !height) return;
+    // A direct surface replaces window content, not the WindowServer pixels
+    // exposed when that window moves or resizes. AppKit's geometry pulse is
+    // therefore a real demand for fresh desktop composites. Withhold the
+    // low-power lease for the bounded sampling transaction; the next steady
+    // heartbeat republishes it automatically.
+    if (CFAbsoluteTimeGetCurrent() < WorkspaceGeometrySamplingDeadline()) {
+        RetireDirectDrawablePacingLease();
+        return NO;
+    }
+    if (!now || ownerPID <= 1 || !layerWindowID || !width || !height)
+        return NO;
     if (DirectDrawableActivityDescriptor < 0) {
         DirectDrawableActivityDescriptor = open(
             MACWS_DIRECT_DRAWABLE_ACTIVITY_PATH,
             O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
     }
-    if (DirectDrawableActivityDescriptor < 0) return;
+    if (DirectDrawableActivityDescriptor < 0) return NO;
     MacWSDirectDrawableActivityRecord record = {
         .magic = MACWS_DIRECT_DRAWABLE_ACTIVITY_MAGIC,
         .version = MACWS_DIRECT_DRAWABLE_ACTIVITY_VERSION,
@@ -206,11 +229,22 @@ static void PublishDirectDrawablePacingLease(
         close(DirectDrawableActivityDescriptor);
         DirectDrawableActivityDescriptor = -1;
         (void)unlink(MACWS_DIRECT_DRAWABLE_ACTIVITY_PATH);
+        return NO;
     }
+    return YES;
 }
 
 static void RetireDirectDrawablePacingLease(void) {
     if (DirectDrawableActivityDescriptor >= 0) {
+        // libmachook may already hold this inode open. Unlink alone leaves its
+        // last valid timestamp readable for the four-second freshness window,
+        // which kept WindowServer at 10 Hz throughout a short title drag.
+        // Invalidate the shared inode before retiring the pathname so the
+        // reader closes it on its very next compositor iteration.
+        MacWSDirectDrawableActivityRecord invalid = {0};
+        (void)pwrite(DirectDrawableActivityDescriptor, &invalid,
+                     sizeof(invalid), 0);
+        (void)ftruncate(DirectDrawableActivityDescriptor, sizeof(invalid));
         close(DirectDrawableActivityDescriptor);
         DirectDrawableActivityDescriptor = -1;
     }
@@ -599,6 +633,10 @@ static BOOL LayerNeedsIndependentFinalCompositeCapture(
 @property(nonatomic) uint32_t directDrawableLayerWindowID;
 @property(nonatomic) uint32_t directDrawableWidth;
 @property(nonatomic) uint32_t directDrawableHeight;
+// Ordinary Chromium windows and true fullscreen canvases both publish
+// authenticated CAMetalLayer drawables. Preserve their semantic distinction
+// so workspace reconciliation cannot expand an ordinary window to desktop.
+@property(nonatomic) BOOL directDrawableFullscreenCanvas;
 @property(nonatomic) CFTimeInterval directDrawableLastRejectionLogTime;
 // A focused exact-window subscription has no MacWSTransientLayer wrapper.
 // Track ownership of its base CGDisplayStream suspension on the client so a
@@ -685,7 +723,8 @@ static BOOL MacWSLayerOwnsFullscreenCanvas(MacWSDisplayClient *client,
         (layer.windowFlags & fullscreenAuthority) == fullscreenAuthority;
     BOOL directAuthority = client.directDrawableActive &&
         client.directDrawableOwnerPID == layer.ownerPID &&
-        client.directDrawableLayerWindowID == layer.windowID;
+        client.directDrawableLayerWindowID == layer.windowID &&
+        client.directDrawableFullscreenCanvas;
     return semanticAuthority || directAuthority;
 }
 
@@ -704,6 +743,25 @@ static CGRect MacWSWorkspaceLayerDestination(
         size_t height = IOSurfaceGetHeight(client.workspaceCanvas);
         if (width && height)
             return CGRectMake(0.0, 0.0, width, height);
+    }
+    BOOL directWindowAuthority = client.directDrawableActive &&
+        !client.directDrawableFullscreenCanvas &&
+        client.directDrawableOwnerPID == layer.ownerPID &&
+        client.directDrawableLayerWindowID == layer.windowID &&
+        client.directDrawableWidth != 0 &&
+        client.directDrawableHeight != 0;
+    if (directWindowAuthority) {
+        // The retained exact-window IOSurface intentionally stops advancing
+        // after direct activation. It is a fallback pixel source and may be
+        // from the previous resize generation. The current catalog owns the
+        // origin while the validated drawable owns the pixel extent.
+        CGFloat catalogScale = layer.catalogBackingScale;
+        if (!isfinite(catalogScale) || catalogScale < 0.5 ||
+            catalogScale > 8.0) catalogScale = presentationScale;
+        return CGRectMake(
+            (windowBounds.origin.x - desktopBounds.origin.x) * catalogScale,
+            (windowBounds.origin.y - desktopBounds.origin.y) * catalogScale,
+            client.directDrawableWidth, client.directDrawableHeight);
     }
     return CGRectMake(
         (windowBounds.origin.x - desktopBounds.origin.x) *
@@ -1578,6 +1636,9 @@ static void StartInvalidationListener(void) {
                 WorkspaceAnimationSettlementHardDeadline = now + 0.80;
             WorkspaceAnimationSamplingDeadline = fmin(
                 now + 0.25, WorkspaceAnimationSettlementHardDeadline);
+            RetireDirectDrawablePacingLease();
+            for (MacWSDisplayClient *client in [Clients copy])
+                client.directDrawablePacingLeasePublished = NO;
             // This path only needs compositor geometry. Avoid broadcasting a
             // complete application-window list for every gesture sample. A
             // targeted asynchronous query is single-flight: 120-Hz input can
@@ -1594,6 +1655,9 @@ static void StartInvalidationListener(void) {
             CFTimeInterval now = CFAbsoluteTimeGetCurrent();
             WorkspaceAppKitGeometrySamplingDeadline = fmax(
                 WorkspaceAppKitGeometrySamplingDeadline, now + 0.25);
+            RetireDirectDrawablePacingLease();
+            for (MacWSDisplayClient *client in [Clients copy])
+                client.directDrawablePacingLeasePublished = NO;
             RequestWorkspaceGeometrySample();
             ScheduleGeometryStreamRestart();
         }
@@ -2476,9 +2540,11 @@ static void RequestWorkspaceGeometrySample(void) {
 
                 CFTimeInterval completedAt = CFAbsoluteTimeGetCurrent();
                 if (completedAt < WorkspaceGeometrySamplingDeadline()) {
-                    const double frameBudgetMS = 1000.0 / 60.0;
-                    uint64_t delay = duration < frameBudgetMS
-                        ? (uint64_t)llround((frameBudgetMS - duration) *
+                    uint64_t delay =
+                        duration < WorkspaceInteractiveGeometryFrameBudgetMS
+                        ? (uint64_t)llround(
+                              (WorkspaceInteractiveGeometryFrameBudgetMS -
+                               duration) *
                                            NSEC_PER_MSEC)
                         : 0;
                     // A queued real Dock progress edge wins over the cadence
@@ -2890,6 +2956,7 @@ static void ClearDirectDrawableActivity(MacWSDisplayClient *client,
     client.directDrawableLayerWindowID = 0;
     client.directDrawableWidth = 0;
     client.directDrawableHeight = 0;
+    client.directDrawableFullscreenCanvas = NO;
     client.directDrawableBaseCaptureSuspended = NO;
     client.directDrawableBaseCaptureSuspensionPending = NO;
     client.directDrawablePacingLeasePublished = NO;
@@ -3075,6 +3142,23 @@ static void HandleDirectDrawableActivity(MacWSDisplayClient *client,
     client.directDrawableLayerWindowID = (uint32_t)layerValue;
     client.directDrawableWidth = (uint32_t)widthValue;
     client.directDrawableHeight = (uint32_t)heightValue;
+    if (!windowBase && layer) {
+        CGRect desktopBounds = CGDisplayBounds(CGMainDisplayID());
+        BOOL explicitFullscreen = (layer.windowFlags &
+            MacWSStreamWindowFullscreenCanvas) != 0;
+        BOOL catalogCoversDesktop = !CGRectIsEmpty(desktopBounds) &&
+            MacWSLayerCoversLogicalDisplay(
+                layer.catalogBounds.origin.x,
+                layer.catalogBounds.origin.y,
+                layer.catalogBounds.size.width,
+                layer.catalogBounds.size.height,
+                desktopBounds.origin.x, desktopBounds.origin.y,
+                desktopBounds.size.width, desktopBounds.size.height);
+        client.directDrawableFullscreenCanvas =
+            explicitFullscreen || catalogCoversDesktop;
+    } else {
+        client.directDrawableFullscreenCanvas = NO;
+    }
     // Once the Host has authenticated an exact focused drawable, WindowServer
     // no longer needs to synthesize 120-Hz desktop completions for that same
     // pixel authority. This applies to window-mode Chromium as well as native
@@ -3087,12 +3171,12 @@ static void HandleDirectDrawableActivity(MacWSDisplayClient *client,
     // while producer cadence fell to 109.99 fps. The Host panel scheduler is
     // independent and remains at 120 Hz; this lease only returns the now-
     // redundant virtual desktop completion loop to its 100-ms idle cadence.
-    PublishDirectDrawablePacingLease(
+    client.directDrawablePacingLeasePublished =
+        PublishDirectDrawablePacingLease(
         client.directDrawableOwnerPID,
         client.directDrawableLayerWindowID,
         client.directDrawableWidth,
         client.directDrawableHeight);
-    client.directDrawablePacingLeasePublished = YES;
     ScheduleDirectDrawableExpiry(client);
     if (identityChanged) {
         DisplayLog(@"direct-drawable-activity-validated owner-pid=%lld "
@@ -3572,6 +3656,7 @@ static void StartSubscription(MacWSDisplayClient *client,
     client.directDrawableLayerWindowID = 0;
     client.directDrawableWidth = 0;
     client.directDrawableHeight = 0;
+    client.directDrawableFullscreenCanvas = NO;
     client.subscriptionActive = YES;
     client.deliveryPaused = NO;
     client.frameAcknowledged = NO;
