@@ -102,8 +102,8 @@ class RenderActivityAuthorityContract(unittest.TestCase):
             "client.windowID != layerWindowID",
             "client.catalogFrontmostWindowID != layerWindowID",
             "client.catalogFrontmostOwnerPID != ownerPID",
-            "widthDifference * 5u > baseWidth",
-            "heightDifference * 5u > baseHeight",
+            "widthDifference > 2u",
+            "heightDifference > 2u",
         ):
             self.assertIn(token, validator)
         self.assertIn("BOOL ownsBaseSuspension", validator)
@@ -127,6 +127,11 @@ class RenderActivityAuthorityContract(unittest.TestCase):
         )
         self.assertIn("directDrawableBaseCaptureSuspended = YES", handler)
         self.assertIn("[strongClient stopStream]", handler)
+        rejection = handler.split("if (!validated) {", 1)[1].split(
+            "BOOL identityChanged", 1
+        )[0]
+        self.assertIn("ClearDirectDrawableActivity(client", rejection)
+        self.assertIn("validation-rejected-%@", rejection)
 
         clearer = DISPLAYD.split(
             "static void ClearDirectDrawableActivity(", 2
@@ -165,9 +170,12 @@ class RenderActivityAuthorityContract(unittest.TestCase):
         self.assertIn("!focusedWindowDirectAuthoritative", draw)
         self.assertIn('fullscreenDirectAuthoritative ? @"fullscreen" : @"window"',
                       draw)
+        self.assertIn("BOOL focusedDirectAuthorityLive", draw)
+        self.assertIn("directHeartbeatAge <= 3.0", draw)
         direct_window_draw = draw.index(
             "if (directSurface && !finalComposite &&\n"
-            "        !fullscreenDirectAuthoritative && baseCatalystFrame.texture)"
+            "        !fullscreenDirectAuthoritative &&\n"
+            "        focusedWindowDirectAuthoritative)"
         )
         direct_window_encode = draw.index(
             "if (MacWSEncodeCatalystDrawable(", direct_window_draw
@@ -181,6 +189,22 @@ class RenderActivityAuthorityContract(unittest.TestCase):
             "base elision must not reach drawPrimitives without an explicit "
             "render pipeline binding",
         )
+
+        final_direct = draw.split(
+            "if (directSurface && finalComposite && _overlayFrames.count &&",
+            1,
+        )[1].split("[encoder endEncoding]", 1)[0]
+        self.assertIn("focusedDirectAuthorityLive", final_direct)
+        self.assertIn("geometryMatches", final_direct)
+        self.assertIn("focusedFrame.record.width", final_direct)
+
+        callback = view.split(
+            "- (void)catalystDrawableDidPresent:", 1
+        )[1].split("- (NSString *)exportCatalystDrawableProbeForPID:", 1)[0]
+        self.assertIn("widthDifference > 2u", callback)
+        self.assertIn("heightDifference > 2u", callback)
+        self.assertIn("direct-drawable-authority-cleared", callback)
+        self.assertIn("[_streamClient clearDirectDrawableActivity]", callback)
 
     def test_generic_producer_requires_authority_ancestry_and_size(self):
         validator = METAL.split(

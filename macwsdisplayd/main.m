@@ -2805,9 +2805,16 @@ static BOOL ValidateDirectDrawableWindowBase(
         ? width - baseWidth : baseWidth - width;
     uint64_t heightDifference = height > baseHeight
         ? height - baseHeight : baseHeight - height;
+    // The exact-window capture and Chromium CALayer drawable describe the
+    // same pixel authority.  A percentage tolerance is unsafe here: during
+    // live resize it authenticated a new 2228-wide drawable against the old
+    // 2388-wide capture, then stopped that capture.  The Host consequently
+    // stretched retained pixels until the next stream generation arrived.
+    // Permit only the two-pixel rounding jitter observed at AppKit/backing-
+    // scale boundaries; any real geometry transition must keep the base
+    // capture alive until its matching IOSurface is delivered.
     if (baseWidth == 0 || baseHeight == 0 ||
-        widthDifference * 5u > baseWidth ||
-        heightDifference * 5u > baseHeight) {
+        widthDifference > 2u || heightDifference > 2u) {
         if (rejectionReason) *rejectionReason = @"window-focused-size";
         return NO;
     }
@@ -2965,6 +2972,15 @@ static void HandleDirectDrawableActivity(MacWSDisplayClient *client,
                        destination.origin.x, destination.origin.y,
                        destination.size.width, destination.size.height);
         }
+        // A rejected update from the active producer is an authority
+        // transition, not merely a missed optimization opportunity.  Resume
+        // the captured source immediately so neither displayd nor the Host
+        // can keep presenting the previous drawable/geometry for the three-
+        // second lease remainder.
+        if (client.directDrawableActive)
+            ClearDirectDrawableActivity(client,
+                [NSString stringWithFormat:@"validation-rejected-%@",
+                    rejectionReason ?: @"unknown"]);
         return;
     }
 

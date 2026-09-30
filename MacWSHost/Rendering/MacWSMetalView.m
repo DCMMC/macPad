@@ -962,9 +962,13 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
             uint64_t heightDifference = direct.height > descriptor.pixelHeight
                 ? direct.height - descriptor.pixelHeight
                 : descriptor.pixelHeight - direct.height;
+            // A descendant Chromium drawable is the exact client IOSurface,
+            // not a scalable preview.  The old 20% tolerance joined a new
+            // resize generation to stale window geometry and let retained
+            // pixels overwrite a correct final composite.  Only tolerate
+            // backing-scale rounding at the pixel boundary.
             if (descriptor.pixelWidth == 0 || descriptor.pixelHeight == 0 ||
-                widthDifference * 5u > descriptor.pixelWidth ||
-                heightDifference * 5u > descriptor.pixelHeight) continue;
+                widthDifference > 2u || heightDifference > 2u) continue;
         }
         uint64_t score = (uint64_t)descriptor.pixelWidth *
             (uint64_t)descriptor.pixelHeight;
@@ -1021,21 +1025,41 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
                                                    width:direct.width
                                                   height:direct.height];
         }
-    } else if (!_reportedDirectDrawableJoinMiss) {
-        _reportedDirectDrawableJoinMiss = YES;
-        NSMutableArray<NSString *> *candidates = [NSMutableArray array];
-        for (MacWSStreamWindow *window in _latestWindows) {
-            MacWSStreamWindowDescriptor descriptor = window.descriptor;
-            if (descriptor.ownerPID != logicalOwnerPID) continue;
-            [candidates addObject:[NSString stringWithFormat:
-                @"%u:flags=0x%x/%ux%u", descriptor.windowID,
-                descriptor.flags, descriptor.pixelWidth,
-                descriptor.pixelHeight]];
+        _reportedDirectDrawableJoinMiss = NO;
+    } else {
+        if (!_reportedDirectDrawableJoinMiss) {
+            _reportedDirectDrawableJoinMiss = YES;
+            NSMutableArray<NSString *> *candidates = [NSMutableArray array];
+            for (MacWSStreamWindow *window in _latestWindows) {
+                MacWSStreamWindowDescriptor descriptor = window.descriptor;
+                if (descriptor.ownerPID != logicalOwnerPID) continue;
+                [candidates addObject:[NSString stringWithFormat:
+                    @"%u:flags=0x%x/%ux%u", descriptor.windowID,
+                    descriptor.flags, descriptor.pixelWidth,
+                    descriptor.pixelHeight]];
+            }
+            MacWSLog(@"direct-drawable-join-miss pid=%d drawable=%ux%u "
+                     "canvas=%ux%u catalog-candidates=%@",
+                     logicalOwnerPID, direct.width, direct.height,
+                     canvasWidth, canvasHeight, candidates);
         }
-        MacWSLog(@"direct-drawable-join-miss pid=%d drawable=%ux%u "
-                 "canvas=%ux%u catalog-candidates=%@",
-                 logicalOwnerPID, direct.width, direct.height,
-                 canvasWidth, canvasHeight, candidates);
+        if (_directDrawableHeartbeatPID == logicalOwnerPID) {
+            MacWSLog(@"direct-drawable-authority-cleared pid=%d layer=%u "
+                     "reason=join-miss",
+                     logicalOwnerPID, _directDrawableHeartbeatLayerID);
+            [_streamClient clearDirectDrawableActivity];
+            _lastDirectDrawableHeartbeatTime = 0.0;
+            _directDrawableHeartbeatPID = 0;
+            _directDrawableHeartbeatLayerID = 0;
+            _scheduledCatalystDrawableFrame = nil;
+            if (_directDrawableContinuousPacing) {
+                _directDrawableContinuousPacing = NO;
+                self.paused = YES;
+                MacWSClearMTKDisplayLinkHighFrameRateReason(self);
+                self.enableSetNeedsDisplay = YES;
+                ((CAMetalLayer *)self.layer).maximumDrawableCount = 2;
+            }
+        }
     }
     // Runtime-confirmed by aquarium-1k-focused-direct-v3.json on
     // 2026-09-30: the authenticated producer delivered 1,402 unique frames
@@ -3174,17 +3198,20 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         baseCatalystFrame.record.ownerPID == self.targetPID &&
         baseCatalystFrame.record.producerPID !=
             baseCatalystFrame.record.ownerPID;
+    BOOL focusedDirectAuthorityLive = focusedLayerDirect &&
+        baseCatalystFrame.texture && self.targetPID > 1 &&
+        _directDrawableHeartbeatPID == self.targetPID &&
+        _directDrawableHeartbeatLayerID != 0 &&
+        _lastDirectDrawableHeartbeatTime > 0.0 &&
+        directHeartbeatAge >= 0.0 && directHeartbeatAge <= 3.0;
     // Window-mode Chromium publishes the exact focused client IOSurface. If
     // it matches the retained base frame pixel-for-pixel and the independently
     // joined PID/window heartbeat is fresh, that drawable completely replaces
     // the captured base. Sampling the old DisplayStream texture first only to
     // overdraw every pixel doubled Host's full-resolution fragment work.
     BOOL focusedWindowDirectAuthoritative = directSurface && !finalComposite &&
-        focusedLayerDirect && self.targetWindowID != 0 &&
-        _directDrawableHeartbeatPID == self.targetPID &&
+        focusedDirectAuthorityLive && self.targetWindowID != 0 &&
         _directDrawableHeartbeatLayerID == self.targetWindowID &&
-        _lastDirectDrawableHeartbeatTime > 0.0 &&
-        directHeartbeatAge >= 0.0 && directHeartbeatAge <= 3.0 &&
         baseCatalystFrame.record.width ==
             _surfaceFrame.descriptor.contentWidth &&
         baseCatalystFrame.record.height ==
@@ -3374,7 +3401,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     // completed producer IOSurface over only the content portion, preserving
     // the captured traffic lights/title bar and the exact existing viewport.
     if (directSurface && !finalComposite &&
-        !fullscreenDirectAuthoritative && baseCatalystFrame.texture) {
+        !fullscreenDirectAuthoritative &&
+        focusedWindowDirectAuthoritative) {
         // The base-elision path above intentionally skips its texture draw,
         // including the pipeline binding which that draw used to establish
         // for this encoder. MacWSEncodeCatalystDrawable only supplies the
@@ -3694,6 +3722,7 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         }
     }
     if (directSurface && finalComposite && _overlayFrames.count &&
+        focusedDirectAuthorityLive &&
         !fusedFocusedDirect &&
         ![_fullscreenCanvasPIDs containsObject:@(self.targetPID)]) {
         // Final-composite is authoritative for native SkyLight effects, but a
@@ -3726,6 +3755,12 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
             CGRect destination = CGRectMake(
                 overlay.destinationX, overlay.destinationY,
                 overlay.destinationWidth, overlay.destinationHeight);
+            BOOL geometryMatches =
+                fabs(destination.size.width - focusedFrame.record.width) <=
+                    2.0 &&
+                fabs(destination.size.height - focusedFrame.record.height) <=
+                    2.0;
+            if (!geometryMatches) continue;
             BOOL opaqueDirect = focusedFrame &&
                 (focusedFrame.record.flags &
                     MacWSCatalystDrawableOpaque) != 0 &&
