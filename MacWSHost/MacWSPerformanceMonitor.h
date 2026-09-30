@@ -74,6 +74,11 @@ typedef NS_ENUM(NSInteger, MacWSPerformanceHUDMode) {
                                           isTarget:(BOOL)isTarget
                                            drawable:(id<MTLDrawable>)drawable;
 
+// Counts every authenticated-animation scheduler callback and whether it had
+// a completed producer frame. This exposes producer/display phase misses
+// without adding per-frame logging or a second scheduling loop.
+- (void)recordDirectDrawableSchedulerTickWithFrame:(BOOL)hasFrame;
+
 // Call before -presentDrawable:. This registers Metal completion and actual
 // drawable-presentation handlers, so the result is visible-frame timing and
 // not merely command submission throughput.

@@ -31,6 +31,7 @@
 #import "macws_control_protocol.h"
 #import "macws_dock_expose_notify.h"
 #import "macws_host_protocol.h"
+#import "macws_power_lifecycle.h"
 #import "macws_menu_protocol.h"
 #import "macws_stream_protocol.h"
 #import "MacWSCatalystInputPolicy.h"
@@ -154,6 +155,52 @@ static BOOL MacWSWindowPresentationIsOnScreen(id window,
                                               BOOL *knownOut);
 static id MacWSPresentingWindow(id window, id application);
 static id MacWSRootPresentingWindow(id window, id application);
+static BOOL MacWSRuntimeDiagnosticsEnabled(void);
+static int MacWSWorkspaceWillSleepToken = -1;
+static int MacWSWorkspaceDidWakeToken = -1;
+
+static void MacWSPostWorkspacePowerNotification(BOOL sleeping) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        Class workspaceClass = objc_getClass("NSWorkspace");
+        if (!workspaceClass) return;
+        id workspace = ((MacWSMsgID)objc_msgSend)(
+            workspaceClass, sel_registerName("sharedWorkspace"));
+        id center = workspace ? ((MacWSMsgID)objc_msgSend)(
+            workspace, sel_registerName("notificationCenter")) : nil;
+        if (!center) return;
+        NSString *name = sleeping
+            ? @"NSWorkspaceWillSleepNotification"
+            : @"NSWorkspaceDidWakeNotification";
+        ((MacWSMsgVoidIDID)objc_msgSend)(
+            center, sel_registerName("postNotificationName:object:"),
+            name, workspace);
+    });
+}
+
+static void MacWSInstallWorkspacePowerLifecycle(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        uint32_t sleepResult = notify_register_dispatch(
+            MACWS_WORKSPACE_WILL_SLEEP_NOTIFY,
+            &MacWSWorkspaceWillSleepToken, dispatch_get_main_queue(),
+            ^(int token) {
+                (void)token;
+                MacWSPostWorkspacePowerNotification(YES);
+            });
+        uint32_t wakeResult = notify_register_dispatch(
+            MACWS_WORKSPACE_DID_WAKE_NOTIFY,
+            &MacWSWorkspaceDidWakeToken, dispatch_get_main_queue(),
+            ^(int token) {
+                (void)token;
+                MacWSPostWorkspacePowerNotification(NO);
+            });
+        if (MacWSRuntimeDiagnosticsEnabled()) {
+            fprintf(stderr,
+                    "#### APP-POWER bridge pid=%d sleep=%u wake=%u\n",
+                    getpid(), sleepResult, wakeResult);
+        }
+    });
+}
 // Main-thread-only semantic menu snapshot cache. ObjC objects never cross the
 // process boundary: Host receives generation-scoped integer IDs, while the
 // target process retains the corresponding item and index path solely long
@@ -11739,7 +11786,20 @@ static void MacWSPublishWindowMetrics(void) {
 }
 
 static void MacWSScheduleWindowMetricsPublish(void) {
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500 * NSEC_PER_MSEC),
+    static _Atomic bool initialPublishScheduled = false;
+    BOOL initial = !atomic_exchange_explicit(
+        &initialPublishScheduled, true, memory_order_acq_rel);
+    uint64_t delay = initial ? 500 * NSEC_PER_MSEC : 5 * NSEC_PER_SEC;
+    // Window move/resize/update notifications publish committed changes in
+    // 50 ms. This timer is only a recovery witness for a lost sidecar or a
+    // framework-created window that emitted no observable notification.
+    // Runtime fs_usage on iPad13,6 confirmed that the old recovery path
+    // scanned and stat'ed every process's metrics sidecar every 500 ms while
+    // the desktop was unchanged. Preserve one fast bootstrap pass, then keep
+    // that bounded fallback scan off the idle desktop hot path. A separate
+    // A/B showed Finder's SharedFileList resolver has its own 500-ms source,
+    // so this change deliberately makes no claim to fix that unrelated loop.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, delay),
                    dispatch_get_main_queue(), ^{
         @autoreleasepool { MacWSPublishWindowMetrics(); }
         MacWSScheduleWindowMetricsPublish();
@@ -11924,6 +11984,7 @@ static void MacWSInstallAppInputBridgeNow(void) {
     }
     if (dockEndpoint) MacWSPublishDockExposeState(NO);
     if (!dockEndpoint) {
+        MacWSInstallWorkspacePowerLifecycle();
         MacWSInstallWorkspaceOpenWitness();
         MacWSInstallApplicationKeyWitness();
         MacWSInstallMenuEventLoopWitness();
@@ -12048,6 +12109,14 @@ __attribute__((destructor)) static void MacWSRemoveAppInputBridge(void) {
     if (MacWSAppInputSocket >= 0) close(MacWSAppInputSocket);
     if (MacWSAppInputPath[0]) unlink(MacWSAppInputPath);
     if (MacWSWindowMetricsPath[0]) unlink(MacWSWindowMetricsPath);
+    if (MacWSWorkspaceWillSleepToken >= 0) {
+        notify_cancel(MacWSWorkspaceWillSleepToken);
+        MacWSWorkspaceWillSleepToken = -1;
+    }
+    if (MacWSWorkspaceDidWakeToken >= 0) {
+        notify_cancel(MacWSWorkspaceDidWakeToken);
+        MacWSWorkspaceDidWakeToken = -1;
+    }
     [MacWSLastWindowMetricsEntries release];
     MacWSLastWindowMetricsEntries = nil;
     [MacWSMenuCaches release];

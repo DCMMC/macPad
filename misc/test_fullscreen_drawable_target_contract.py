@@ -82,8 +82,12 @@ class FullscreenDrawableTargetContract(unittest.TestCase):
 
         consume = COMPOSITOR.split("- (MacWSCatalystDrawableFrame *)consumeDeliveryObject:", 1)[1].split(
             "- (MacWSCatalystDrawableFrame *)frameForOwnerPID:", 1)[0]
-        self.assertIn('if ([delivery[@"accepted"] boolValue]) return nil;', consume)
-        self.assertIn('delivery)[@"accepted"] = @YES', consume)
+        self.assertIn("delivery.isAccepted", consume)
+        self.assertIn("delivery.accepted = YES", consume)
+        receiver = (ROOT / "MacWSHost" / "Transport" /
+                    "MacWSCatalystDrawableReceiver.m").read_text()
+        self.assertIn("MacWSCatalystDrawableDelivery *delivery", receiver)
+        self.assertNotIn("NSData *payload", receiver)
 
     def test_fullscreen_hit_test_uses_rendered_drawable_before_hidden_desktop(self):
         authority = VIEW.split(
@@ -138,8 +142,9 @@ class FullscreenDrawableTargetContract(unittest.TestCase):
             "- (BOOL)resolveFullscreenLayerAtPoint:", 1
         )[0]
         direct_call = render.rindex(
-            "recordDirectDrawableSubmissionForOwnerPID:record.ownerPID"
+            "recordDirectDrawableSubmissionForOwnerPID:performanceOwnerPID"
         )
+        self.assertIn("performanceOwnerPID = record.ownerPID", render)
         base_call = render.rindex(
             "recordSubmissionForStream:performanceStreamID"
         )

@@ -14,6 +14,19 @@ extern pid_t audit_token_to_pid(audit_token_t token);
 NSNotificationName const MacWSCatalystDrawableDidPresentNotification =
     @"MacWSCatalystDrawableDidPresentNotification";
 
+@implementation MacWSCatalystDrawableDelivery
+
+- (instancetype)initWithRecord:(MacWSCatalystDrawableRecord)record
+                        surface:(IOSurfaceRef)surface {
+    self = [super init];
+    if (!self) return nil;
+    _record = record;
+    _surface = surface;
+    return self;
+}
+
+@end
+
 static dispatch_source_t DrawableSource;
 static mach_port_t DrawableReceivePort = MACH_PORT_NULL;
 
@@ -53,24 +66,24 @@ void MacWSStartCatalystDrawableReceiver(void) {
             DISPATCH_SOURCE_TYPE_MACH_RECV, (uintptr_t)receivePort, 0,
             dispatch_get_main_queue());
         dispatch_source_set_event_handler(DrawableSource, ^{
-            for (;;) {
-                _Alignas(8) uint8_t bytes[
-                    sizeof(MacWSCatalystDrawableMachMessage) +
-                    MAX_TRAILER_SIZE] = {0};
-                MacWSCatalystDrawableMachMessage *message =
-                    (MacWSCatalystDrawableMachMessage *)bytes;
-                mach_msg_return_t received = mach_msg(
-                    &message->header,
-                    MACH_RCV_MSG | MACH_RCV_TIMEOUT |
-                        MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) |
-                        MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT),
-                    0, sizeof(bytes), receivePort, 0, MACH_PORT_NULL);
-                if (received == MACH_RCV_TIMED_OUT) break;
-                if (received != MACH_MSG_SUCCESS) {
-                    MacWSLog(@"catalyst-drawable receive failed kr=%d",
-                             received);
-                    break;
-                }
+          for (;;) {
+            _Alignas(8) uint8_t bytes[
+                sizeof(MacWSCatalystDrawableMachMessage) +
+                MAX_TRAILER_SIZE] = {0};
+            MacWSCatalystDrawableMachMessage *message =
+                (MacWSCatalystDrawableMachMessage *)bytes;
+            mach_msg_return_t received = mach_msg(
+                &message->header,
+                MACH_RCV_MSG | MACH_RCV_TIMEOUT |
+                    MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) |
+                    MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT),
+                0, sizeof(bytes), receivePort, 0, MACH_PORT_NULL);
+            if (received == MACH_RCV_TIMED_OUT) break;
+            if (received != MACH_MSG_SUCCESS) {
+                MacWSLog(@"catalyst-drawable receive failed kr=%d",
+                         received);
+                break;
+            }
                 mach_port_t surfacePort = message->surfacePort.name;
                 mach_msg_audit_trailer_t *trailer =
                     (mach_msg_audit_trailer_t *)(bytes +
@@ -91,6 +104,19 @@ void MacWSStartCatalystDrawableReceiver(void) {
                     message->surfacePort.type == MACH_MSG_PORT_DESCRIPTOR &&
                     MACH_PORT_VALID(surfacePort) && trailerValid;
                 if (!envelopeValid) {
+                    static BOOL reportedEnvelopeRejection = NO;
+                    if (!reportedEnvelopeRejection) {
+                        reportedEnvelopeRejection = YES;
+                        MacWSLog(@"catalyst-drawable reject-envelope id=%d "
+                                 "size=%u bits=0x%x descriptors=%u port=%u "
+                                 "trailer=%@ sender=%d",
+                                 message->header.msgh_id,
+                                 message->header.msgh_size,
+                                 message->header.msgh_bits,
+                                 message->body.msgh_descriptor_count,
+                                 surfacePort, trailerValid ? @"YES" : @"NO",
+                                 senderPID);
+                    }
                     if (MACH_PORT_VALID(surfacePort))
                         (void)mach_port_deallocate(
                             mach_task_self(), surfacePort);
@@ -99,30 +125,39 @@ void MacWSStartCatalystDrawableReceiver(void) {
                 MacWSCatalystDrawableRecord record = message->record;
                 if (!MacWSCatalystDrawableRecordIsValid(
                         &record, sizeof(record)) ||
-                    record.ownerPID != senderPID) {
+                    record.producerPID != senderPID) {
+                    static BOOL reportedRecordRejection = NO;
+                    if (!reportedRecordRejection) {
+                        reportedRecordRejection = YES;
+                        MacWSLog(@"catalyst-drawable reject-record sender=%d "
+                                 "owner=%d producer=%d version=%u size=%u surface=%u "
+                                 "dimensions=%ux%u bpr=%u flags=0x%x",
+                                 senderPID, record.ownerPID,
+                                 record.producerPID, record.version,
+                                 record.size, record.surfaceID, record.width,
+                                 record.height, record.bytesPerRow,
+                                 record.flags);
+                    }
                     (void)mach_port_deallocate(mach_task_self(), surfacePort);
                     continue;
                 }
                 IOSurfaceRef surface = IOSurfaceLookupFromMachPort(surfacePort);
                 (void)mach_port_deallocate(mach_task_self(), surfacePort);
                 if (!surface) continue;
-                NSData *payload = [NSData dataWithBytes:&record
-                                                  length:sizeof(record)];
-                NSMutableDictionary *delivery = [@{
-                    @"record": payload,
-                    @"surface": (__bridge id)surface,
-                } mutableCopy];
+                MacWSCatalystDrawableDelivery *delivery =
+                    [[MacWSCatalystDrawableDelivery alloc]
+                        initWithRecord:record surface:surface];
                 [NSNotificationCenter.defaultCenter
                     postNotificationName:
                         MacWSCatalystDrawableDidPresentNotification
                     object:delivery];
                 if ((record.flags &
                         MacWSCatalystDrawableTransfersUseCount) != 0 &&
-                    ![delivery[@"accepted"] boolValue]) {
+                    !delivery.isAccepted) {
                     IOSurfaceDecrementUseCount(surface);
                 }
                 CFRelease(surface);
-            }
+          }
         });
         dispatch_resume(DrawableSource);
         MacWSLog(@"catalyst-drawable receiver-ready service=%s port=%u",

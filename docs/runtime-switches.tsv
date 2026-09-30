@@ -35,6 +35,7 @@ env	AGXPROBE_HOLD	off	standalone probe	Keeps the AGX API probe alive for debugge
 env	AGXPROBE_TEXTURE_INIT	off	standalone probe	Selects the texture-initializer probe variant.
 env	CA_DISABLE_SWAP_ICC	on	WindowServer,GUI clients	Required CoreAnimation compatibility; not a diagnostic.
 env	CA_VSYNC_OFF	on	WindowServer,GUI clients	No working chroot vblank handoff; commits use the virtual completion path.
+env	CFFIXED_USER_HOME	auto	CoreFoundation and Catalyst launchers	Launcher-selected effective home used to isolate per-user caches and container state; not a feature switch.
 env	COMMAND_MODE	on	GUI clients	Selects the unix2003 command environment expected by Ventura GUI applications.
 env	DYLD_INSERT_LIBRARIES	auto	launchdchrootexec	Launcher selects the matching thin libmachook slice.
 env	DRAW_DELAY	off	standalone probe	Delays the drawtest test window.
@@ -111,6 +112,7 @@ env	MACWS_DISP_FILL_LOOP	off	diagnostic experiment	Legacy continuous gray-fill p
 env	MACWS_DUMP_BACKING	off	diagnostic	Texture backing dump.
 env	MACWS_FILE_PANEL_DIAG	off	file-panel diagnostic	Logs selection of Ventura AppKit's native in-process NSOpenPanel/NSSavePanel implementation.
 env	MACWS_FILECACHE_DIAG	off	diagnostic	Exact-UUID CoreServicesInternal FileCache finalizer depth/object recorder; observation only.
+env	MACWS_SFL_DIAG	off	sharedfilelistd diagnostic	Records bounded public Foundation bookmark resolution and refresh boundaries without changing return values or out parameters.
 env	MACWS_NATIVE_PANEL_DIRECTORY	off	standalone native-panel probe	Optional initial directory for misc/native_open_panel_probe.c.
 env	MACWS_NATIVE_PANEL_HOLD	off	standalone native-panel probe	Stops the diagnostic process before panel construction for an explicit debugger attach.
 env	MACWS_NATIVE_PANEL_INPROCESS	off	standalone native-panel probe	Sets NSUseRemoteSavePanel=NO and exercises the public NSOpenPanel factory.
@@ -144,6 +146,7 @@ env	MACWS_MPS_PROBE_TRACE_SUBMIT	off	standalone MPS probe	Logs bounded command s
 env	MACWS_CATALYST_REGISTER_APPLICATION	on	Maps UIKit carrier child	Completes Maps' stock UIKitServices application-support handshake; UIKitSystem validates the real child audit token and complete exec generation before FrontBoard registration.
 env	MACWS_CATALYST_REQUEST_INITIAL_SCENE	on	Maps UIKit carrier child	Requests Maps' initial UIKitMac scene after the validated UIKitServices registration; set only by MacWSCatalystLauncher, not globally.
 env	MACWS_CATALYST_DIRECT_DRAWABLE	on	generic Catalyst carrier child	Publishes completed CAMetalLayer IOSurfaces through a typed Mach message when SkyLight exact-window capture omits the client area; Host imports and composites the same native AGX surface without RFB or CPU readback.
+env	MACWS_FOCUSED_LAYER_DIRECT	off	Chromium/Electron A/B	Enables the focus-authorized CALayer IOSurface zero-copy path for an explicit comparison; the original setContents call and WindowServer composition remain intact.
 env	MACWS_CATALYST_TRACE	off	Catalyst diagnostic	Emits verbose UIKitMac/FuseBoard lifecycle inventories; never enable in production.
 env	MACWS_DNS_DEBUG	off	DNS compatibility diagnostic	Logs local getaddrinfo failure and bounded hostd fallback results; production fallback remains active but quiet.
 env	APPLICATION_SUPPORT_SERVICE_MACH_NAME	auto	Maps UIKit carrier child	Routes Maps' UIKitServices client to the private macOS-booter FrontBoard endpoint published by UIKitSystem; set only by MacWSCatalystLauncher.
@@ -395,6 +398,7 @@ flag	/tmp/macws_vnc_share	off	obsolete production switch	Ignored and removed on 
 flag	/tmp/macws_vnc_test	off	diagnostic	Synthetic VNC gradient.
 flag	/private/tmp/macws_xpc_proxy_trace	off	XPC proxy diagnostic	Logs the real process/service environment for compatibility-service attribution; production startup removes it.
 flag	/tmp/macws_coexist_pace_us	off	diagnostic pacing override	Only explicit --pace-us experiments write this numeric override. Production has a built-in 100000-us idle interval and needs no file.
+flag	/tmp/macws_focused_layer_direct	off	Chromium/Electron A/B	Boot-local equivalent of MACWS_FOCUSED_LAYER_DIRECT for restarting one bounded GPU helper without changing its launch environment.
 state	/tmp/macws_capture_done	transient	VNC startup	PID and generation acknowledgement for the one-shot frame request.
 state	/tmp/macws_graphics_ready	transient	startup	PID witness written after first clean producer completion.
 state	/tmp/.macos_gui.transaction	transient	GUI lifecycle transaction	Boot-local atomic mkdir lock with exact owner PID; overlapping start, restart, and stop operations return 75, while an ownerless stale lock is recoverable.
@@ -408,7 +412,7 @@ notification	com.macwsguide.windowing.request-fullscreen	transient	MacWSHost to 
 notification	com.macwsguide.windowing.request-resize	transient	MacWSHost to SpringBoard	Wakeup only; authority, dimensions and exact target are read from the bounded resize request plist.
 default	NSUseRemoteSavePanel	off	macOS GUI clients	Set in-process so Ventura AppKit uses its native NSLocalOpenPanel/NSLocalSavePanel instead of the unavailable remote ViewBridge service; this does not substitute an iOS picker.
 state	/tmp/macws_vnc_activity	transient	VNC/Host input	Boot-monotonic input timestamp selecting the 8.333 ms interactive interval for one second.
-state	/tmp/macws_render_activity	transient	Stray presentation	Boot-monotonic timestamp published from real drawable presentation at most 10 Hz; selects the 16.667 ms render interval for one second.
+state	/tmp/macws_render_activity	transient	focused presentation	Boot-monotonic timestamp, adaptive target pace, authenticated producer PID, and actual authority-matched presentation sequence published at most 10 Hz; lets WindowServer and the profiler distinguish producer demand from downstream cadence without per-frame I/O.
 state	/tmp/macws_interaction_wake.sock	transient	VNC/Host input and Stray presentation	WindowServer-owned datagram wakeup for interrupting the current 100 ms idle completion wait; producers signal it only after publishing the corresponding activity timestamp.
 state	/tmp/macws_vnc_activation_reply.sock	transient	VNC input	Bound OSXvnc acknowledgement endpoint; skips the historical fixed 20 ms wait only when macwsinputd proves the hit target is already active/frontmost.
 state	/tmp/macws_vnc_damage.sock	transient	VNC transport	Damage notification datagram socket.

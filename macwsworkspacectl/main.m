@@ -20,6 +20,81 @@ extern char **environ;
 typedef CFTypeRef (*MacWSLSSharedFileListCreateFn)(
     CFAllocatorRef, CFStringRef, CFTypeRef);
 typedef CFArrayRef (*MacWSLSSharedFileListCopySnapshotFn)(CFTypeRef, UInt32 *);
+typedef CFStringRef (*MacWSLSSharedFileListItemCopyDisplayNameFn)(CFTypeRef);
+typedef CFURLRef (*MacWSLSSharedFileListItemCopyResolvedURLFn)(
+    CFTypeRef, UInt32, CFErrorRef *);
+
+static int ConfigureAirPlayPowerDefaults(void) {
+    typedef int32_t (*APSSettingsSetUseXPCHelperFn)(bool);
+    typedef int64_t (*APSSettingsGetInt64Fn)(CFStringRef, int32_t *);
+    typedef int32_t (*APSSettingsSetInt64Fn)(CFStringRef, int64_t);
+    static const char *const framework =
+        "/System/Library/PrivateFrameworks/"
+        "AirPlaySupport.framework/AirPlaySupport";
+    void *image = dlopen(framework, RTLD_NOW | RTLD_LOCAL);
+    APSSettingsSetUseXPCHelperFn setUseXPCHelper = image
+        ? (APSSettingsSetUseXPCHelperFn)dlsym(
+              image, "APSSettingsSetUseXPCHelper") : NULL;
+    APSSettingsGetInt64Fn getSetting = image
+        ? (APSSettingsGetInt64Fn)dlsym(image, "APSSettingsGetInt64") : NULL;
+    APSSettingsSetInt64Fn setSetting = image
+        ? (APSSettingsSetInt64Fn)dlsym(image, "APSSettingsSetInt64") : NULL;
+    if (!setUseXPCHelper || !getSetting || !setSetting) {
+        fprintf(stderr,
+                "macwsworkspacectl: AirPlay settings SPI unavailable "
+                "(image=%s route=%s get=%s set=%s)\n",
+                image ? "yes" : "no", setUseXPCHelper ? "yes" : "no",
+                getSetting ? "yes" : "no",
+                setSetting ? "yes" : "no");
+        if (image) dlclose(image);
+        return 69;
+    }
+
+    // RE-confirmed in the iPad13,6 Ventura/iPadOS-16.3 runtime:
+    // -[APAdvertiserBTLEManager updateSupportsSoloAndForceReadFromPrefs:]
+    // reads this public AirPlay setting first. When absent it asks IO80211 for
+    // AWDL Solo support; that unsupported query returns an error and leaves
+    // the manager's initialized byte clear, so its timer retries forever.
+    // Persisting the supported preference path lets Apple's own method finish
+    // initialization and cancel its timer. The chroot cannot provide AWDL, so
+    // false is the truthful capability value rather than a check bypass.
+    // RE-confirmed via the actual AirPlaySupport image: the supported
+    // APSSettingsSetUseXPCHelper(false) entry point selects the same
+    // com.apple.airplay CFPreferences backend used by showInMenuBar keys.
+    // The outer iPadOS launchd cannot host Ventura's incompatible helper, so
+    // choose this Apple-provided backend before the first settings read.
+    int32_t routeStatus = setUseXPCHelper(false);
+    if (routeStatus != 0) {
+        fprintf(stderr,
+                "macwsworkspacectl: AirPlay preferences route failed: %d\n",
+                routeStatus);
+        dlclose(image);
+        return 1;
+    }
+    CFStringRef key = CFSTR("p2pSolo");
+    int32_t readStatus = 0;
+    int64_t oldValue = getSetting(key, &readStatus);
+    int32_t setStatus = 0;
+    if (readStatus != 0 || oldValue != 0)
+        setStatus = setSetting(key, 0);
+    int32_t verifyStatus = 0;
+    int64_t value = getSetting(key, &verifyStatus);
+    if (setStatus != 0 || verifyStatus != 0 || value != 0) {
+        fprintf(stderr,
+                "macwsworkspacectl: AirPlay p2pSolo configuration failed "
+                "route=%d read=%d old=%lld set=%d verify=%d value=%lld\n",
+                routeStatus, readStatus, (long long)oldValue, setStatus,
+                verifyStatus, (long long)value);
+        dlclose(image);
+        return 1;
+    }
+    fprintf(stdout,
+            "airplay-power-ready key=p2pSolo value=0 previous=%lld "
+            "route-status=%d read-status=%d\n",
+            (long long)oldValue, routeStatus, readStatus);
+    dlclose(image);
+    return 0;
+}
 
 static int SharedFileListReady(void) {
     MacWSLSSharedFileListCreateFn createList =
@@ -60,6 +135,173 @@ static int SharedFileListReady(void) {
             (long)count, seed);
     CFRelease(snapshot);
     CFRelease(list);
+    return 0;
+}
+
+static int InspectSharedFileLists(void) {
+    MacWSLSSharedFileListCreateFn createList =
+        (MacWSLSSharedFileListCreateFn)dlsym(
+            RTLD_DEFAULT, "LSSharedFileListCreate");
+    MacWSLSSharedFileListCopySnapshotFn copySnapshot =
+        (MacWSLSSharedFileListCopySnapshotFn)dlsym(
+            RTLD_DEFAULT, "LSSharedFileListCopySnapshot");
+    MacWSLSSharedFileListItemCopyDisplayNameFn copyDisplayName =
+        (MacWSLSSharedFileListItemCopyDisplayNameFn)dlsym(
+            RTLD_DEFAULT, "LSSharedFileListItemCopyDisplayName");
+    MacWSLSSharedFileListItemCopyResolvedURLFn copyResolvedURL =
+        (MacWSLSSharedFileListItemCopyResolvedURLFn)dlsym(
+            RTLD_DEFAULT, "LSSharedFileListItemCopyResolvedURL");
+    if (!createList || !copySnapshot || !copyDisplayName ||
+        !copyResolvedURL) {
+        fprintf(stderr,
+                "macwsworkspacectl: SharedFileList inspection SPI "
+                "unavailable\n");
+        return 69;
+    }
+
+    static const struct {
+        const char *label;
+        const char *symbol;
+    } listTypes[] = {
+        {"favorite-items", "kLSSharedFileListFavoriteItems"},
+        {"favorite-volumes", "kLSSharedFileListFavoriteVolumes"},
+        {"recent-applications", "kLSSharedFileListRecentApplicationItems"},
+        {"recent-documents", "kLSSharedFileListRecentDocumentItems"},
+    };
+    int failures = 0;
+    for (size_t listIndex = 0;
+         listIndex < sizeof(listTypes) / sizeof(listTypes[0]); listIndex++) {
+        CFStringRef *type = (CFStringRef *)dlsym(
+            RTLD_DEFAULT, listTypes[listIndex].symbol);
+        if (!type || !*type) {
+            fprintf(stdout, "shared-file-list-inspect list=%s unavailable\n",
+                    listTypes[listIndex].label);
+            continue;
+        }
+        CFTypeRef list = createList(kCFAllocatorDefault, *type, NULL);
+        UInt32 seed = 0;
+        CFArrayRef items = list ? copySnapshot(list, &seed) : NULL;
+        if (!items) {
+            fprintf(stdout,
+                    "shared-file-list-inspect list=%s snapshot=nil\n",
+                    listTypes[listIndex].label);
+            if (list) CFRelease(list);
+            failures++;
+            continue;
+        }
+        fprintf(stdout,
+                "shared-file-list-inspect list=%s items=%ld seed=%u\n",
+                listTypes[listIndex].label,
+                (long)CFArrayGetCount(items), seed);
+        for (CFIndex itemIndex = 0;
+             itemIndex < CFArrayGetCount(items); itemIndex++) {
+            CFTypeRef item = CFArrayGetValueAtIndex(items, itemIndex);
+            CFStringRef name = copyDisplayName(item);
+            CFErrorRef error = NULL;
+            CFAbsoluteTime started = CFAbsoluteTimeGetCurrent();
+            // These are the least invasive flags Finder can use: resolution
+            // may read an already-mounted path but cannot show UI or mount a
+            // missing volume merely for this evidence probe.
+            CFURLRef url = copyResolvedURL(item, 3, &error);
+            CFAbsoluteTime elapsed = CFAbsoluteTimeGetCurrent() - started;
+            char nameBytes[PATH_MAX] = "(unnamed)";
+            char urlBytes[PATH_MAX] = "(nil)";
+            char errorDomain[256] = "none";
+            CFIndex errorCode = 0;
+            if (name) {
+                (void)CFStringGetCString(name, nameBytes, sizeof(nameBytes),
+                                         kCFStringEncodingUTF8);
+            }
+            if (url) {
+                (void)CFURLGetFileSystemRepresentation(
+                    url, true, (UInt8 *)urlBytes, sizeof(urlBytes));
+            }
+            if (error) {
+                CFStringRef domain = CFErrorGetDomain(error);
+                errorCode = CFErrorGetCode(error);
+                if (domain) {
+                    (void)CFStringGetCString(domain, errorDomain,
+                                             sizeof(errorDomain),
+                                             kCFStringEncodingUTF8);
+                }
+            }
+            fprintf(stdout,
+                    "shared-file-list-item list=%s index=%ld name=%s "
+                    "url=%s error-domain=%s error-code=%ld elapsed-ms=%.3f\n",
+                    listTypes[listIndex].label, (long)itemIndex, nameBytes,
+                    urlBytes, errorDomain, (long)errorCode,
+                    elapsed * 1000.0);
+            if (!url) failures++;
+            if (error) CFRelease(error);
+            if (url) CFRelease(url);
+            if (name) CFRelease(name);
+        }
+        CFRelease(items);
+        CFRelease(list);
+    }
+    return failures == 0 ? 0 : 1;
+}
+
+static int InspectBookmarkPaths(void) {
+    NSArray<NSString *> *paths = @[
+        @"/Applications",
+        @"/private/var",
+        @"/private/var/root",
+        @"/private/var/root/Desktop",
+        @"/private/var/root/Documents",
+        @"/private/var/root/Downloads",
+        @"/Users/root",
+    ];
+    NSArray<NSURLResourceKey> *keys = @[
+        NSURLVolumeURLKey,
+        NSURLVolumeIdentifierKey,
+        NSURLVolumeUUIDStringKey,
+        NSURLVolumeNameKey,
+        NSURLVolumeIsRootFileSystemKey,
+        NSURLFileResourceIdentifierKey,
+        NSURLDocumentIdentifierKey,
+        NSURLCreationDateKey,
+        NSURLContentModificationDateKey,
+    ];
+    for (NSString *path in paths) {
+        NSURL *url = [NSURL fileURLWithPath:path];
+        NSError *resourceError = nil;
+        NSDictionary *values = [url resourceValuesForKeys:keys
+                                                     error:&resourceError];
+        fprintf(stdout, "bookmark-path path=%s resources-error=%s\n",
+                path.fileSystemRepresentation,
+                resourceError.description.UTF8String ?: "none");
+        for (NSURLResourceKey key in keys) {
+            id value = values[key];
+            fprintf(stdout, "bookmark-resource path=%s key=%s class=%s "
+                            "value=%s\n",
+                    path.fileSystemRepresentation, key.UTF8String,
+                    value ? object_getClassName(value) : "nil",
+                    value ? [[value description] UTF8String] : "nil");
+        }
+
+        NSError *creationError = nil;
+        NSData *bookmark = [url bookmarkDataWithOptions:0x20000000UL
+                       includingResourceValuesForKeys:nil
+                                        relativeToURL:nil
+                                                error:&creationError];
+        BOOL stale = NO;
+        NSError *resolutionError = nil;
+        NSURL *resolved = bookmark
+            ? [NSURL URLByResolvingBookmarkData:bookmark
+                                        options:0x300UL
+                                  relativeToURL:nil
+                            bookmarkDataIsStale:&stale
+                                          error:&resolutionError]
+            : nil;
+        fprintf(stdout,
+                "bookmark-roundtrip path=%s bytes=%lu stale=%d resolved=%s "
+                "create-error=%s resolve-error=%s\n",
+                path.fileSystemRepresentation, (unsigned long)bookmark.length,
+                stale, resolved.path.fileSystemRepresentation ?: "(nil)",
+                creationError.description.UTF8String ?: "none",
+                resolutionError.description.UTF8String ?: "none");
+    }
     return 0;
 }
 
@@ -1199,6 +1441,10 @@ static int ResolveDocumentApplication(const char *path, const char *output) {
 
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        if (argc == 2 &&
+            strcmp(argv[1], "configure-airplay-power") == 0) {
+            return ConfigureAirPlayPowerDefaults();
+        }
         if (argc == 4 && strcmp(argv[1], "resolve-document") == 0)
             return ResolveDocumentApplication(argv[2], argv[3]);
         if (argc >= 2 && strcmp(argv[1], "set-wallpaper") == 0) {
@@ -1245,6 +1491,12 @@ int main(int argc, const char *argv[]) {
         if (argc == 2 && strcmp(argv[1], "shared-file-list-ready") == 0) {
             return SharedFileListReady();
         }
+        if (argc == 2 && strcmp(argv[1], "shared-file-list-inspect") == 0) {
+            return InspectSharedFileLists();
+        }
+        if (argc == 2 && strcmp(argv[1], "bookmark-path-inspect") == 0) {
+            return InspectBookmarkPaths();
+        }
         if (argc == 3 && strcmp(argv[1], "activate-process") == 0) {
             return ActivateProcess(argv[2]);
         }
@@ -1274,6 +1526,9 @@ int main(int argc, const char *argv[]) {
                 "register-settings-extensions | "
                 "verify-launchservices-catalog | "
                 "shared-file-list-ready | "
+                "shared-file-list-inspect | "
+                "bookmark-path-inspect | "
+                "configure-airplay-power | "
                 "open-application /absolute/App.app | "
                 "session-status | activate-process PID | list-windows PID | "
                 "reopen-process PID | inspect-appkit-reopen | "

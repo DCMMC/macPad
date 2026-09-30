@@ -2085,6 +2085,17 @@ PY
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><false/>
     <key>ThrottleInterval</key><integer>5</integer>
+    <!-- RE-confirmed in Ventura 13.4 CoreServicesInternal and
+         runtime-confirmed on iPad13,6: uid 0's /var/root home candidate is
+         rejected against Finder's canonical /private/var/root bookmark,
+         leaving the stale bit set even after the canonical fallback resolves.
+         CoreFoundation's supported fixed-home input makes the first candidate
+         canonical and stops sharedfilelistd's resolve/update notification
+         loop without bypassing bookmark validation. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CFFIXED_USER_HOME</key><string>/private/var/root</string>
+    </dict>
     <key>StandardOutPath</key><string>${LOGDIR}/sharedfilelistd.out</string>
     <key>StandardErrorPath</key><string>${LOGDIR}/sharedfilelistd.err</string>
 </dict>
@@ -4922,6 +4933,21 @@ start_macos() {
     for workspace_log in finder-desktop dock systemuiserver controlcenter; do
         rm -f "$LOGDIR/$workspace_log.log"
     done
+    # AirPlayReceiver's supported p2pSolo preference is the authoritative
+    # capability source when this chroot has no usable AWDL interface. Set it
+    # before ControlCenter constructs APAdvertiserBTLEManager; otherwise the
+    # failed IO80211 capability query leaves its initialization incomplete and
+    # a retry timer consumes CPU for the lifetime of the desktop session.
+    rm -f "$LOGDIR/airplay-power.log"
+    if ! /var/jb/usr/bin/timeout -k 2 10 \
+            "$CHROOTEXEC" 0 0 "$ROOTFS" "$WORKSPACECTL_BIN" \
+            configure-airplay-power \
+            > "$LOGDIR/airplay-power.log" 2>&1; then
+        log "ERROR: AirPlay power capability configuration failed."
+        tail -n 20 "$LOGDIR/airplay-power.log" 2>/dev/null || true
+        return 1
+    fi
+    log "AirPlay AWDL-Solo capability configured through Apple's settings API."
     if ! proc_running "$P_FINDER"; then
         launchctl load "$FINDER_DESKTOP_PLIST" || return 1
     else

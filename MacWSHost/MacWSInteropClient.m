@@ -777,8 +777,11 @@ static NSURL *MacWSResolvedProviderFileURL(id item) {
             selector:@selector(localPasteboardChanged:)
             name:UIPasteboardChangedNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self
-            selector:@selector(localPasteboardChanged:)
+            selector:@selector(applicationDidBecomeActive:)
             name:UIApplicationDidBecomeActiveNotification object:nil];
+        [NSNotificationCenter.defaultCenter addObserver:self
+            selector:@selector(applicationDidEnterBackground:)
+            name:UIApplicationDidEnterBackgroundNotification object:nil];
         [NSNotificationCenter.defaultCenter addObserver:self
             selector:@selector(localPasteboardChanged:)
             name:UISceneDidActivateNotification object:nil];
@@ -821,6 +824,26 @@ static NSURL *MacWSResolvedProviderFileURL(id item) {
         }
     });
     dispatch_resume(timer);
+}
+
+- (void)applicationDidEnterBackground:(NSNotification *)notification {
+    (void)notification;
+    // A foreground Scene is the only consumer of clipboard convergence.
+    // UIKit can keep this entitled Host resident after the last Scene has
+    // backgrounded, so an event-handler state check alone still wakes the
+    // process every 750 ms. Cancel the source at the application lifecycle
+    // boundary; the active transition below recreates it without changing
+    // clipboard ownership or the XPC subscription.
+    if (MacWSClipboardPublisher != self) return;
+    dispatch_source_t timer = self.pasteboardPollTimer;
+    self.pasteboardPollTimer = nil;
+    if (timer) dispatch_source_cancel(timer);
+    self.localPublishSerial++;
+}
+
+- (void)applicationDidBecomeActive:(NSNotification *)notification {
+    if (MacWSClipboardPublisher == self) [self startPasteboardPolling];
+    [self localPasteboardChanged:notification];
 }
 
 - (void)publishStatus:(NSString *)status connected:(BOOL)connected {

@@ -15,9 +15,16 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, readonly) IOSurfaceRef surface;
 @end
 
-// Imports validated Catalyst IOSurface deliveries and keeps only the newest
-// sequence for each producer. Transport remains in Transport/; this class is
-// the rendering-side policy and lifetime boundary.
+// Imports validated Catalyst IOSurface deliveries.  The newest frame remains
+// available for identity/probe callers, while the display-clock consumer gets
+// a bounded two-frame FIFO. Runtime profiling at 120 Hz showed that a
+// single-frame latest mailbox reduced receipt latency but discarded 5% of
+// frames that the following display tick could otherwise consume. Two frames
+// preserve that phase-crossing throughput without unbounded backlog.
+// IOSurface texture views are
+// cached separately because CAMetalLayer normally cycles a three-surface pool.
+// Transport remains in Transport/; this class is the rendering-side policy
+// and lifetime boundary.
 @interface MacWSCatalystDrawableCompositor : NSObject
 - (instancetype)initWithDevice:(id<MTLDevice>)device
     NS_DESIGNATED_INITIALIZER;
@@ -26,6 +33,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable MacWSCatalystDrawableFrame *)consumeDeliveryObject:(id)object
     shouldAcceptOwner:(BOOL (^)(int32_t ownerPID))shouldAcceptOwner;
 - (nullable MacWSCatalystDrawableFrame *)frameForOwnerPID:(int32_t)ownerPID;
+- (nullable MacWSCatalystDrawableFrame *)dequeueFrameForOwnerPID:
+    (int32_t)ownerPID;
+- (void)associateFrame:(MacWSCatalystDrawableFrame *)frame
+          withOwnerPID:(int32_t)ownerPID;
 - (void)removeAllFrames;
 @end
 

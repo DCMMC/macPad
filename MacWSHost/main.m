@@ -66,6 +66,12 @@ static NSString *const MacWSApplicationKeyWindowNotification =
     @"_UIWindowDidBecomeApplicationKeyNotification";
 static NSString *const MacWSKeyboardTargetSceneNotification =
     @"_UISceneDidBecomeTargetOfKeyboardEventDeferringEnvironmentNotification";
+// Runtime-confirmed on iPadOS 16.3.1: UIKitCore's exported
+// _UIApplicationSceneOcclusionChangedNotification constant resolves to this
+// value. Its FBS settings expose the occlusion/background state consumed by
+// UIKit's own _UIWindowSceneOcclusionSettingsDiffAction.
+static NSString *const MacWSSceneOcclusionChangedNotification =
+    @"UIApplicationSceneOcclusionChangedNotification";
 static const CGFloat MacWSNativeMenuBarHeight = 24.0;
 
 @interface UIScene (MacWSSceneIdentity)
@@ -73,7 +79,32 @@ static const CGFloat MacWSNativeMenuBarHeight = 24.0;
 // 0x189322ff0. This is the FBS identifier used as SBDisplayItem's
 // uniqueIdentifier, unlike UISceneSession.persistentIdentifier.
 - (NSString *)_sceneIdentifier;
+- (id)_effectiveSettings;
 @end
+
+@interface NSObject (MacWSSceneOcclusionSettings)
+- (BOOL)isOccluded;
+- (BOOL)isForeground;
+- (BOOL)isBackgrounded;
+@end
+
+static BOOL MacWSReadEffectiveSceneLifecycle(UIScene *scene,
+                                              BOOL *occluded,
+                                              BOOL *foreground,
+                                              BOOL *backgrounded) {
+    if (occluded) *occluded = NO;
+    if (foreground) *foreground = NO;
+    if (backgrounded) *backgrounded = NO;
+    if (![scene respondsToSelector:@selector(_effectiveSettings)]) return NO;
+    id settings = [scene _effectiveSettings];
+    if (![settings respondsToSelector:@selector(isOccluded)] ||
+        ![settings respondsToSelector:@selector(isForeground)] ||
+        ![settings respondsToSelector:@selector(isBackgrounded)]) return NO;
+    if (occluded) *occluded = [settings isOccluded];
+    if (foreground) *foreground = [settings isForeground];
+    if (backgrounded) *backgrounded = [settings isBackgrounded];
+    return YES;
+}
 
 @interface UISceneActivationRequestOptions (MacWSFullscreenRequest)
 - (void)_setRequestFullscreen:(BOOL)fullscreen;
@@ -312,6 +343,7 @@ static NSString *MacWSLocalizedPhase(NSString *phase) {
 - (void)restoreDefaultSceneSizeRestrictions;
 - (BOOL)activateCurrentMacWindow;
 - (void)synchronizeMacWindowFocusWithReason:(NSString *)reason;
+- (void)synchronizeSceneOcclusionWithReason:(NSString *)reason;
 - (void)applyDeferredForegroundSceneSize;
 - (BOOL)activateMacWindow:(MacWSStreamWindow *)window;
 - (BOOL)isFullscreenWorkspace;
@@ -1400,7 +1432,9 @@ typedef void (^MacWSCompactMenuSelection)(MacWSMenuItem *item);
     CGSize _publishedInitialSceneSize;
     uint64_t _initialSceneSizePostconditionSerial;
     uint64_t _nativeFocusRequestSerial;
+    uint64_t _sceneOcclusionEvaluationSerial;
     CFTimeInterval _lastNativeFocusRequestTime;
+    BOOL _sceneStreamSuspendedForOcclusion;
     CGSize _deferredBackgroundSceneLogicalSize;
     CGSize _deferredAppKitSceneLogicalSize;
     uint32_t _deferredAppKitSceneWindowID;
@@ -2031,6 +2065,64 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     [self synchronizeMacWindowFocusWithReason:notification.name];
 }
 
+- (void)nativeSceneOcclusionDidChange:(NSNotification *)notification {
+    UIWindowScene *scene = self.viewIfLoaded.window.windowScene ?:
+        _connectedWindowScene;
+    if (!scene) return;
+    id target = notification.object;
+    // UIKit currently posts the Scene as the object. Keep nil/opaque-object
+    // compatibility by reevaluating this controller rather than dropping a
+    // lifecycle edge we cannot classify.
+    if ([target isKindOfClass:UIScene.class] && target != scene) return;
+    uint64_t serial = ++_sceneOcclusionEvaluationSerial;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (serial != self->_sceneOcclusionEvaluationSerial) return;
+        [self synchronizeSceneOcclusionWithReason:notification.name];
+    });
+}
+
+- (void)synchronizeSceneOcclusionWithReason:(NSString *)reason {
+    if (_sceneDestructionRequested) return;
+    UIWindowScene *scene = self.viewIfLoaded.window.windowScene ?:
+        _connectedWindowScene;
+    if (!scene) return;
+    BOOL occluded = NO, foreground = NO, backgrounded = NO;
+    BOOL hasEffectiveSettings = MacWSReadEffectiveSceneLifecycle(
+        scene, &occluded, &foreground, &backgrounded);
+    UISceneActivationState activation = scene.activationState;
+    BOOL lifecycleBackground =
+        activation == UISceneActivationStateBackground ||
+        activation == UISceneActivationStateUnattached;
+    BOOL shouldSuspend = lifecycleBackground ||
+        (hasEffectiveSettings && (occluded || backgrounded));
+    NSString *action = @"keep-live";
+    if (shouldSuspend) {
+        if (!_sceneStreamSuspendedForOcclusion) {
+            _sceneStreamSuspendedForOcclusion = YES;
+            action = @"suspend-and-release-surfaces";
+            [self suspendSceneStream];
+        } else {
+            action = @"keep-suspended";
+        }
+    } else if (_sceneStreamSuspendedForOcclusion) {
+        _sceneStreamSuspendedForOcclusion = NO;
+        action = @"resume-visible-stream";
+        [self resumeSceneStream];
+    }
+    // Runtime witness for the power policy: activationState alone remained 0
+    // for nine Stage Manager scenes during the 2026-09-29 stress run. The FBS
+    // settings are the upstream visibility state that actually transitions.
+    MacWSLog(@"runtime-confirmed scene-occlusion id=%@ window=%u "
+             "settings=%@ occluded=%@ foreground=%@ backgrounded=%@ "
+             "activation=%ld suspended=%@ action=%@ reason=%@",
+             scene.session.persistentIdentifier ?: @"none", _windowID,
+             hasEffectiveSettings ? @"YES" : @"NO",
+             occluded ? @"YES" : @"NO", foreground ? @"YES" : @"NO",
+             backgrounded ? @"YES" : @"NO", (long)activation,
+             _sceneStreamSuspendedForOcclusion ? @"YES" : @"NO", action,
+             reason ?: @"unknown");
+}
+
 - (void)synchronizeMacWindowFocusWithReason:(NSString *)reason {
     uint64_t serial = ++_nativeFocusRequestSerial;
     // Scene activation and evaluator notifications can share one UIKit
@@ -2404,6 +2496,9 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
             selector:@selector(nativeApplicationFocusDidChange:)
             name:name object:nil];
     }
+    [NSNotificationCenter.defaultCenter addObserver:self
+        selector:@selector(nativeSceneOcclusionDidChange:)
+        name:MacWSSceneOcclusionChangedNotification object:nil];
 
     _metalView = [[MacWSMetalView alloc] initWithFrame:CGRectZero];
     _metalView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -7522,16 +7617,46 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 
 - (void)suspendSceneStream {
     [self dismissSemanticMenu];
+    // viewWillDisappear is not guaranteed for a connected UIKit Scene that
+    // merely enters the background. Stop the per-Scene status poll here so a
+    // resident Host does not keep waking every three seconds while locked.
+    [_statusTimer invalidate];
+    _statusTimer = nil;
     [_metalView suspendStream];
 }
 
 - (void)resumeSceneStream {
     if (_sceneDestructionRequested) return;
+    UIWindowScene *scene = self.viewIfLoaded.window.windowScene ?:
+        _connectedWindowScene;
+    BOOL occluded = NO, foreground = NO, backgrounded = NO;
+    BOOL hasEffectiveSettings = MacWSReadEffectiveSceneLifecycle(
+        scene, &occluded, &foreground, &backgrounded);
+    UISceneActivationState activation = scene.activationState;
+    if (activation == UISceneActivationStateBackground ||
+        activation == UISceneActivationStateUnattached ||
+        (hasEffectiveSettings && (occluded || backgrounded))) {
+        _sceneStreamSuspendedForOcclusion = YES;
+        MacWSLog(@"scene-stream resume-deferred id=%@ window=%u "
+                 "settings=%@ occluded=%@ foreground=%@ backgrounded=%@ "
+                 "activation=%ld",
+                 scene.session.persistentIdentifier ?: @"none", _windowID,
+                 hasEffectiveSettings ? @"YES" : @"NO",
+                 occluded ? @"YES" : @"NO", foreground ? @"YES" : @"NO",
+                 backgrounded ? @"YES" : @"NO", (long)activation);
+        return;
+    }
+    _sceneStreamSuspendedForOcclusion = NO;
     if (!(_bootstrapTerminalPending && _windowID == 0))
         [_metalView configureStreamMode:_streamMode windowID:_windowID];
     [_metalView requestStreamWindowList];
     [_interopClient connect];
     if (_windowID != 0) [self refreshSemanticMenuWithCompletion:nil];
+    [self refreshStatus];
+    if (!_statusTimer) {
+        _statusTimer = [NSTimer scheduledTimerWithTimeInterval:3.0 target:self
+            selector:@selector(refreshStatus) userInfo:nil repeats:YES];
+    }
 }
 
 - (void)requestWindowLifetimeReconciliation {
@@ -8016,6 +8141,9 @@ static void MacWSDeduplicateWindowScenes(void) {
     // viewDidAppear starts the stream and rechecks the geometry postcondition;
     // the first native sizing transaction was already submitted above.
     MacWSRememberSceneBinding(session, [controller streamRestorationActivity]);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [controller synchronizeSceneOcclusionWithReason:@"scene-connected"];
+    });
     MacWSLog(@"scene-connected id=%@ role=%@ mode=%u window=%u",
              session.persistentIdentifier, session.role, streamMode, windowID);
     NSString *FBSSceneIdentifier = [windowScene respondsToSelector:
@@ -8091,13 +8219,12 @@ static void MacWSDeduplicateWindowScenes(void) {
 
 - (void)sceneWillEnterForeground:(UIScene *)scene {
     (void)scene;
-    // A fullscreen macOS workspace is an interactive display session.  Keep
-    // iPadOS from auto-locking while that Scene is in the foreground; once
-    // locked, FrontBoard only prewarms a relaunched Host (ActivePrewarm=1)
-    // and cannot reconnect its UIWindowScene until the user authenticates.
-    // Restore the ordinary system policy as soon as the Scene backgrounds so
-    // this does not turn a dormant Host process into a permanent wake lock.
-    UIApplication.sharedApplication.idleTimerDisabled = YES;
+    // Respect iPadOS Auto-Lock. RE-confirmed in the previous MacWSHost arm64
+    // build at +0x27f4c: sceneWillEnterForeground passed w2=1 to
+    // setIdleTimerDisabled:. UIKit input naturally postpones Auto-Lock while
+    // the workspace is in active use; an actual lock edge is handled by the
+    // workspace sleep coordinator.
+    UIApplication.sharedApplication.idleTimerDisabled = NO;
     [(MacWSViewController *)self.window.rootViewController resumeSceneStream];
 }
 
@@ -8105,7 +8232,7 @@ static void MacWSDeduplicateWindowScenes(void) {
     MacWSLog(@"scene-became-active id=%@ state=%ld",
              scene.session.persistentIdentifier,
              (long)scene.activationState);
-    UIApplication.sharedApplication.idleTimerDisabled = YES;
+    UIApplication.sharedApplication.idleTimerDisabled = NO;
     MacWSViewController *controller =
         (MacWSViewController *)self.window.rootViewController;
     [controller reassertFullscreenScenePresentation];
@@ -8113,6 +8240,7 @@ static void MacWSDeduplicateWindowScenes(void) {
     // Propagate that one-way to the exact AppKit window instead of letting a
     // later passive macOS catalog update reactivate some other iOS Scene.
     [controller synchronizeMacWindowFocusWithReason:@"scene-became-active"];
+    [controller synchronizeSceneOcclusionWithReason:@"scene-became-active"];
     [controller applyDeferredForegroundSceneSize];
     dispatch_async(dispatch_get_main_queue(), ^{
         [controller restoreHardwareKeyboardFocusWithReason:@"scene-active"];
@@ -8120,9 +8248,9 @@ static void MacWSDeduplicateWindowScenes(void) {
 }
 
 - (void)sceneDidEnterBackground:(UIScene *)scene {
-    (void)scene;
     UIApplication.sharedApplication.idleTimerDisabled = NO;
-    [(MacWSViewController *)self.window.rootViewController suspendSceneStream];
+    [(MacWSViewController *)self.window.rootViewController
+        synchronizeSceneOcclusionWithReason:@"scene-entered-background"];
 }
 
 - (void)windowScene:(UIWindowScene *)windowScene

@@ -139,6 +139,7 @@ static inline CFTimeInterval WorkspaceGeometrySamplingDeadline(void) {
 // capture promptly after a game exit or producer failure.
 static const CFTimeInterval MacWSDirectDrawableLeaseSeconds = 3.0;
 static int DirectDrawableActivityDescriptor = -1;
+static int FocusedRenderAuthorityDescriptor = -1;
 static NSString *const FinalCompositeStatePath =
     @"/private/tmp/macws_final_composite.state";
 // The final WindowServer composite is the preferred desktop-material source,
@@ -156,6 +157,7 @@ static NSString *const WorkspaceGraphStatePath =
     @"/private/tmp/macws_workspace_graph.state";
 static uint64_t WorkspaceGraphStateSignature;
 @class MacWSDisplayClient;
+@class MacWSTransientLayer;
 static void ScheduleTransientReconcile(uint64_t delayNanoseconds);
 static void RequestWorkspaceGeometrySample(void);
 static void ScheduleGeometryStreamRestart(void);
@@ -213,6 +215,16 @@ static void RetireDirectDrawablePacingLease(void) {
     }
     (void)unlink(MACWS_DIRECT_DRAWABLE_ACTIVITY_PATH);
 }
+
+static void RetireFocusedRenderAuthority(void) {
+    if (FocusedRenderAuthorityDescriptor >= 0) {
+        close(FocusedRenderAuthorityDescriptor);
+        FocusedRenderAuthorityDescriptor = -1;
+    }
+    (void)unlink(MACWS_RENDER_AUTHORITY_PATH);
+}
+
+static void PublishFocusedRenderAuthority(MacWSTransientLayer *layer);
 
 static void DisplayLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
 static BOOL MacWSDisplayDiagnosticsEnabled(void) {
@@ -441,6 +453,51 @@ static int MacWSCompareFrameInterval(const void *left, const void *right) {
 }
 @end
 
+static void PublishFocusedRenderAuthority(MacWSTransientLayer *layer) {
+    if (!layer || layer.retiring || layer.ownerPID <= 1 ||
+        layer.windowID == 0 || !layer.latestSurface) {
+        RetireFocusedRenderAuthority();
+        return;
+    }
+    size_t width = IOSurfaceGetWidth(layer.latestSurface);
+    size_t height = IOSurfaceGetHeight(layer.latestSurface);
+    uint64_t now = MonotonicNanoseconds();
+    if (!now || width == 0 || height == 0 || width > UINT32_MAX ||
+        height > UINT32_MAX) {
+        RetireFocusedRenderAuthority();
+        return;
+    }
+    if (FocusedRenderAuthorityDescriptor < 0) {
+        FocusedRenderAuthorityDescriptor = open(
+            MACWS_RENDER_AUTHORITY_PATH,
+            O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+    }
+    if (FocusedRenderAuthorityDescriptor < 0) return;
+    MacWSRenderAuthorityRecord record = {
+        .magic = MACWS_RENDER_AUTHORITY_MAGIC,
+        .version = MACWS_RENDER_AUTHORITY_VERSION,
+        .size = sizeof(record),
+        .timestampNS = now,
+        .ownerPID = layer.ownerPID,
+        .layerWindowID = layer.windowID,
+        .width = (uint32_t)width,
+        .height = (uint32_t)height,
+    };
+    if (pwrite(FocusedRenderAuthorityDescriptor, &record,
+               sizeof(record), 0) != sizeof(record) ||
+        ftruncate(FocusedRenderAuthorityDescriptor, sizeof(record)) != 0) {
+        RetireFocusedRenderAuthority();
+    }
+}
+
+static BOOL LayerCanAuthorizeFocusedRender(MacWSTransientLayer *layer) {
+    if (!layer || layer.retiring || layer.ownerPID <= 1 ||
+        layer.skyLightLayer < 0 || !layer.latestSurface) return NO;
+    MacWSStreamWindowFlags required = MacWSStreamWindowFocused |
+        MacWSStreamWindowVisible | MacWSStreamWindowOnScreen;
+    return (layer.windowFlags & required) == required;
+}
+
 static BOOL LayerNeedsIndependentFinalCompositeCapture(
         MacWSTransientLayer *layer) {
     if (!layer || layer.retiring || layer.ownerPID <= 1 ||
@@ -461,8 +518,13 @@ static BOOL LayerNeedsIndependentFinalCompositeCapture(
     // so Host retains its identity/geometry and Catalyst can join a separately
     // completed CAMetalLayer. Once that witness exists, continuing the
     // duplicate full-resolution stream only redraws pixels which the final
-    // composite already owns. A final-composite expiry resumes every exact
-    // stream through ResumeFullscreenLayerCapturesForFallback().
+    // composite already owns. Runtime-confirmed on iPad14,5 with VS Code's
+    // 60k-fish WebGL workload: retaining this exact stream doubled Host input
+    // from 145 to 290 frames in 15.11 s, but both it and FinalComposite stayed
+    // at 9.86 FPS and Host still presented only 147 frames. The common
+    // WindowServer completion pace is upstream of both capture routes.
+    // A final-composite expiry resumes every exact stream through
+    // ResumeFullscreenLayerCapturesForFallback().
     return (layer.windowFlags & MacWSStreamWindowFocused) != 0 &&
         layer.latestSurface == NULL;
 }
@@ -2577,8 +2639,13 @@ static MacWSTransientLayer *ValidatedDirectDrawableLayer(
         if (rejectionReason) *rejectionReason = @"snapshot-layer";
         return nil;
     }
-    if ((layer.windowFlags & MacWSStreamWindowFullscreenCanvas) == 0) {
-        if (rejectionReason) *rejectionReason = @"not-fullscreen-canvas";
+    BOOL fullscreenCanvas = (layer.windowFlags &
+        MacWSStreamWindowFullscreenCanvas) != 0;
+    MacWSStreamWindowFlags ordinaryRequired = MacWSStreamWindowFocused |
+        MacWSStreamWindowVisible | MacWSStreamWindowOnScreen;
+    if (!fullscreenCanvas &&
+        (layer.windowFlags & ordinaryRequired) != ordinaryRequired) {
+        if (rejectionReason) *rejectionReason = @"not-focused-visible";
         return nil;
     }
     BOOL alreadyValidated = client.directDrawableActive &&
@@ -2622,6 +2689,20 @@ static MacWSTransientLayer *ValidatedDirectDrawableLayer(
         !CGRectContainsRect(CGRectInset(canvas, -0.5, -0.5), destination)) {
         if (rejectionReason) *rejectionReason = @"destination";
         return nil;
+    }
+    if (!fullscreenCanvas) {
+        size_t surfaceWidth = IOSurfaceGetWidth(layer.latestSurface);
+        size_t surfaceHeight = IOSurfaceGetHeight(layer.latestSurface);
+        uint64_t widthDifference = width > surfaceWidth
+            ? width - surfaceWidth : surfaceWidth - width;
+        uint64_t heightDifference = height > surfaceHeight
+            ? height - surfaceHeight : surfaceHeight - height;
+        if (surfaceWidth == 0 || surfaceHeight == 0 ||
+            widthDifference * 5u > surfaceWidth ||
+            heightDifference * 5u > surfaceHeight) {
+            if (rejectionReason) *rejectionReason = @"focused-size";
+            return nil;
+        }
     }
     return layer;
 }
@@ -2823,11 +2904,23 @@ static void HandleDirectDrawableActivity(MacWSDisplayClient *client,
 static void SuspendFullscreenLayerCapturesForFinalComposite(void) {
     if (!FinalCompositeIsLive()) return;
     NSUInteger scheduled = 0;
+    MacWSTransientLayer *focusedRenderAuthority = nil;
+    size_t focusedRenderArea = 0;
     for (MacWSDisplayClient *client in [Clients copy]) {
         if (!client.subscriptionActive || client.deliveryPaused ||
             client.mode != MacWSStreamModeFullscreen) continue;
         for (MacWSTransientLayer *layer in
                 [client.transientLayers.allValues copy]) {
+            if (LayerCanAuthorizeFocusedRender(layer)) {
+                size_t width = IOSurfaceGetWidth(layer.latestSurface);
+                size_t height = IOSurfaceGetHeight(layer.latestSurface);
+                size_t area = width && height <= SIZE_MAX / width
+                    ? width * height : 0;
+                if (area > focusedRenderArea) {
+                    focusedRenderAuthority = layer;
+                    focusedRenderArea = area;
+                }
+            }
             if (!layer.stream || layer.retiring ||
                 LayerNeedsIndependentFinalCompositeCapture(layer) ||
                 layer.finalCompositeCaptureSuspensionPending ||
@@ -2868,6 +2961,11 @@ static void SuspendFullscreenLayerCapturesForFinalComposite(void) {
             scheduled++;
         }
     }
+    // This is the catalog/SkyLight authority which lets a matching foreground
+    // process ask WindowServer for an active completion cadence. It does not
+    // itself raise the cadence: without a fresh, window-sized Metal present,
+    // the compositor remains at the 100-ms idle pace.
+    PublishFocusedRenderAuthority(focusedRenderAuthority);
     if (scheduled) {
         DisplayLog(@"layer-capture-suspend-batch count=%lu interval-ms=16 "
                    "reason=final-composite-authoritative",

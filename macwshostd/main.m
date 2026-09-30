@@ -20,6 +20,7 @@
 #include <signal.h>
 #include <spawn.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -34,6 +35,7 @@
 #include <xpc/xpc.h>
 #include <mach/mach_time.h>
 #include <mach/task.h>
+#include <notify.h>
 
 // Use the repository's one canonical protocol directory explicitly. Device
 // source sync is deliberately non-destructive, so an old device-only header
@@ -46,6 +48,7 @@
 #include "../include/macws_steam_semaphore_protocol.h"
 #include "../include/macws_stream_protocol.h"
 #include "../include/macws_settings_bridge_notify.h"
+#include "../include/macws_power_lifecycle.h"
 
 extern char **environ;
 
@@ -95,6 +98,8 @@ static const char *const kCaptureFlag = "/var/mnt/rootfs/tmp/macws_capture_final
 static const char *const kCaptureAck = "/var/mnt/rootfs/tmp/macws_capture_done";
 static const char *const kWindowServerLog = "/var/jb/var/mobile/WindowServer.err";
 static const char *const kSafetyTrip = "/tmp/macws_safety_trip";
+static const char *const kWorkspaceSleepState =
+    "/var/mobile/Library/Logs/MacWSWorkspaceSleep.plist";
 static const char *const kWindowServerLabel =
     "UIKitApplication:com.macwsguide.windowserver";
 static const char *const kInputLabel =
@@ -221,6 +226,7 @@ static void TrackApplicationSession(NSString *identifier,
 static void ApplicationSessionObservedExit(pid_t pid, NSString *identifier,
                                            NSString *witness);
 static void StartApplicationSessionSupervisor(void);
+static void StartWorkspacePowerCoordinator(void);
 
 static dispatch_queue_t gControlQueue;
 static dispatch_queue_t gLogQueue;
@@ -258,6 +264,11 @@ static pid_t gKnownStrayPID;
 static BOOL gSteamProcessDiscoveryPrimed;
 static BOOL gSteamOwnerWasPresent;
 static CFAbsoluteTime gNextSteamProcessDiscovery;
+static _Atomic bool gWorkspaceSleeping;
+static uint64_t gWorkspacePowerGeneration;
+static NSArray<NSDictionary *> *gSuspendedWorkspaceProcesses;
+static int gLockStateToken = -1;
+static int gScreenBlankToken = -1;
 
 typedef struct {
     uint64_t generation;
@@ -1091,6 +1102,8 @@ static void AddStatus(xpc_object_t reply) {
 
     xpc_dictionary_set_uint64(reply, "protocol_version", MACWS_CONTROL_VERSION);
     xpc_dictionary_set_bool(reply, "busy", busy);
+    xpc_dictionary_set_bool(reply, "workspace_sleeping",
+                            atomic_load(&gWorkspaceSleeping));
     xpc_dictionary_set_bool(reply, "startup_retry_available",
                             startupRetryAvailable);
     SetString(reply, "phase", phase);
@@ -2018,6 +2031,320 @@ static NSString *RootExecutablePathForPID(pid_t pid) {
         }
     }
     return path;
+}
+
+static BOOL QueryScreenLocked(BOOL *knownOut) {
+    typedef mach_port_t (*MacWSSpringBoardPort)(void);
+    // SpringBoardServices declares both output slots as Objective-C BOOL.
+    // Keep the dynamically-resolved ABI exact instead of relying on C bool
+    // happening to share its current one-byte representation.
+    typedef void (*MacWSScreenLockStatus)(mach_port_t, BOOL *, BOOL *);
+    static MacWSSpringBoardPort serverPort;
+    static MacWSScreenLockStatus lockStatus;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *springboard = dlopen(
+            "/System/Library/PrivateFrameworks/"
+            "SpringBoardServices.framework/SpringBoardServices",
+            RTLD_NOW | RTLD_LOCAL);
+        if (!springboard) return;
+        serverPort = (MacWSSpringBoardPort)dlsym(
+            springboard, "SBSSpringBoardServerPort");
+        lockStatus = (MacWSScreenLockStatus)dlsym(
+            springboard, "SBGetScreenLockStatus");
+    });
+    if (!serverPort || !lockStatus) {
+        if (knownOut) *knownOut = NO;
+        return NO;
+    }
+    BOOL locked = NO;
+    BOOL passcodeEnabled = NO;
+    mach_port_t port = serverPort();
+    if (port == MACH_PORT_NULL) {
+        if (knownOut) *knownOut = NO;
+        return NO;
+    }
+    lockStatus(port, &locked, &passcodeEnabled);
+    if (knownOut) *knownOut = YES;
+    return locked;
+}
+
+static void SetWorkspaceSleepMarker(BOOL sleeping) {
+    if (!sleeping) {
+        if (unlink(MACWS_WORKSPACE_SLEEP_MARKER_HOST) != 0 && errno != ENOENT)
+            HostLog(@"workspace-power marker-remove errno=%d", errno);
+        return;
+    }
+    int descriptor = open(MACWS_WORKSPACE_SLEEP_MARKER_HOST,
+                          O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC |
+                              O_NOFOLLOW,
+                          0644);
+    if (descriptor < 0) {
+        HostLog(@"workspace-power marker-create errno=%d", errno);
+        return;
+    }
+    const char state[] = "sleeping\n";
+    ssize_t written = write(descriptor, state, sizeof(state) - 1);
+    int writeError = errno;
+    close(descriptor);
+    if (written != (ssize_t)(sizeof(state) - 1)) {
+        HostLog(@"workspace-power marker-write errno=%d", writeError);
+        (void)unlink(MACWS_WORKSPACE_SLEEP_MARKER_HOST);
+    }
+}
+
+static void SignalWorkspaceDisplayWake(void) {
+    int descriptor = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (descriptor < 0) return;
+    struct sockaddr_un address = {0};
+    address.sun_family = AF_UNIX;
+    address.sun_len = sizeof(address);
+    strlcpy(address.sun_path,
+            "/var/mnt/rootfs" MACWS_INTERACTION_WAKE_SOCKET_PATH,
+            sizeof(address.sun_path));
+    const uint8_t token = 1;
+    (void)sendto(descriptor, &token, sizeof(token), MSG_DONTWAIT,
+                 (const struct sockaddr *)&address, sizeof(address));
+    close(descriptor);
+}
+
+static void AddWorkspaceProcessAndDescendants(
+        NSMutableDictionary<NSNumber *, NSDictionary *> *processes,
+        pid_t rootPID, NSString *source) {
+    if (rootPID <= 1 || rootPID == getpid()) return;
+    typedef int (*MacWSProcListChildPIDs)(pid_t, void *, int);
+    static MacWSProcListChildPIDs listChildren;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        listChildren = (MacWSProcListChildPIDs)dlsym(
+            RTLD_DEFAULT, "proc_listchildpids");
+    });
+
+    NSMutableArray<NSNumber *> *pending =
+        [NSMutableArray arrayWithObject:@(rootPID)];
+    for (NSUInteger cursor = 0; cursor < pending.count && cursor < 2048;
+         cursor++) {
+        pid_t pid = (pid_t)pending[cursor].intValue;
+        NSNumber *key = @(pid);
+        if (processes[key] || pid <= 1 || pid == getpid()) continue;
+        NSString *path = RootExecutablePathForPID(pid);
+        if (!path.length) continue;
+        errno = 0;
+        if (kill(pid, 0) != 0 && errno == ESRCH) continue;
+        processes[key] = @{
+            @"pid": key,
+            @"path": path,
+            @"source": source ?: @"workspace",
+        };
+        if (!listChildren) continue;
+        pid_t children[512] = {0};
+        int childCount = listChildren(pid, children, sizeof(children));
+        if (childCount <= 0) continue;
+        childCount = MIN(childCount,
+                         (int)(sizeof(children) / sizeof(children[0])));
+        for (int index = 0; index < childCount; index++) {
+            if (children[index] > 1)
+                [pending addObject:@(children[index])];
+        }
+    }
+}
+
+static NSArray<NSDictionary *> *CollectWorkspaceApplicationProcesses(void) {
+    NSMutableDictionary<NSNumber *, NSDictionary *> *processes =
+        [NSMutableDictionary dictionary];
+
+    // These jobs are the visible Aqua applications, not the chroot's service
+    // plane. WindowServer sleeps at its display-completion boundary; the
+    // service daemons remain available so hostd can always wake the session.
+    static NSSet<NSString *> *applicationLabels;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        applicationLabels = [NSSet setWithArray:@[
+            @"com.macwsguide.finder-desktop",
+            @"com.macwsguide.dock",
+            @"com.macwsguide.systemuiserver",
+            @"com.macwsguide.controlcenter",
+            @"UIKitApplication:com.macwsguide.terminal",
+            @"UIKitApplication:com.macwsguide.osxvnc",
+            @"UIKitApplication:com.macwsguide.vscode",
+            @"UIKitApplication:com.macwsguide.steam",
+            @"UIKitApplication:com.macwsguide.geekbench",
+            @"UIKitApplication:com.macwsguide.chrome150",
+            @"com.macwsguide.systemsettings",
+            @"com.macwsguide.glassdemo",
+        ]];
+    });
+    const char *argv[] = {kLaunchctl, "list", NULL};
+    NSString *snapshot = CaptureCommand(argv, 128 * 1024);
+    for (NSString *line in [snapshot componentsSeparatedByCharactersInSet:
+             NSCharacterSet.newlineCharacterSet]) {
+        NSArray<NSString *> *columns = [line componentsSeparatedByString:@"\t"];
+        if (columns.count < 3) continue;
+        pid_t pid = (pid_t)[columns[0] intValue];
+        NSString *label = columns[2];
+        if (pid <= 1 || ![applicationLabels containsObject:label]) continue;
+        AddWorkspaceProcessAndDescendants(processes, pid, label);
+    }
+
+    for (NSDictionary *session in gApplicationSessions.allValues) {
+        pid_t pid = (pid_t)[session[@"pid"] intValue];
+        NSString *identifier = session[@"identifier"] ?: @"application";
+        AddWorkspaceProcessAndDescendants(processes, pid, identifier);
+    }
+    if (gActiveAppPID > 1)
+        AddWorkspaceProcessAndDescendants(
+            processes, gActiveAppPID, gActiveAppID ?: @"active-application");
+
+    return [processes.allValues sortedArrayUsingComparator:
+        ^NSComparisonResult(NSDictionary *left, NSDictionary *right) {
+            NSInteger leftPID = [left[@"pid"] integerValue];
+            NSInteger rightPID = [right[@"pid"] integerValue];
+            if (leftPID < rightPID) return NSOrderedAscending;
+            if (leftPID > rightPID) return NSOrderedDescending;
+            return NSOrderedSame;
+        }];
+}
+
+static void PersistSuspendedWorkspaceProcesses(
+        NSArray<NSDictionary *> *processes) {
+    if (processes.count == 0) {
+        (void)unlink(kWorkspaceSleepState);
+        return;
+    }
+    if (![processes writeToFile:@(kWorkspaceSleepState) atomically:YES])
+        HostLog(@"workspace-power state-write failed path=%s",
+                kWorkspaceSleepState);
+}
+
+static NSArray<NSDictionary *> *LoadSuspendedWorkspaceProcesses(void) {
+    NSArray *stored = [NSArray arrayWithContentsOfFile:@(kWorkspaceSleepState)];
+    if (![stored isKindOfClass:NSArray.class]) return @[];
+    NSMutableArray<NSDictionary *> *validated = [NSMutableArray array];
+    for (id item in stored) {
+        if (![item isKindOfClass:NSDictionary.class]) continue;
+        NSNumber *pid = item[@"pid"];
+        NSString *path = item[@"path"];
+        if (![pid isKindOfClass:NSNumber.class] ||
+            ![path isKindOfClass:NSString.class] ||
+            pid.intValue <= 1 || !path.length) continue;
+        [validated addObject:item];
+    }
+    return validated;
+}
+
+static void ResumeWorkspaceApplications(void) {
+    NSArray<NSDictionary *> *processes = gSuspendedWorkspaceProcesses;
+    if (processes.count == 0)
+        processes = LoadSuspendedWorkspaceProcesses();
+    NSUInteger resumed = 0;
+    for (NSDictionary *entry in processes.reverseObjectEnumerator) {
+        pid_t pid = (pid_t)[entry[@"pid"] intValue];
+        NSString *expectedPath = entry[@"path"];
+        NSString *currentPath = RootExecutablePathForPID(pid);
+        if (![currentPath isEqualToString:expectedPath]) {
+            HostLog(@"workspace-power resume-skip pid=%d expected=%@ actual=%@",
+                    pid, expectedPath, currentPath ?: @"<absent>");
+            continue;
+        }
+        if (kill(pid, SIGCONT) == 0) resumed++;
+    }
+    gSuspendedWorkspaceProcesses = nil;
+    (void)unlink(kWorkspaceSleepState);
+    HostLog(@"workspace-power applications-resumed count=%lu",
+            (unsigned long)resumed);
+}
+
+static void ApplyWorkspacePowerState(BOOL sleeping, NSString *witness) {
+    BOOL staleSleepState = !sleeping &&
+        (access(MACWS_WORKSPACE_SLEEP_MARKER_HOST, F_OK) == 0 ||
+         access(kWorkspaceSleepState, F_OK) == 0);
+    if (atomic_load(&gWorkspaceSleeping) == sleeping && !staleSleepState)
+        return;
+    gWorkspaceSleeping = sleeping;
+    uint64_t generation = ++gWorkspacePowerGeneration;
+    if (sleeping) {
+        SetWorkspaceSleepMarker(YES);
+        notify_post(MACWS_WORKSPACE_WILL_SLEEP_NOTIFY);
+        HostLog(@"workspace-power transition=sleep generation=%llu witness=%@",
+                (unsigned long long)generation, witness);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
+                       gControlQueue, ^{
+            if (!gWorkspaceSleeping ||
+                generation != gWorkspacePowerGeneration) return;
+            NSArray<NSDictionary *> *processes =
+                CollectWorkspaceApplicationProcesses();
+            NSMutableArray<NSDictionary *> *suspended =
+                [NSMutableArray arrayWithCapacity:processes.count];
+            for (NSDictionary *entry in processes) {
+                pid_t pid = (pid_t)[entry[@"pid"] intValue];
+                NSString *expectedPath = entry[@"path"];
+                NSString *currentPath = RootExecutablePathForPID(pid);
+                // Collection walks a live process tree. Revalidate the exact
+                // executable immediately before the signal so an exited PID
+                // cannot be recycled into an unrelated native process during
+                // the short notification grace interval.
+                if (![currentPath isEqualToString:expectedPath]) {
+                    HostLog(@"workspace-power suspend-skip pid=%d expected=%@ actual=%@",
+                            pid, expectedPath,
+                            currentPath ?: @"<absent>");
+                    continue;
+                }
+                if (kill(pid, SIGSTOP) == 0) [suspended addObject:entry];
+            }
+            gSuspendedWorkspaceProcesses = suspended.copy;
+            PersistSuspendedWorkspaceProcesses(gSuspendedWorkspaceProcesses);
+            HostLog(@"workspace-power applications-suspended count=%lu",
+                    (unsigned long)gSuspendedWorkspaceProcesses.count);
+        });
+        return;
+    }
+
+    SetWorkspaceSleepMarker(NO);
+    SignalWorkspaceDisplayWake();
+    ResumeWorkspaceApplications();
+    notify_post(MACWS_WORKSPACE_DID_WAKE_NOTIFY);
+    HostLog(@"workspace-power transition=wake generation=%llu witness=%@",
+            (unsigned long long)generation, witness);
+}
+
+static void EvaluateWorkspacePowerState(NSString *witness) {
+    BOOL known = NO;
+    BOOL locked = QueryScreenLocked(&known);
+    if (!known) {
+        HostLog(@"workspace-power state=unknown witness=%@", witness);
+        return;
+    }
+    ApplyWorkspacePowerState(locked, witness);
+}
+
+static void StartWorkspacePowerCoordinator(void) {
+    uint32_t lockResult = notify_register_dispatch(
+        "com.apple.springboard.lockstate", &gLockStateToken, gControlQueue,
+        ^(int token) {
+            (void)token;
+            EvaluateWorkspacePowerState(@"springboard-lockstate");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         250 * NSEC_PER_MSEC),
+                           gControlQueue, ^{
+                EvaluateWorkspacePowerState(@"springboard-lockstate-settled");
+            });
+        });
+    uint32_t blankResult = notify_register_dispatch(
+        "com.apple.springboard.hasBlankedScreen", &gScreenBlankToken,
+        gControlQueue, ^(int token) {
+            (void)token;
+            EvaluateWorkspacePowerState(@"springboard-screen-blank");
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         250 * NSEC_PER_MSEC),
+                           gControlQueue, ^{
+                EvaluateWorkspacePowerState(@"springboard-screen-blank-settled");
+            });
+        });
+    HostLog(@"workspace-power coordinator-ready lock-notify=%u blank-notify=%u",
+            lockResult, blankResult);
+    dispatch_async(gControlQueue, ^{
+        EvaluateWorkspacePowerState(@"hostd-startup");
+    });
 }
 
 // Steam is one user-visible application session split across processes:
@@ -6518,6 +6845,7 @@ int main(int argc, const char *argv[]) {
         HostLog(@"macwshostd starting pid=%d protocol=%u uid=%d", getpid(),
                 MACWS_CONTROL_VERSION, getuid());
         StartApplicationSessionSupervisor();
+        StartWorkspacePowerCoordinator();
 
         xpc_connection_t (*createMach)(const char *, dispatch_queue_t, uint64_t) =
             dlsym(RTLD_DEFAULT, "xpc_connection_create_mach_service");

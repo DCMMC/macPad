@@ -28,12 +28,7 @@ static _Atomic uint32_t FailureWitnesses;
 static _Atomic uint32_t LookupWitnesses;
 static NSObject *CompletionLock;
 static dispatch_once_t CompletionLockOnce;
-static id<MTLCommandBuffer> PendingCommand;
-static id<MTLTexture> PendingSourceTexture;
-static IOSurfaceRef PendingSurface;
-static uint32_t PendingPixelFormat;
-static _Atomic bool CompletionWorkerRunning;
-static id<MTLCommandBuffer> ReplayCommand;
+static id<MTLCommandQueue> ReplayMetalCommandQueue;
 static id<MTLTexture> ReplaySourceTexture;
 static uint32_t ReplayPixelFormat;
 static uint64_t ReplaySourceCompletionTime;
@@ -51,7 +46,7 @@ extern int proc_pidpath(int pid, void *buffer, uint32_t buffersize);
 extern int proc_name(int pid, void *buffer, uint32_t buffersize);
 
 static void StartReplayRequestReceiver(void);
-static bool SnapshotAndPublish(id<MTLCommandBuffer> completedCommand,
+static bool SnapshotAndPublish(id<MTLCommandQueue> queue,
                                id<MTLTexture> sourceTexture,
                                uint32_t pixelFormat,
                                uint64_t minimumCompletionTime);
@@ -60,10 +55,12 @@ static bool SnapshotAndPublish(id<MTLCommandBuffer> completedCommand,
 // completion callback proves that one render finished, but it does not stop a
 // later command buffer from modifying that same IOSurface while Host samples
 // it. Preserve presentation effects (blur, shadows, Dock magnification) by
-// copying the completed native composite on its own AGX command queue into a
-// small pool of independent IOSurfaces. displayd marks a surface in-use while
-// it or Host holds a lease, so a pool slot is never overwritten under a
-// consumer.
+// queueing the snapshot copy on the producer's exact AGX queue before the
+// EndUpdate hook returns. This places the copy between the completed render
+// and the next reuse without blocking the render thread. displayd marks a
+// published surface in-use while it or Host holds a lease, and `reserved`
+// covers the earlier submitted-but-not-yet-published interval, so a pool slot
+// is never overwritten under either the GPU or a consumer.
 enum { MacWSFinalCompositeSnapshotSlotCount = 4 };
 typedef struct {
     IOSurfaceRef surface;
@@ -72,10 +69,12 @@ typedef struct {
     size_t width;
     size_t height;
     uint64_t lastPublishedNS;
+    bool reserved;
 } MacWSFinalCompositeSnapshotSlot;
 static MacWSFinalCompositeSnapshotSlot SnapshotSlots[
     MacWSFinalCompositeSnapshotSlotCount];
 static NSUInteger NextSnapshotSlot;
+static pthread_mutex_t SnapshotSlotLock = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint32_t SnapshotFailureWitnesses;
 
 static bool DirectCompositeTransportRequested(void) {
@@ -352,7 +351,8 @@ static void ResetSnapshotSlot(MacWSFinalCompositeSnapshotSlot *slot) {
 }
 
 static MacWSFinalCompositeSnapshotSlot *AcquireSnapshotSlot(
-        id<MTLDevice> device, size_t width, size_t height) {
+        id<MTLDevice> device, size_t width, size_t height,
+        id<MTLTexture> excludedTexture) {
     if (!device || width == 0 || height == 0 || width > UINT32_MAX ||
         height > UINT32_MAX || width > SIZE_MAX / 4) return NULL;
     size_t tightBytesPerRow = width * 4;
@@ -361,29 +361,36 @@ static MacWSFinalCompositeSnapshotSlot *AcquireSnapshotSlot(
         return NULL;
 
     uint64_t nowNS = MonotonicNanoseconds();
+    pthread_mutex_lock(&SnapshotSlotLock);
     for (NSUInteger attempt = 0;
          attempt < MacWSFinalCompositeSnapshotSlotCount; attempt++) {
         NSUInteger index = (NextSnapshotSlot + attempt) %
             MacWSFinalCompositeSnapshotSlotCount;
         MacWSFinalCompositeSnapshotSlot *slot = &SnapshotSlots[index];
+        // Replay reads from a texture in this same pool. Never choose that
+        // texture as the blit destination: a source/destination alias is not
+        // a valid snapshot and would destroy the recovery witness.
+        if (slot->texture && slot->texture == excludedTexture) continue;
         BOOL compatible = slot->surface && slot->texture &&
             slot->device == device && slot->width == width &&
             slot->height == height;
         if (slot->surface && !compatible) {
-            if (IOSurfaceIsInUse(slot->surface)) continue;
+            if (slot->reserved || IOSurfaceIsInUse(slot->surface)) continue;
             ResetSnapshotSlot(slot);
         }
         if (slot->surface) {
             // Four 120-Hz frames already provide ~33 ms for displayd to take
             // its cross-process use-count. Keep the explicit minimum as a
             // handoff guard if frames were coalesced unusually quickly.
-            if (IOSurfaceIsInUse(slot->surface) ||
+            if (slot->reserved || IOSurfaceIsInUse(slot->surface) ||
                 (nowNS && slot->lastPublishedNS &&
                  nowNS - slot->lastPublishedNS < 30 * NSEC_PER_MSEC)) {
                 continue;
             }
+            slot->reserved = true;
             NextSnapshotSlot = (index + 1) %
                 MacWSFinalCompositeSnapshotSlotCount;
+            pthread_mutex_unlock(&SnapshotSlotLock);
             return slot;
         }
 
@@ -399,6 +406,7 @@ static MacWSFinalCompositeSnapshotSlot *AcquireSnapshotSlot(
         IOSurfaceRef surface = IOSurfaceCreate(
             (__bridge CFDictionaryRef)properties);
         if (!surface) {
+            pthread_mutex_unlock(&SnapshotSlotLock);
             SnapshotLogFailure("iosurface-create", device);
             return NULL;
         }
@@ -412,6 +420,7 @@ static MacWSFinalCompositeSnapshotSlot *AcquireSnapshotSlot(
             newTextureWithDescriptor:descriptor iosurface:surface plane:0];
         if (!texture) {
             CFRelease(surface);
+            pthread_mutex_unlock(&SnapshotSlotLock);
             SnapshotLogFailure("texture-create", device);
             return NULL;
         }
@@ -420,22 +429,33 @@ static MacWSFinalCompositeSnapshotSlot *AcquireSnapshotSlot(
         slot->device = RetainObject(device);
         slot->width = width;
         slot->height = height;
+        slot->reserved = true;
         ReleaseObject(texture);
         NextSnapshotSlot = (index + 1) %
             MacWSFinalCompositeSnapshotSlotCount;
+        pthread_mutex_unlock(&SnapshotSlotLock);
         return slot;
     }
+    pthread_mutex_unlock(&SnapshotSlotLock);
     return NULL;
 }
 
-static bool SnapshotAndPublish(id<MTLCommandBuffer> completedCommand,
+static void ReleaseSnapshotSlot(MacWSFinalCompositeSnapshotSlot *slot,
+                                bool published) {
+    if (!slot) return;
+    pthread_mutex_lock(&SnapshotSlotLock);
+    if (published) slot->lastPublishedNS = MonotonicNanoseconds();
+    slot->reserved = false;
+    pthread_mutex_unlock(&SnapshotSlotLock);
+}
+
+static bool SnapshotAndPublish(id<MTLCommandQueue> queue,
                                id<MTLTexture> sourceTexture,
                                uint32_t pixelFormat,
                                uint64_t minimumCompletionTime) {
-    if (!completedCommand || !sourceTexture ||
+    if (!queue || !sourceTexture ||
         pixelFormat != MACWS_FINAL_COMPOSITE_METAL_BGRA8_UNORM)
         return false;
-    id<MTLCommandQueue> queue = completedCommand.commandQueue;
     id<MTLDevice> device = sourceTexture.device;
     size_t width = sourceTexture.width;
     size_t height = sourceTexture.height;
@@ -444,13 +464,14 @@ static bool SnapshotAndPublish(id<MTLCommandBuffer> completedCommand,
         return false;
     }
     MacWSFinalCompositeSnapshotSlot *slot = AcquireSnapshotSlot(
-        device, width, height);
+        device, width, height, sourceTexture);
     if (!slot) return false;
 
     id<MTLCommandBuffer> copyCommand = [queue commandBuffer];
     id<MTLBlitCommandEncoder> blit = [copyCommand blitCommandEncoder];
     if (!copyCommand || !blit) {
         SnapshotLogFailure("command", queue);
+        ReleaseSnapshotSlot(slot, false);
         return false;
     }
     [blit copyFromTexture:sourceTexture
@@ -463,32 +484,35 @@ static bool SnapshotAndPublish(id<MTLCommandBuffer> completedCommand,
     [blit endEncoding];
     [copyCommand commit];
 
+    // Replay is a rare recovery operation on its own serial queue. Let Metal
+    // block that worker until the real GPU terminal state instead of waking a
+    // thread every 500 us. The ordinary frame path remains callback-driven.
+    [copyCommand waitUntilCompleted];
     MTLCommandBufferStatus status = copyCommand.status;
-    unsigned polls = 0;
-    while (status != MTLCommandBufferStatusCompleted &&
-           status != MTLCommandBufferStatusError && polls < 2000) {
-        usleep(500);
-        status = copyCommand.status;
-        polls++;
-    }
     if (status != MTLCommandBufferStatusCompleted || copyCommand.error) {
         SnapshotLogFailure("copy-completion", copyCommand);
+        // An error is terminal and releases the destination normally. If a
+        // broken driver returned from waitUntilCompleted without a terminal
+        // state, keep the slot reserved rather than race a still-running GPU.
+        if (status == MTLCommandBufferStatusError)
+            ReleaseSnapshotSlot(slot, false);
         return false;
     }
-    // This copy is submitted on the retained source command's queue. Metal's
+    // This copy is submitted on the retained source queue. Metal's
     // queue ordering makes its completion the causal freshness witness: it is
     // after every desktop update already submitted when the replay request
-    // arrived. The remembered source command may legitimately be old on a
-    // static desktop, but the newly completed copy is not.
+    // arrived. The remembered snapshot may legitimately be old on a static
+    // desktop, but the newly completed copy is not.
     uint64_t snapshotCompletionTime = mach_absolute_time();
     if (minimumCompletionTime != 0 &&
         snapshotCompletionTime < minimumCompletionTime) {
         SnapshotLogFailure("copy-freshness", copyCommand);
+        ReleaseSnapshotSlot(slot, false);
         return false;
     }
     bool published = MacWSFinalCompositePublisherPublishSurface(
         slot->surface, pixelFormat);
-    if (published) slot->lastPublishedNS = MonotonicNanoseconds();
+    ReleaseSnapshotSlot(slot, published);
     return published;
 }
 
@@ -519,33 +543,33 @@ static uint32_t NextReplayFailureWitness(void) {
         &ReplayFailureWitnesses, 1, memory_order_relaxed) + 1;
 }
 
-static void RememberReplaySource(id<MTLCommandBuffer> command,
+static void RememberReplaySource(id<MTLCommandQueue> queue,
                                  id<MTLTexture> sourceTexture,
                                  uint32_t pixelFormat) {
-    if (!command || !sourceTexture || pixelFormat !=
+    if (!queue || !sourceTexture || pixelFormat !=
             MACWS_FINAL_COMPOSITE_METAL_BGRA8_UNORM) return;
-    id retainedCommand = RetainObject(command);
+    id retainedQueue = RetainObject(queue);
     id retainedSource = RetainObject(sourceTexture);
     @synchronized (PublisherStateLock()) {
-        id oldCommand = ReplayCommand;
+        id oldQueue = ReplayMetalCommandQueue;
         id oldSource = ReplaySourceTexture;
-        ReplayCommand = retainedCommand;
+        ReplayMetalCommandQueue = retainedQueue;
         ReplaySourceTexture = retainedSource;
         ReplayPixelFormat = pixelFormat;
         ReplaySourceCompletionTime = mach_absolute_time();
-        ReleaseObject(oldCommand);
+        ReleaseObject(oldQueue);
         ReleaseObject(oldSource);
     }
 }
 
 static void PublishReplaySnapshot(pid_t requesterPID,
                                   uint64_t minimumCompletionTime) {
-    id<MTLCommandBuffer> command = nil;
+    id<MTLCommandQueue> queue = nil;
     id<MTLTexture> sourceTexture = nil;
     uint32_t pixelFormat = 0;
     uint64_t sourceCompletionTime = 0;
     @synchronized (PublisherStateLock()) {
-        command = RetainObject(ReplayCommand);
+        queue = RetainObject(ReplayMetalCommandQueue);
         sourceTexture = RetainObject(ReplaySourceTexture);
         pixelFormat = ReplayPixelFormat;
         sourceCompletionTime = ReplaySourceCompletionTime;
@@ -554,9 +578,8 @@ static void PublishReplaySnapshot(pid_t requesterPID,
         ? MachDurationNanoseconds(
             minimumCompletionTime - sourceCompletionTime) : 0;
     BOOL sourceFresh = sourceCompletionTime >= minimumCompletionTime;
-    BOOL sourceReady = command && sourceTexture &&
-        command.status == MTLCommandBufferStatusCompleted &&
-        command.error == nil && MacWSFinalCompositePublisherCanPublish();
+    BOOL sourceReady = queue && sourceTexture &&
+        MacWSFinalCompositePublisherCanPublish();
     // The copy command proves that the retained texture can still be read; it
     // does not prove that SkyLight rendered the topology change which caused
     // this replay request.  Re-copying an older texture advances the transport
@@ -566,7 +589,7 @@ static void PublishReplaySnapshot(pid_t requesterPID,
     // typed fallback state, allowing Repair Desktop to rebuild the session
     // instead of falsely reporting success from a replayed old frame.
     BOOL published = sourceReady && sourceFresh && SnapshotAndPublish(
-        command, sourceTexture, pixelFormat, minimumCompletionTime);
+        queue, sourceTexture, pixelFormat, minimumCompletionTime);
     uint32_t witness = published ? 0 : NextReplayFailureWitness();
     if (published || witness <= 12) {
         dprintf(STDERR_FILENO,
@@ -584,7 +607,7 @@ static void PublishReplaySnapshot(pid_t requesterPID,
             published ? "YES" : "NO",
             (unsigned long long)MacWSFinalCompositePublisherPublishedSequence());
     }
-    ReleaseObject(command);
+    ReleaseObject(queue);
     ReleaseObject(sourceTexture);
 }
 
@@ -765,75 +788,105 @@ void MacWSFinalCompositePublisherEnqueueCompletion(
     if (!commandBuffer || !sourceTexture || !surface || metalPixelFormat !=
             MACWS_FINAL_COMPOSITE_METAL_BGRA8_UNORM) return;
     (void)PublisherStateLock();
+    if (!MacWSFinalCompositePublisherCanPublish()) return;
 
-    id<MTLCommandBuffer> retainedCommand = RetainObject(commandBuffer);
-    id<MTLTexture> retainedSource = RetainObject(sourceTexture);
-    IOSurfaceRef retainedSurface = (IOSurfaceRef)CFRetain(surface);
-    @synchronized (CompletionLock) {
-        id<MTLCommandBuffer> oldCommand = PendingCommand;
-        id<MTLTexture> oldSource = PendingSourceTexture;
-        IOSurfaceRef oldSurface = PendingSurface;
-        PendingCommand = retainedCommand;
-        PendingSourceTexture = retainedSource;
-        PendingSurface = retainedSurface;
-        PendingPixelFormat = metalPixelFormat;
-        ReleaseObject(oldCommand);
-        ReleaseObject(oldSource);
-        if (oldSurface) CFRelease(oldSurface);
+    id<MTLCommandQueue> queue = commandBuffer.commandQueue;
+    id<MTLDevice> device = sourceTexture.device;
+    size_t width = sourceTexture.width;
+    size_t height = sourceTexture.height;
+    if (!queue || !device || width == 0 || height == 0) {
+        SnapshotLogFailure("enqueue-source", sourceTexture);
+        return;
     }
-    if (atomic_exchange_explicit(&CompletionWorkerRunning, true,
-                                 memory_order_acq_rel)) return;
 
-    dispatch_async(CompletionQueue(), ^{
-        for (;;) {
+    // The direct path is a diagnostic which deliberately exposes the reused
+    // producer IOSurface. Keep it off the production snapshot-slot protocol.
+    if (DirectCompositeTransportRequested()) {
+        id<MTLCommandBuffer> retainedCommand = RetainObject(commandBuffer);
+        id<MTLTexture> retainedSource = RetainObject(sourceTexture);
+        IOSurfaceRef retainedSurface = (IOSurfaceRef)CFRetain(surface);
+        dispatch_async(CompletionQueue(), ^{
             @autoreleasepool {
-                id<MTLCommandBuffer> command = nil;
-                id<MTLTexture> sourceTexture = nil;
-                IOSurfaceRef completedSurface = NULL;
-                uint32_t pixelFormat = 0;
-                @synchronized (CompletionLock) {
-                    if (!PendingCommand || !PendingSourceTexture ||
-                        !PendingSurface) {
-                        atomic_store_explicit(&CompletionWorkerRunning, false,
-                                              memory_order_release);
-                        return;
-                    }
-                    command = PendingCommand;
-                    sourceTexture = PendingSourceTexture;
-                    completedSurface = PendingSurface;
-                    pixelFormat = PendingPixelFormat;
-                    PendingCommand = nil;
-                    PendingSourceTexture = nil;
-                    PendingSurface = NULL;
-                    PendingPixelFormat = 0;
-                }
-                MTLCommandBufferStatus status = command.status;
+                MTLCommandBufferStatus status = retainedCommand.status;
                 unsigned polls = 0;
                 while (status != MTLCommandBufferStatusCompleted &&
                        status != MTLCommandBufferStatusError && polls < 2000) {
                     usleep(1000);
-                    status = command.status;
+                    status = retainedCommand.status;
                     polls++;
                 }
                 if (status == MTLCommandBufferStatusCompleted &&
-                    command.error == nil) {
-                    RememberReplaySource(command, sourceTexture, pixelFormat);
+                    retainedCommand.error == nil) {
+                    RememberReplaySource(retainedCommand.commandQueue,
+                                         retainedSource,
+                                         metalPixelFormat);
+                    (void)MacWSFinalCompositePublisherPublishSurface(
+                        retainedSurface, metalPixelFormat);
                 }
-                if (status == MTLCommandBufferStatusCompleted &&
-                    command.error == nil &&
-                    MacWSFinalCompositePublisherCanPublish()) {
-                    if (DirectCompositeTransportRequested()) {
-                        (void)MacWSFinalCompositePublisherPublishSurface(
-                            completedSurface, pixelFormat);
-                    } else {
-                        (void)SnapshotAndPublish(command, sourceTexture,
-                                                 pixelFormat, 0);
-                    }
-                }
-                ReleaseObject(command);
-                ReleaseObject(sourceTexture);
-                CFRelease(completedSurface);
+                ReleaseObject(retainedCommand);
+                ReleaseObject(retainedSource);
+                CFRelease(retainedSurface);
             }
-        }
-    });
+        });
+        return;
+    }
+
+    MacWSFinalCompositeSnapshotSlot *slot = AcquireSnapshotSlot(
+        device, width, height, sourceTexture);
+    if (!slot) return;
+    id<MTLCommandBuffer> copyCommand = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [copyCommand blitCommandEncoder];
+    if (!copyCommand || !blit) {
+        SnapshotLogFailure("enqueue-command", queue);
+        ReleaseSnapshotSlot(slot, false);
+        return;
+    }
+    [blit copyFromTexture:sourceTexture
+              sourceSlice:0 sourceLevel:0
+             sourceOrigin:MTLOriginMake(0, 0, 0)
+               sourceSize:MTLSizeMake(width, height, 1)
+                toTexture:slot->texture
+         destinationSlice:0 destinationLevel:0
+        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [blit endEncoding];
+
+    // EndUpdate has already committed `commandBuffer`, and this function is
+    // still executing on the producer thread. Commit the blit now so queue
+    // ordering places it before WindowServer can submit the next reuse of the
+    // display target. Only completion observation and Mach publication run on
+    // the background serial queue.
+    IOSurfaceRef retainedSurface = (IOSurfaceRef)CFRetain(slot->surface);
+    [copyCommand addCompletedHandler:^(id<MTLCommandBuffer> completedCopy) {
+        // The driver completion callback is the terminal-state witness. Move
+        // service lookup and Mach publication onto the existing serial queue
+        // so the AGX callback thread does not perform transport work, while
+        // avoiding the former 500-us status polling wakeups on every frame.
+        id<MTLCommandBuffer> retainedCopy = RetainObject(completedCopy);
+        dispatch_async(CompletionQueue(), ^{
+            @autoreleasepool {
+                MTLCommandBufferStatus status = retainedCopy.status;
+                bool clean = status == MTLCommandBufferStatusCompleted &&
+                    retainedCopy.error == nil;
+                bool published = false;
+                if (clean) {
+                    // The completed independent snapshot, not WindowServer's
+                    // producer command graph, is the recovery source. This
+                    // releases the producer texture and all command-buffer
+                    // dependencies after Metal's own completion lifetime.
+                    RememberReplaySource(retainedCopy.commandQueue,
+                                         slot->texture,
+                                         metalPixelFormat);
+                    published = MacWSFinalCompositePublisherPublishSurface(
+                        retainedSurface, metalPixelFormat);
+                } else {
+                    SnapshotLogFailure("ordered-copy-completion",
+                                       retainedCopy);
+                }
+                ReleaseSnapshotSlot(slot, published);
+                ReleaseObject(retainedCopy);
+                CFRelease(retainedSurface);
+            }
+        });
+    }];
+    [copyCommand commit];
 }

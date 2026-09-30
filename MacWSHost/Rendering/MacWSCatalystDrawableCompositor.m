@@ -1,6 +1,7 @@
 #import "MacWSCatalystDrawableCompositor.h"
 
 #import "MacWSHostDiagnostics.h"
+#import "MacWSCatalystDrawableReceiver.h"
 
 #import <IOSurface/IOSurfaceRef.h>
 #import <simd/simd.h>
@@ -50,6 +51,12 @@
 @implementation MacWSCatalystDrawableCompositor {
     id<MTLDevice> _device;
     NSMutableDictionary<NSNumber *, MacWSCatalystDrawableFrame *> *_frames;
+    NSMutableDictionary<NSNumber *, NSMutableArray<MacWSCatalystDrawableFrame *> *>
+        *_pendingFrames;
+    NSMutableDictionary<NSNumber *, id<MTLTexture>> *_texturesBySurfaceID;
+    NSMutableArray<NSNumber *> *_textureLRU;
+    uint64_t _textureCacheHits;
+    uint64_t _textureCacheMisses;
     BOOL _reportedGeometryRejection;
     BOOL _reportedTextureRejection;
 }
@@ -59,31 +66,39 @@
     if (!self) return nil;
     _device = device;
     _frames = [NSMutableDictionary dictionary];
+    _pendingFrames = [NSMutableDictionary dictionary];
+    _texturesBySurfaceID = [NSMutableDictionary dictionary];
+    _textureLRU = [NSMutableArray array];
     return self;
 }
 
 - (MacWSCatalystDrawableFrame *)consumeDeliveryObject:(id)object
     shouldAcceptOwner:(BOOL (^)(int32_t))shouldAcceptOwner {
-    NSDictionary *delivery = [object isKindOfClass:NSDictionary.class]
-        ? (NSDictionary *)object : nil;
+    MacWSCatalystDrawableDelivery *delivery =
+        [object isKindOfClass:MacWSCatalystDrawableDelivery.class]
+            ? (MacWSCatalystDrawableDelivery *)object : nil;
     // One producer message transfers exactly one IOSurface use count. The
     // process-global notification can have several Scene observers, so the
     // first eligible consumer owns the delivery and every later observer must
     // reject it. NotificationCenter invokes these observers synchronously on
-    // the receiver's main queue, making the mutable envelope the serialization
+    // the receiver's main queue, making the delivery envelope the serialization
     // boundary rather than an advisory success flag.
-    if ([delivery[@"accepted"] boolValue]) return nil;
-    NSData *payload = [delivery[@"record"] isKindOfClass:NSData.class]
-        ? delivery[@"record"] : nil;
-    IOSurfaceRef surface = delivery[@"surface"]
-        ? (__bridge IOSurfaceRef)delivery[@"surface"] : NULL;
-    if (payload.length != sizeof(MacWSCatalystDrawableRecord) || !_device ||
-        !surface) return nil;
+    if (!delivery || delivery.isAccepted) return nil;
+    IOSurfaceRef surface = delivery.surface;
+    if (!_device || !surface) return nil;
 
-    MacWSCatalystDrawableRecord record = {0};
-    memcpy(&record, payload.bytes, sizeof(record));
-    if (!MacWSCatalystDrawableRecordIsValid(&record, sizeof(record)) ||
-        (shouldAcceptOwner && !shouldAcceptOwner(record.ownerPID))) return nil;
+    MacWSCatalystDrawableRecord record = delivery.record;
+    if (!MacWSCatalystDrawableRecordIsValid(&record, sizeof(record))) return nil;
+    if (shouldAcceptOwner && !shouldAcceptOwner(record.ownerPID)) {
+        static BOOL reportedOwnerRejection = NO;
+        if (!reportedOwnerRejection) {
+            reportedOwnerRejection = YES;
+            MacWSLog(@"catalyst-drawable reject-owner pid=%d sequence=%llu",
+                     record.ownerPID,
+                     (unsigned long long)record.sequence);
+        }
+        return nil;
+    }
 
     NSNumber *ownerKey = @(record.ownerPID);
     MacWSCatalystDrawableFrame *previous = _frames[ownerKey];
@@ -116,15 +131,46 @@
         return nil;
     }
 
-    MTLTextureDescriptor *descriptor =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:
-            MTLPixelFormatBGRA8Unorm width:record.width height:record.height
-            mipmapped:NO];
-    descriptor.storageMode = MTLStorageModeShared;
-    descriptor.usage = MTLTextureUsageShaderRead;
-    id<MTLTexture> texture = [_device newTextureWithDescriptor:descriptor
-                                                     iosurface:surface
-                                                         plane:0];
+    // CAMetalLayer rotates a small IOSurface pool. Importing a fresh Metal
+    // texture view for every present needlessly repeats kernel/object setup on
+    // UIKit's main thread and can make the panel-clock callback miss vblanks.
+    // Cache by the IOSurface global ID, but validate immutable geometry before
+    // reuse. Keeping at most three views mirrors the producer drawable pool and
+    // prevents the cache from becoming a second unbounded surface owner.
+    NSNumber *surfaceKey = @(record.surfaceID);
+    id<MTLTexture> texture = _texturesBySurfaceID[surfaceKey];
+    BOOL reusableTexture = texture &&
+        texture.width == record.width && texture.height == record.height &&
+        texture.pixelFormat == MTLPixelFormatBGRA8Unorm;
+    if (reusableTexture) {
+        _textureCacheHits++;
+        [_textureLRU removeObject:surfaceKey];
+        [_textureLRU addObject:surfaceKey];
+    } else {
+        if (texture) {
+            [_texturesBySurfaceID removeObjectForKey:surfaceKey];
+            [_textureLRU removeObject:surfaceKey];
+        }
+        MTLTextureDescriptor *descriptor =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:
+                MTLPixelFormatBGRA8Unorm width:record.width height:record.height
+                mipmapped:NO];
+        descriptor.storageMode = MTLStorageModeShared;
+        descriptor.usage = MTLTextureUsageShaderRead;
+        texture = [_device newTextureWithDescriptor:descriptor
+                                          iosurface:surface
+                                              plane:0];
+        if (texture) {
+            _textureCacheMisses++;
+            _texturesBySurfaceID[surfaceKey] = texture;
+            [_textureLRU addObject:surfaceKey];
+            while (_textureLRU.count > 3) {
+                NSNumber *retiredKey = _textureLRU.firstObject;
+                [_textureLRU removeObjectAtIndex:0];
+                [_texturesBySurfaceID removeObjectForKey:retiredKey];
+            }
+        }
+    }
     if (!texture) {
         if (!_reportedTextureRejection) {
             _reportedTextureRejection = YES;
@@ -142,17 +188,36 @@
                                                    surface:surface
                                                    texture:texture];
     _frames[ownerKey] = frame;
-    // Notification delivery is synchronous.  Mark the mutable envelope only
+    NSMutableArray<MacWSCatalystDrawableFrame *> *pending =
+        _pendingFrames[ownerKey];
+    if (!pending) {
+        pending = [NSMutableArray arrayWithCapacity:2];
+        _pendingFrames[ownerKey] = pending;
+    }
+    [pending addObject:frame];
+    while (pending.count > 2)
+        [pending removeObjectAtIndex:0];
+    // Notification delivery is synchronous. Mark the delivery envelope only
     // after the IOSurface-backed texture and frame lease both exist; the
     // receiver returns the producer-transferred use count on every rejected
     // path.
-    if ([delivery isKindOfClass:NSMutableDictionary.class])
-        ((NSMutableDictionary *)delivery)[@"accepted"] = @YES;
+    delivery.accepted = YES;
     if (!previous) {
-        MacWSLog(@"runtime-confirmed catalyst-drawable imported pid=%d "
-                 "surface=%u size=%ux%u bpr=%u metal-pf=%u",
-                 record.ownerPID, record.surfaceID, record.width,
+        MacWSLog(@"runtime-confirmed catalyst-drawable imported owner=%d "
+                 "producer=%d surface=%u size=%ux%u bpr=%u metal-pf=%u",
+                 record.ownerPID, record.producerPID, record.surfaceID, record.width,
                  record.height, record.bytesPerRow, record.metalPixelFormat);
+    }
+    uint64_t imports = _textureCacheHits + _textureCacheMisses;
+    // One steady-state witness is enough. Repeated diagnostic file writes in
+    // the normal 120-Hz path would themselves distort the power measurement.
+    if (imports == 240) {
+        MacWSLog(@"runtime-confirmed catalyst-texture-cache hits=%llu "
+                 "misses=%llu resident=%lu pending=%lu",
+                 (unsigned long long)_textureCacheHits,
+                 (unsigned long long)_textureCacheMisses,
+                 (unsigned long)_texturesBySurfaceID.count,
+                 (unsigned long)pending.count);
     }
     return frame;
 }
@@ -161,8 +226,31 @@
     return ownerPID > 1 ? _frames[@(ownerPID)] : nil;
 }
 
+- (MacWSCatalystDrawableFrame *)dequeueFrameForOwnerPID:(int32_t)ownerPID {
+    if (ownerPID <= 1) return nil;
+    NSNumber *ownerKey = @(ownerPID);
+    NSMutableArray<MacWSCatalystDrawableFrame *> *pending =
+        _pendingFrames[ownerKey];
+    MacWSCatalystDrawableFrame *frame = pending.firstObject;
+    if (!frame) return nil;
+    [pending removeObjectAtIndex:0];
+    if (pending.count == 0) [_pendingFrames removeObjectForKey:ownerKey];
+    return frame;
+}
+
+- (void)associateFrame:(MacWSCatalystDrawableFrame *)frame
+          withOwnerPID:(int32_t)ownerPID {
+    if (!frame || ownerPID <= 1) return;
+    MacWSCatalystDrawableFrame *current = _frames[@(ownerPID)];
+    if (!current || current.record.sequence <= frame.record.sequence)
+        _frames[@(ownerPID)] = frame;
+}
+
 - (void)removeAllFrames {
+    [_pendingFrames removeAllObjects];
     [_frames removeAllObjects];
+    [_textureLRU removeAllObjects];
+    [_texturesBySurfaceID removeAllObjects];
 }
 
 @end

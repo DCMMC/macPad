@@ -13,7 +13,6 @@ static const NSUInteger MacWSPerfRingCapacity = 512;
 static const NSUInteger MacWSPerfInputKindCapacity = 32;
 static const double MacWSPerfActiveGapMilliseconds = 150.0;
 static const double MacWSPerfInputActiveWindowMilliseconds = 250.0;
-static const double MacWSPerfTargetFrameMilliseconds = 1000.0 / 60.0;
 static const int MacWSQuartzCorePerformanceHUDFlag = 0x10000000;
 
 typedef struct {
@@ -36,6 +35,7 @@ typedef struct {
 } MacWSPerfSource;
 
 static const NSUInteger MacWSPerfDirectSourceCapacity = 16;
+enum { MacWSPerfDirectReceiptCapacity = 8 };
 typedef struct {
     int32_t ownerPID;
     bool target;
@@ -51,8 +51,14 @@ typedef struct {
     uint64_t uniqueFramesPresented;
     double firstPresentedSeconds;
     double lastPresentedSeconds;
+    uint64_t pendingReceiptSequences[MacWSPerfDirectReceiptCapacity];
+    uint64_t pendingReceiptTimes[MacWSPerfDirectReceiptCapacity];
     MacWSPerfRing producerIntervals;
     MacWSPerfRing completionToReceipt;
+    MacWSPerfRing receiptToSubmission;
+    MacWSPerfRing completionToSubmission;
+    MacWSPerfRing submissionToVisible;
+    MacWSPerfRing completionToVisible;
     MacWSPerfRing visibleIntervals;
 } MacWSPerfDirectSource;
 
@@ -150,6 +156,8 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     NSString *_resetReason;
     atomic_bool _instrumentationActive;
     BOOL _explicitRecording;
+    double _targetFramesPerSecond;
+    double _targetFrameMilliseconds;
 
     uint64_t _framesReceived;
     uint64_t _contentFramesReceived;
@@ -159,6 +167,8 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     uint64_t _framesPresented;
     uint64_t _directDrawableFramesReceived;
     uint64_t _directDrawableFramesPresented;
+    uint64_t _directDrawableSchedulerTicks;
+    uint64_t _directDrawableSchedulerEmptyTicks;
     uint64_t _commandErrors;
     uint64_t _inputsAttempted;
     uint64_t _inputsSent;
@@ -213,6 +223,10 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     if (!self) return nil;
     _sceneLabel = [sceneLabel copy] ?: @"unknown";
     _lock = OS_UNFAIR_LOCK_INIT;
+    NSInteger maximumFramesPerSecond = UIScreen.mainScreen.maximumFramesPerSecond;
+    _targetFramesPerSecond = maximumFramesPerSecond > 0
+        ? (double)maximumFramesPerSecond : 60.0;
+    _targetFrameMilliseconds = 1000.0 / _targetFramesPerSecond;
     atomic_init(&_instrumentationActive, false);
     [self resetWithReason:@"monitor-created"];
 
@@ -331,6 +345,8 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     _framesPresented = 0;
     _directDrawableFramesReceived = 0;
     _directDrawableFramesPresented = 0;
+    _directDrawableSchedulerTicks = 0;
+    _directDrawableSchedulerEmptyTicks = 0;
     _commandErrors = 0;
     _inputsAttempted = 0;
     _inputsSent = 0;
@@ -551,6 +567,9 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     source->lastSequence = sequence;
     source->lastCompletionTime = completionTime;
     source->lastReceiptTime = receiptTime;
+    NSUInteger receiptSlot = sequence % MacWSPerfDirectReceiptCapacity;
+    source->pendingReceiptSequences[receiptSlot] = sequence;
+    source->pendingReceiptTimes[receiptSlot] = receiptTime;
     source->uniqueFramesReceived++;
     _directDrawableFramesReceived++;
     os_unfair_lock_unlock(&_lock);
@@ -566,6 +585,7 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     __block uint64_t measurementGeneration = 0;
     __block uint64_t inputMachTime = 0;
     __block uint16_t inputKind = 0;
+    uint64_t submitTime = mach_absolute_time();
     os_unfair_lock_lock(&_lock);
     MacWSPerfDirectSource *source =
         [self directSourceForOwnerPID:ownerPID create:YES];
@@ -576,6 +596,16 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     }
     source->target = source->target || isTarget;
     source->lastSubmittedSequence = sequence;
+    NSUInteger receiptSlot = sequence % MacWSPerfDirectReceiptCapacity;
+    if (source->pendingReceiptSequences[receiptSlot] == sequence) {
+        MacWSPerfRingAppend(&source->receiptToSubmission,
+            MacWSPerfMachMilliseconds(
+                source->pendingReceiptTimes[receiptSlot], submitTime));
+        source->pendingReceiptSequences[receiptSlot] = 0;
+        source->pendingReceiptTimes[receiptSlot] = 0;
+    }
+    MacWSPerfRingAppend(&source->completionToSubmission,
+        MacWSPerfMachMilliseconds(completionTime, submitTime));
     measurementGeneration = _measurementGeneration;
     if (isTarget) _directTargetUniqueSubmissions++;
     // Runtime-confirmed on iPad14,5: the fullscreen 7DTD drawable was the
@@ -605,6 +635,7 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     [drawable addPresentedHandler:^(id<MTLDrawable> presentedDrawable) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
+        uint64_t callbackTime = mach_absolute_time();
         double presentedSeconds = presentedDrawable.presentedTime;
         if (presentedSeconds <= 0.0) presentedSeconds = CACurrentMediaTime();
         os_unfair_lock_lock(&strongSelf->_lock);
@@ -629,6 +660,10 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
         current->lastPresentedSeconds = presentedSeconds;
         current->lastPresentedSequence = sequence;
         current->uniqueFramesPresented++;
+        MacWSPerfRingAppend(&current->submissionToVisible,
+            MacWSPerfMachMilliseconds(submitTime, callbackTime));
+        MacWSPerfRingAppend(&current->completionToVisible,
+            MacWSPerfMachMilliseconds(completionTime, callbackTime));
         strongSelf->_directDrawableFramesPresented++;
         if (inputMachTime) {
             double latency = MacWSPerfMachMilliseconds(
@@ -641,6 +676,14 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
         }
         os_unfair_lock_unlock(&strongSelf->_lock);
     }];
+}
+
+- (void)recordDirectDrawableSchedulerTickWithFrame:(BOOL)hasFrame {
+    if (!atomic_load(&_instrumentationActive)) return;
+    os_unfair_lock_lock(&_lock);
+    _directDrawableSchedulerTicks++;
+    if (!hasFrame) _directDrawableSchedulerEmptyTicks++;
+    os_unfair_lock_unlock(&_lock);
 }
 
 - (void)recordSubmissionForStream:(uint64_t)streamID
@@ -758,11 +801,11 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
             if (interval <= MacWSPerfActiveGapMilliseconds) {
                 MacWSPerfRingAppend(&strongSelf->_presentIntervals,
                                     interval);
-                if (interval > MacWSPerfTargetFrameMilliseconds * 1.5)
+                if (interval > strongSelf->_targetFrameMilliseconds * 1.5)
                     strongSelf->_hitchCount++;
                 if (interval > 50.0) strongSelf->_stallCount++;
                 NSUInteger vsyncs = (NSUInteger)llround(
-                    interval / MacWSPerfTargetFrameMilliseconds);
+                    interval / strongSelf->_targetFrameMilliseconds);
                 if (vsyncs > 1)
                     strongSelf->_estimatedDroppedVsyncs += vsyncs - 1;
             } else {
@@ -823,6 +866,10 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
     uint64_t framesPresented = _framesPresented;
     uint64_t directDrawableFramesReceived = _directDrawableFramesReceived;
     uint64_t directDrawableFramesPresented = _directDrawableFramesPresented;
+    uint64_t directDrawableSchedulerTicks =
+        _directDrawableSchedulerTicks;
+    uint64_t directDrawableSchedulerEmptyTicks =
+        _directDrawableSchedulerEmptyTicks;
     uint64_t commandErrors = _commandErrors;
     uint64_t inputsAttempted = _inputsAttempted;
     uint64_t inputsSent = _inputsSent;
@@ -904,6 +951,14 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
                 MacWSPerfRingSummary(&item->producerIntervals);
             NSDictionary *transport =
                 MacWSPerfRingSummary(&item->completionToReceipt);
+            NSDictionary *receiptSubmission =
+                MacWSPerfRingSummary(&item->receiptToSubmission);
+            NSDictionary *completionSubmission =
+                MacWSPerfRingSummary(&item->completionToSubmission);
+            NSDictionary *submissionVisible =
+                MacWSPerfRingSummary(&item->submissionToVisible);
+            NSDictionary *completionVisible =
+                MacWSPerfRingSummary(&item->completionToVisible);
             NSDictionary *visibleInterval =
                 MacWSPerfRingSummary(&item->visibleIntervals);
             double producerElapsed = MacWSPerfMachMilliseconds(
@@ -939,6 +994,11 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
                 @"producer_sequence_average_fps": @(sequenceFPS),
                 @"producer_frame_interval": producerInterval,
                 @"completion_to_host_receipt": transport,
+                @"host_receipt_to_submission": receiptSubmission,
+                @"producer_completion_to_submission": completionSubmission,
+                @"submission_to_visible_callback": submissionVisible,
+                @"producer_completion_to_visible_callback":
+                    completionVisible,
                 @"host_unique_frames_presented":
                     @(item->uniqueFramesPresented),
                 @"host_visible_elapsed_s": @(MAX(0.0, visibleElapsed)),
@@ -989,8 +1049,10 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
         @"measurement_reason": resetReason,
         @"elapsed_s": @(elapsed),
         @"target": @{
-            @"active_fps": @60.0,
-            @"one_percent_low_fps": @45.0,
+            @"active_fps": @(_targetFramesPerSecond),
+            @"one_percent_low_fps": @(_targetFramesPerSecond * 0.75),
+            @"frame_budget_ms": @(_targetFrameMilliseconds),
+            @"display_maximum_fps": @(_targetFramesPerSecond),
             @"input_to_visible_p95_ms": @50.0,
             @"active_gap_cutoff_ms": @(MacWSPerfActiveGapMilliseconds),
             @"input_active_window_ms":
@@ -1041,6 +1103,10 @@ static NSString *MacWSPerfThermalStateName(NSProcessInfoThermalState state) {
                 @(directDrawableFramesReceived),
             @"direct_drawable_unique_frames_presented":
                 @(directDrawableFramesPresented),
+            @"direct_drawable_scheduler_ticks":
+                @(directDrawableSchedulerTicks),
+            @"direct_drawable_scheduler_empty_ticks":
+                @(directDrawableSchedulerEmptyTicks),
             @"command_errors": @(commandErrors),
             @"inputs_attempted": @(inputsAttempted),
             @"inputs_sent": @(inputsSent),

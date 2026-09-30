@@ -7,12 +7,14 @@
 #import <xpc/xpc.h>
 #import <dlfcn.h>
 #import <execinfo.h>
+#import <float.h>
 #import <math.h>
 #import <stdatomic.h>
 #import <stdarg.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <crt_externs.h>
 #import <mach-o/dyld.h>
 #import <mach-o/getsect.h>
 #import <mach-o/loader.h>
@@ -34,6 +36,7 @@
 #include "macws_composite_candidate_policy.h"
 #include "macws_control_protocol.h"
 #include "macws_host_protocol.h"
+#include "macws_process_ancestry.h"
 #include "macws_settings_paths.h"
 #include "macws_production_policy.h"
 #include "macws_chroot_identity.h"
@@ -42,6 +45,7 @@
 
 static BOOL macws_macho_has_uuid(const struct mach_header *header,
                                  const uint8_t expected[16]);
+static BOOL macws_runtime_diagnostics_enabled(void);
 
 typedef void (*macws_present_drawable_fn)(id, SEL, id);
 typedef void (*macws_present_drawable_timed_fn)(id, SEL, id, CFTimeInterval);
@@ -82,9 +86,38 @@ static macws_stray_commit_timing_fn
 static pthread_mutex_t macws_catalyst_drawable_service_lock =
     PTHREAD_MUTEX_INITIALIZER;
 static mach_port_t macws_catalyst_drawable_service = MACH_PORT_NULL;
+typedef struct {
+    uint32_t surfaceID;
+    mach_port_t sendRight;
+    uint64_t lastUse;
+} MacWSCatalystSurfacePortCacheEntry;
+static pthread_mutex_t macws_catalyst_surface_port_lock =
+    PTHREAD_MUTEX_INITIALIZER;
+static MacWSCatalystSurfacePortCacheEntry
+    macws_catalyst_surface_ports[3] = {0};
+static uint64_t macws_catalyst_surface_port_clock = 0;
+static uint64_t macws_catalyst_surface_port_hits = 0;
+static uint64_t macws_catalyst_surface_port_misses = 0;
 static _Atomic uint64_t macws_stray_last_render_activity_ns = 0;
+static _Atomic uint64_t macws_render_activity_present_sequence = 0;
+static _Atomic uint64_t macws_last_present_activity_ns = 0;
+static _Atomic uint32_t macws_observed_present_pace_us = 8333;
+static _Atomic uint64_t macws_present_discovery_until_ns = 0;
+static _Atomic uint64_t macws_present_next_discovery_ns = 0;
+static _Atomic uint64_t macws_render_authority_last_probe_ns = 0;
+static _Atomic uint64_t macws_render_authority_timestamp_ns = 0;
+static _Atomic uint32_t macws_render_authority_width = 0;
+static _Atomic uint32_t macws_render_authority_height = 0;
+static _Atomic int32_t macws_render_authority_owner_pid = 0;
+static _Atomic uint32_t macws_render_authority_layer_window_id = 0;
 static int macws_stray_render_activity_fd = -1;
 static int macws_stray_render_wake_fd = -1;
+static int macws_render_authority_fd = -1;
+
+typedef struct {
+    int32_t ownerPID;
+    uint32_t layerWindowID;
+} MacWSFocusedRenderAuthority;
 
 static uint32_t macws_stray_target_pace_us(void) {
     static dispatch_once_t onceToken;
@@ -339,21 +372,220 @@ static BOOL macws_stray_agx_compat_enabled(void) {
     return enabled;
 }
 
-// Production virtual-display pacing signal.  The WindowServer intentionally
-// idles its synthetic completion adapter at 100 ms to control desktop heat,
-// but a game can continuously present without producing pointer activity.
-// Publish that real presentation demand at most ten times per second and wake
-// the existing completion wait.  The versioned record also carries the exact
-// production target cadence, so WindowServer does not render more complete
-// desktop frames than the game can present.  A stopped or wedged game still
-// returns naturally to the cool idle cadence.  This neither fabricates a
-// drawable nor reports completion early.
-static void macws_stray_note_render_activity(void) {
-    if (!macws_is_render_paced_game_process()) return;
-    struct timespec now = {0};
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return;
-    uint64_t now_ns = (uint64_t)now.tv_sec * NSEC_PER_SEC +
-        (uint64_t)now.tv_nsec;
+static BOOL macws_process_descends_from(pid_t process, pid_t ancestor) {
+    return MacWSProcessDescendsFrom(process, ancestor);
+}
+
+static uint32_t macws_quantize_observed_present_pace(uint32_t observedUS) {
+    // Select the fastest conventional cadence which does not materially cap
+    // the producer. The 3% tolerance absorbs clock/vblank jitter around a
+    // stable tier without feeding a slightly longer measured interval back
+    // into an ever-slower synthetic-completion loop.
+    static const uint32_t tiers[] = {
+        8333, 10000, 11111, 12500, 13333, 16667,
+        20000, 25000, 33333, 50000, 100000,
+    };
+    uint32_t selected = tiers[0];
+    for (size_t index = 1; index < sizeof(tiers) / sizeof(tiers[0]); index++) {
+        if ((uint64_t)observedUS * 100u <
+            (uint64_t)tiers[index] * 97u) break;
+        selected = tiers[index];
+    }
+    return selected;
+}
+
+static uint32_t macws_note_observed_present_interval(uint64_t nowNS) {
+    static const uint64_t idleResetNS = 250 * NSEC_PER_MSEC;
+    static const uint64_t initialDiscoveryNS = 750 * NSEC_PER_MSEC;
+    static const uint64_t rediscoveryNS = 250 * NSEC_PER_MSEC;
+    static const uint64_t rediscoveryPeriodNS = 5 * NSEC_PER_SEC;
+    uint64_t previous = atomic_exchange_explicit(
+        &macws_last_present_activity_ns, nowNS, memory_order_acq_rel);
+    if (!previous || nowNS <= previous || nowNS - previous > idleResetNS) {
+        atomic_store_explicit(&macws_observed_present_pace_us, 8333,
+                              memory_order_release);
+        atomic_store_explicit(&macws_present_discovery_until_ns,
+                              nowNS + initialDiscoveryNS,
+                              memory_order_release);
+        atomic_store_explicit(&macws_present_next_discovery_ns,
+                              nowNS + rediscoveryPeriodNS,
+                              memory_order_release);
+        return 8333;
+    }
+    if (previous && nowNS > previous) {
+        uint64_t intervalUS = (nowNS - previous + 999u) / 1000u;
+        if (intervalUS >= 8333 && intervalUS <= 100000) {
+            uint32_t oldPace = atomic_load_explicit(
+                &macws_observed_present_pace_us, memory_order_acquire);
+            uint32_t sample = (uint32_t)intervalUS;
+            uint32_t smoothed = oldPace
+                ? (uint32_t)(((uint64_t)oldPace * 7u + sample) / 8u)
+                : sample;
+            atomic_store_explicit(&macws_observed_present_pace_us,
+                                  smoothed, memory_order_release);
+        }
+    }
+    uint64_t nextDiscovery = atomic_load_explicit(
+        &macws_present_next_discovery_ns, memory_order_acquire);
+    if (nextDiscovery && nowNS >= nextDiscovery &&
+        atomic_compare_exchange_strong_explicit(
+            &macws_present_next_discovery_ns, &nextDiscovery,
+            nowNS + rediscoveryPeriodNS, memory_order_acq_rel,
+            memory_order_acquire)) {
+        atomic_store_explicit(&macws_present_discovery_until_ns,
+                              nowNS + rediscoveryNS,
+                              memory_order_release);
+    }
+    uint64_t discoveryUntil = atomic_load_explicit(
+        &macws_present_discovery_until_ns, memory_order_acquire);
+    if (discoveryUntil && nowNS < discoveryUntil) return 8333;
+    return macws_quantize_observed_present_pace(atomic_load_explicit(
+        &macws_observed_present_pace_us, memory_order_acquire));
+}
+
+static void macws_refresh_focused_render_authority(uint64_t nowNS) {
+    if (!nowNS) return;
+    static const uint64_t probeIntervalNS = 100 * NSEC_PER_MSEC;
+    uint64_t previous = atomic_load_explicit(
+        &macws_render_authority_last_probe_ns, memory_order_acquire);
+    for (;;) {
+        if (previous && nowNS >= previous &&
+            nowNS - previous < probeIntervalNS) return;
+        if (atomic_compare_exchange_weak_explicit(
+                &macws_render_authority_last_probe_ns, &previous, nowNS,
+                memory_order_acq_rel, memory_order_acquire)) break;
+    }
+
+    if (macws_render_authority_fd < 0)
+        macws_render_authority_fd = open(
+            MACWS_RENDER_AUTHORITY_PATH, O_RDONLY | O_CLOEXEC);
+    MacWSRenderAuthorityRecord record = {0};
+    ssize_t count = macws_render_authority_fd >= 0
+        ? pread(macws_render_authority_fd, &record, sizeof(record), 0) : -1;
+    static const uint64_t authorityFreshnessNS = 2 * NSEC_PER_SEC;
+    BOOL valid = count == sizeof(record) &&
+        record.magic == MACWS_RENDER_AUTHORITY_MAGIC &&
+        record.version == MACWS_RENDER_AUTHORITY_VERSION &&
+        record.size == sizeof(record) && record.ownerPID > 1 &&
+        record.layerWindowID != 0 && record.width != 0 &&
+        record.height != 0 && nowNS >= record.timestampNS &&
+        nowNS - record.timestampNS <= authorityFreshnessNS &&
+        macws_process_descends_from(getpid(), record.ownerPID);
+    if (!valid) {
+        atomic_store_explicit(&macws_render_authority_timestamp_ns, 0,
+                              memory_order_release);
+        if (macws_render_authority_fd >= 0)
+            close(macws_render_authority_fd);
+        macws_render_authority_fd = -1;
+        return;
+    }
+    // Publish dimensions before the release-store of the timestamp. Readers
+    // which acquire a nonzero timestamp therefore observe one complete
+    // authorized geometry generation without taking a per-present lock.
+    atomic_store_explicit(&macws_render_authority_width, record.width,
+                          memory_order_relaxed);
+    atomic_store_explicit(&macws_render_authority_height, record.height,
+                          memory_order_relaxed);
+    atomic_store_explicit(&macws_render_authority_owner_pid,
+                          record.ownerPID, memory_order_relaxed);
+    atomic_store_explicit(&macws_render_authority_layer_window_id,
+                          record.layerWindowID, memory_order_relaxed);
+    atomic_store_explicit(&macws_render_authority_timestamp_ns,
+                          record.timestampNS, memory_order_release);
+}
+
+static BOOL macws_dimensions_match_focused_render_authority(
+        uint64_t nowNS, NSUInteger width, NSUInteger height,
+        const char *source, const char *sourceClass,
+        MacWSFocusedRenderAuthority *matchedAuthority) {
+    if (!nowNS || width == 0 || height == 0) return NO;
+    macws_refresh_focused_render_authority(nowNS);
+    uint64_t authorityTimestamp = atomic_load_explicit(
+        &macws_render_authority_timestamp_ns, memory_order_acquire);
+    static const uint64_t authorityFreshnessNS = 2 * NSEC_PER_SEC;
+    if (!authorityTimestamp || nowNS < authorityTimestamp ||
+        nowNS - authorityTimestamp > authorityFreshnessNS) return NO;
+    uint32_t authorityWidth = atomic_load_explicit(
+        &macws_render_authority_width, memory_order_relaxed);
+    uint32_t authorityHeight = atomic_load_explicit(
+        &macws_render_authority_height, memory_order_relaxed);
+    int32_t authorityOwner = atomic_load_explicit(
+        &macws_render_authority_owner_pid, memory_order_relaxed);
+    uint32_t authorityLayer = atomic_load_explicit(
+        &macws_render_authority_layer_window_id, memory_order_relaxed);
+    // Authorize only the window-sized presentation drawable, not unrelated
+    // WebGL/video/offscreen surfaces owned by the same Chromium GPU helper.
+    // The 20% tolerance covers a bounded live-resize transition until
+    // displayd publishes the next surface-backed geometry witness.
+    uint64_t widthDifference = width > authorityWidth
+        ? width - authorityWidth : authorityWidth - width;
+    uint64_t heightDifference = height > authorityHeight
+        ? height - authorityHeight : authorityHeight - height;
+    BOOL matches = authorityOwner > 1 && authorityLayer != 0 &&
+        width != 0 && height != 0 &&
+        widthDifference * 5u <= authorityWidth &&
+        heightDifference * 5u <= authorityHeight;
+    if (matches && matchedAuthority) {
+        matchedAuthority->ownerPID = authorityOwner;
+        matchedAuthority->layerWindowID = authorityLayer;
+    }
+    static _Atomic bool firstWitnessed = false;
+    if (!atomic_exchange_explicit(
+            &firstWitnessed, true, memory_order_acq_rel)) {
+        dprintf(STDERR_FILENO,
+            "#### MACWS-RENDER-ACTIVITY first-present pid=%d "
+            "source=%s class=%s size=%lux%lu authority=%ux%u ageMS=%.3f "
+            "match=%s\n",
+            getpid(), source ?: "(unknown)", sourceClass ?: "(nil)",
+            (unsigned long)width, (unsigned long)height,
+            authorityWidth, authorityHeight,
+            (double)(nowNS - authorityTimestamp) / 1000000.0,
+            matches ? "YES" : "NO");
+    }
+    return matches;
+}
+
+static BOOL macws_drawable_matches_focused_render_authority(
+        uint64_t nowNS, id drawable) {
+    if (!nowNS || !drawable) return NO;
+    NSUInteger width = 0;
+    NSUInteger height = 0;
+    @try {
+        id<MTLTexture> texture = [drawable texture];
+        width = texture.width;
+        height = texture.height;
+    } @catch (__unused NSException *exception) {
+        return NO;
+    }
+    return macws_dimensions_match_focused_render_authority(
+        nowNS, width, height, "CAMetalDrawable",
+        class_getName([drawable class]), NULL);
+}
+
+// Production virtual-display pacing signal. WindowServer intentionally idles
+// its synthetic completion adapter at 100 ms to control desktop heat. A game,
+// WebGL view or native animation can continuously present without pointer
+// activity, so publish real presentation demand at most ten times per second
+// and wake the existing completion wait. Generic producers must match the
+// fresh focused-window authority above; WindowServer independently repeats
+// the PID-ancestry validation before consuming this request. A stopped or
+// backgrounded producer therefore returns naturally to the cool idle cadence.
+// This neither fabricates a drawable nor reports completion early.
+static void macws_publish_render_activity(uint64_t now_ns,
+                                          BOOL gameProducer) {
+    if (!now_ns) return;
+    // Only the authorized window-sized drawable may influence the adaptive
+    // estimator. Chromium offscreen/WebGL drawables can present at unrelated
+    // rates and previously contaminated this state before failing the size
+    // authority check.
+    uint32_t observedPaceUS = macws_note_observed_present_interval(now_ns);
+    uint64_t presentSequence = atomic_fetch_add_explicit(
+        &macws_render_activity_present_sequence, 1,
+        memory_order_relaxed) + 1;
+
+    // Throttle publication only after this exact presentation has passed the
+    // authority/geometry check. An unrelated Chromium offscreen drawable must
+    // not consume the focused window's next 100-ms publication opportunity.
     const uint64_t minimum_interval_ns = 100ull * NSEC_PER_MSEC;
     uint64_t previous = atomic_load_explicit(
         &macws_stray_last_render_activity_ns, memory_order_acquire);
@@ -372,10 +604,14 @@ static void macws_stray_note_render_activity(void) {
     }
     MacWSRenderActivityRecord record = {
         .magic = MACWS_RENDER_ACTIVITY_MAGIC,
-        .version = MACWS_RENDER_ACTIVITY_VERSION,
+        .version = gameProducer ? MACWS_RENDER_ACTIVITY_LEGACY_VERSION :
+                                  MACWS_RENDER_ACTIVITY_VERSION,
         .size = sizeof(MacWSRenderActivityRecord),
         .timestampNS = now_ns,
-        .targetPaceUS = macws_stray_target_pace_us(),
+        .targetPaceUS = gameProducer ? macws_stray_target_pace_us() :
+                                      observedPaceUS,
+        .producerPID = gameProducer ? 0 : getpid(),
+        .presentSequence = presentSequence,
     };
     if (macws_stray_render_activity_fd >= 0 &&
         pwrite(macws_stray_render_activity_fd, &record,
@@ -409,6 +645,33 @@ static void macws_stray_note_render_activity(void) {
         close(macws_stray_render_wake_fd);
         macws_stray_render_wake_fd = -1;
     }
+}
+
+static void macws_note_render_activity(id drawable) {
+    struct timespec now = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return;
+    uint64_t now_ns = (uint64_t)now.tv_sec * NSEC_PER_SEC +
+        (uint64_t)now.tv_nsec;
+    BOOL gameProducer = macws_is_render_paced_game_process();
+    if (!gameProducer &&
+        !macws_drawable_matches_focused_render_authority(now_ns, drawable))
+        return;
+    macws_publish_render_activity(now_ns, gameProducer);
+}
+
+static BOOL macws_note_render_activity_dimensions(
+        NSUInteger width, NSUInteger height,
+        const char *source, const char *sourceClass,
+        MacWSFocusedRenderAuthority *matchedAuthority) {
+    struct timespec now = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return NO;
+    uint64_t now_ns = (uint64_t)now.tv_sec * NSEC_PER_SEC +
+        (uint64_t)now.tv_nsec;
+    if (!macws_dimensions_match_focused_render_authority(
+            now_ns, width, height, source, sourceClass,
+            matchedAuthority)) return NO;
+    macws_publish_render_activity(now_ns, NO);
+    return YES;
 }
 
 // A full Stray render trace interposes every encoder state mutation and draw,
@@ -730,9 +993,18 @@ static mach_port_t macws_catalyst_drawable_service_port(void) {
     pthread_mutex_lock(&macws_catalyst_drawable_service_lock);
     if (!MACH_PORT_VALID(macws_catalyst_drawable_service)) {
         mach_port_t service = MACH_PORT_NULL;
-        if (bootstrap_look_up(bootstrap_port,
-                MACWS_CATALYST_DRAWABLE_MACH_SERVICE, &service) ==
-            BOOTSTRAP_SUCCESS)
+        kern_return_t lookup = bootstrap_look_up(
+            bootstrap_port, MACWS_CATALYST_DRAWABLE_MACH_SERVICE, &service);
+        static _Atomic bool reportedLookup = false;
+        if (!atomic_exchange_explicit(
+                &reportedLookup, true, memory_order_acq_rel)) {
+            dprintf(STDERR_FILENO,
+                "#### MACWS-CATALYST-DRAWABLE lookup service=%s kr=%d "
+                "port=%u bootstrap=%u pid=%d\n",
+                MACWS_CATALYST_DRAWABLE_MACH_SERVICE, lookup, service,
+                bootstrap_port, getpid());
+        }
+        if (lookup == BOOTSTRAP_SUCCESS)
             macws_catalyst_drawable_service = service;
     }
     mach_port_t result = macws_catalyst_drawable_service;
@@ -748,6 +1020,79 @@ static void macws_invalidate_catalyst_drawable_service(
         macws_catalyst_drawable_service = MACH_PORT_NULL;
     }
     pthread_mutex_unlock(&macws_catalyst_drawable_service_lock);
+}
+
+// CAMetalLayer rotates a three-IOSurface drawable pool. A Mach send right to
+// an IOSurface is reusable: each outgoing descriptor uses COPY_SEND, so the
+// receiver gains its own right while the producer retains the cached name.
+// Keep the cache lock through the bounded nonblocking send; this makes LRU
+// eviction safe even when command-buffer completions publish concurrently.
+// The cached right also keeps its IOSurface ID from being recycled, so ID is
+// a sufficient exact identity until that entry is evicted.
+static mach_port_t macws_lock_cached_catalyst_surface_port(
+        IOSurfaceRef surface) {
+    pthread_mutex_lock(&macws_catalyst_surface_port_lock);
+    uint32_t surfaceID = surface ? IOSurfaceGetID(surface) : 0;
+    if (!surfaceID) return MACH_PORT_NULL;
+
+    macws_catalyst_surface_port_clock++;
+    size_t replacement = 0;
+    for (size_t index = 0;
+         index < sizeof(macws_catalyst_surface_ports) /
+                     sizeof(macws_catalyst_surface_ports[0]);
+         index++) {
+        MacWSCatalystSurfacePortCacheEntry *entry =
+            &macws_catalyst_surface_ports[index];
+        if (entry->surfaceID == surfaceID &&
+            MACH_PORT_VALID(entry->sendRight)) {
+            entry->lastUse = macws_catalyst_surface_port_clock;
+            macws_catalyst_surface_port_hits++;
+            return entry->sendRight;
+        }
+        if (!MACH_PORT_VALID(entry->sendRight) ||
+            macws_catalyst_surface_ports[replacement].lastUse >
+                entry->lastUse) {
+            replacement = index;
+        }
+    }
+
+    mach_port_t sendRight = IOSurfaceCreateMachPort(surface);
+    if (MACH_PORT_VALID(sendRight)) {
+        MacWSCatalystSurfacePortCacheEntry *entry =
+            &macws_catalyst_surface_ports[replacement];
+        if (MACH_PORT_VALID(entry->sendRight))
+            (void)mach_port_deallocate(mach_task_self(), entry->sendRight);
+        *entry = (MacWSCatalystSurfacePortCacheEntry){
+            .surfaceID = surfaceID,
+            .sendRight = sendRight,
+            .lastUse = macws_catalyst_surface_port_clock,
+        };
+        macws_catalyst_surface_port_misses++;
+    }
+    return sendRight;
+}
+
+static void macws_unlock_cached_catalyst_surface_port(void) {
+    uint64_t accesses = macws_catalyst_surface_port_hits +
+        macws_catalyst_surface_port_misses;
+    if (accesses == 240) {
+        size_t resident = 0;
+        for (size_t index = 0;
+             index < sizeof(macws_catalyst_surface_ports) /
+                         sizeof(macws_catalyst_surface_ports[0]);
+             index++) {
+            if (MACH_PORT_VALID(
+                    macws_catalyst_surface_ports[index].sendRight))
+                resident++;
+        }
+        dprintf(STDERR_FILENO,
+            "#### MACWS-CATALYST-DRAWABLE surface-port-cache "
+            "hits=%llu misses=%llu resident=%zu\n",
+            (unsigned long long)macws_catalyst_surface_port_hits,
+            (unsigned long long)macws_catalyst_surface_port_misses,
+            resident);
+    }
+    pthread_mutex_unlock(&macws_catalyst_surface_port_lock);
 }
 
 static void macws_7dtd_trace_completed_surface(
@@ -811,13 +1156,13 @@ static void macws_publish_completed_catalyst_drawable(
     // when the delivery is rejected.
     IOSurfaceIncrementUseCount(retainedSurface);
     record.flags |= MacWSCatalystDrawableTransfersUseCount;
-    mach_port_t surfacePort = IOSurfaceCreateMachPort(retainedSurface);
+    mach_port_t surfacePort =
+        macws_lock_cached_catalyst_surface_port(retainedSurface);
     mach_port_t service = macws_catalyst_drawable_service_port();
     if (!MACH_PORT_VALID(surfacePort) || !MACH_PORT_VALID(service)) {
+        macws_unlock_cached_catalyst_surface_port();
         IOSurfaceDecrementUseCount(retainedSurface);
         CFRelease(retainedSurface);
-        if (MACH_PORT_VALID(surfacePort))
-            (void)mach_port_deallocate(mach_task_self(), surfacePort);
         return;
     }
     MacWSCatalystDrawableMachMessage message = {0};
@@ -841,7 +1186,17 @@ static void macws_publish_completed_catalyst_drawable(
     mach_msg_return_t result = mach_msg(
         &message.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
         sizeof(message), 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
-    (void)mach_port_deallocate(mach_task_self(), surfacePort);
+    macws_unlock_cached_catalyst_surface_port();
+    static _Atomic bool reportedSend = false;
+    if (!atomic_exchange_explicit(&reportedSend, true, memory_order_acq_rel)) {
+        dprintf(STDERR_FILENO,
+            "#### MACWS-CATALYST-DRAWABLE send pid=%d owner=%d producer=%d "
+            "sequence=%llu "
+            "service=%u surface-port=%u result=%d\n",
+            getpid(), record.ownerPID, record.producerPID,
+            (unsigned long long)record.sequence, service, surfacePort,
+            result);
+    }
     if (result != MACH_MSG_SUCCESS) {
         IOSurfaceDecrementUseCount(retainedSurface);
         if (result == MACH_SEND_INVALID_DEST)
@@ -900,7 +1255,7 @@ static void macws_record_stray_present(id drawable, SEL selector) {
 
 static void macws_before_present_drawable(id commandBuffer, SEL selector,
                                           id drawable) {
-    macws_stray_note_render_activity();
+    macws_note_render_activity(drawable);
     IOSurfaceRef retainedSurface = NULL;
     MacWSCatalystDrawableRecord record = {0};
     const char *directValue = getenv("MACWS_CATALYST_DIRECT_DRAWABLE");
@@ -932,6 +1287,7 @@ static void macws_before_present_drawable(id commandBuffer, SEL selector,
                 .version = MACWS_CATALYST_DRAWABLE_VERSION,
                 .size = sizeof(record),
                 .ownerPID = getpid(),
+                .producerPID = getpid(),
                 .surfaceID = surfaceID,
                 .sequence = atomic_fetch_add_explicit(
                     &macws_catalyst_drawable_sequence, 1,
@@ -1034,14 +1390,24 @@ static void macws_present_drawable_after_duration_with_host_publish(
 
 static void macws_agx_present_drawable_trace(
         id commandBuffer, SEL selector, id drawable) {
-    macws_before_present_drawable(commandBuffer, selector, drawable);
+    if (macws_is_render_paced_game_process() ||
+        macws_catalyst_direct_drawable_enabled()) {
+        macws_before_present_drawable(commandBuffer, selector, drawable);
+    } else {
+        macws_note_render_activity(drawable);
+    }
     if (macws_agx_present_drawable_orig)
         macws_agx_present_drawable_orig(commandBuffer, selector, drawable);
 }
 
 static void macws_agx_present_drawable_at_time_trace(
         id commandBuffer, SEL selector, id drawable, CFTimeInterval time) {
-    macws_before_present_drawable(commandBuffer, selector, drawable);
+    if (macws_is_render_paced_game_process() ||
+        macws_catalyst_direct_drawable_enabled()) {
+        macws_before_present_drawable(commandBuffer, selector, drawable);
+    } else {
+        macws_note_render_activity(drawable);
+    }
     if (macws_agx_present_drawable_at_time_orig)
         macws_agx_present_drawable_at_time_orig(
             commandBuffer, selector, drawable, time);
@@ -1050,7 +1416,12 @@ static void macws_agx_present_drawable_at_time_trace(
 static void macws_agx_present_drawable_after_duration_trace(
         id commandBuffer, SEL selector, id drawable,
         CFTimeInterval duration) {
-    macws_before_present_drawable(commandBuffer, selector, drawable);
+    if (macws_is_render_paced_game_process() ||
+        macws_catalyst_direct_drawable_enabled()) {
+        macws_before_present_drawable(commandBuffer, selector, drawable);
+    } else {
+        macws_note_render_activity(drawable);
+    }
     if (macws_agx_present_drawable_after_duration_orig)
         macws_agx_present_drawable_after_duration_orig(
             commandBuffer, selector, drawable, duration);
@@ -1073,6 +1444,7 @@ static macws_drawable_present_timed_fn
 static pthread_mutex_t g_macws_stray_drawable_hook_lock =
     PTHREAD_MUTEX_INITIALIZER;
 static Class g_macws_stray_drawable_hooked_class = Nil;
+static _Atomic uintptr_t g_macws_drawable_hooked_class_fast = 0;
 
 // Diagnostic witness for the AppKit/QuartzCore visibility contract around
 // Stray's CAMetalLayer.  The WindowServer catalog can carry pixels for a
@@ -1194,6 +1566,7 @@ static void macws_publish_direct_drawable_after_presentation(id drawable,
                 .version = MACWS_CATALYST_DRAWABLE_VERSION,
                 .size = sizeof(record),
                 .ownerPID = getpid(),
+                .producerPID = getpid(),
                 .surfaceID = surfaceID,
                 .sequence = atomic_fetch_add_explicit(
                     &macws_catalyst_drawable_sequence, 1,
@@ -1259,20 +1632,26 @@ static void macws_publish_direct_drawable_after_presentation(id drawable,
 }
 
 static void macws_stray_drawable_present_trace(id drawable, SEL selector) {
-    macws_stray_note_render_activity();
-    macws_publish_direct_drawable_after_presentation(drawable, selector);
-    macws_record_stray_present(drawable, selector);
-    macws_record_stray_drawable_presented(drawable);
+    macws_note_render_activity(drawable);
+    if (macws_is_render_paced_game_process() ||
+        macws_catalyst_direct_drawable_enabled()) {
+        macws_publish_direct_drawable_after_presentation(drawable, selector);
+        macws_record_stray_present(drawable, selector);
+        macws_record_stray_drawable_presented(drawable);
+    }
     if (g_macws_stray_drawable_present_orig)
         g_macws_stray_drawable_present_orig(drawable, selector);
 }
 
 static void macws_stray_drawable_present_at_time_trace(
         id drawable, SEL selector, CFTimeInterval time) {
-    macws_stray_note_render_activity();
-    macws_publish_direct_drawable_after_presentation(drawable, selector);
-    macws_record_stray_present(drawable, selector);
-    macws_record_stray_drawable_presented(drawable);
+    macws_note_render_activity(drawable);
+    if (macws_is_render_paced_game_process() ||
+        macws_catalyst_direct_drawable_enabled()) {
+        macws_publish_direct_drawable_after_presentation(drawable, selector);
+        macws_record_stray_present(drawable, selector);
+        macws_record_stray_drawable_presented(drawable);
+    }
     if (g_macws_stray_drawable_present_at_time_orig)
         g_macws_stray_drawable_present_at_time_orig(
             drawable, selector, time);
@@ -1280,10 +1659,13 @@ static void macws_stray_drawable_present_at_time_trace(
 
 static void macws_stray_drawable_present_after_duration_trace(
         id drawable, SEL selector, CFTimeInterval duration) {
-    macws_stray_note_render_activity();
-    macws_publish_direct_drawable_after_presentation(drawable, selector);
-    macws_record_stray_present(drawable, selector);
-    macws_record_stray_drawable_presented(drawable);
+    macws_note_render_activity(drawable);
+    if (macws_is_render_paced_game_process() ||
+        macws_catalyst_direct_drawable_enabled()) {
+        macws_publish_direct_drawable_after_presentation(drawable, selector);
+        macws_record_stray_present(drawable, selector);
+        macws_record_stray_drawable_presented(drawable);
+    }
     if (g_macws_stray_drawable_present_after_duration_orig)
         g_macws_stray_drawable_present_after_duration_orig(
             drawable, selector, duration);
@@ -1291,16 +1673,22 @@ static void macws_stray_drawable_present_after_duration_trace(
 
 static void macws_install_stray_drawable_class_trace(Class drawableClass) {
     if (!drawableClass) return;
+    if ((Class)atomic_load_explicit(
+            &g_macws_drawable_hooked_class_fast,
+            memory_order_acquire) == drawableClass) return;
     pthread_mutex_lock(&g_macws_stray_drawable_hook_lock);
     if (g_macws_stray_drawable_hooked_class == drawableClass) {
         pthread_mutex_unlock(&g_macws_stray_drawable_hook_lock);
         return;
     }
     if (g_macws_stray_drawable_hooked_class != Nil) {
-        dprintf(STDERR_FILENO,
-            "#### STRAY-DRAWABLE additional class=%s alreadyHooked=%s\n",
-            class_getName(drawableClass),
-            class_getName(g_macws_stray_drawable_hooked_class));
+        if (macws_is_render_paced_game_process() ||
+            macws_runtime_diagnostics_enabled()) {
+            dprintf(STDERR_FILENO,
+                "#### STRAY-DRAWABLE additional class=%s alreadyHooked=%s\n",
+                class_getName(drawableClass),
+                class_getName(g_macws_stray_drawable_hooked_class));
+        }
         pthread_mutex_unlock(&g_macws_stray_drawable_hook_lock);
         return;
     }
@@ -1323,9 +1711,12 @@ static void macws_install_stray_drawable_class_trace(Class drawableClass) {
         SEL selector = sel_registerName(entries[i].name);
         Method method = class_getInstanceMethod(drawableClass, selector);
         if (!method) {
-            dprintf(STDERR_FILENO,
-                "#### STRAY-DRAWABLE missing selector=%s class=%s\n",
-                entries[i].name, class_getName(drawableClass));
+            if (macws_is_render_paced_game_process() ||
+                macws_runtime_diagnostics_enabled()) {
+                dprintf(STDERR_FILENO,
+                    "#### STRAY-DRAWABLE missing selector=%s class=%s\n",
+                    entries[i].name, class_getName(drawableClass));
+            }
             continue;
         }
         IMP original = method_getImplementation(method);
@@ -1338,14 +1729,22 @@ static void macws_install_stray_drawable_class_trace(Class drawableClass) {
             method_setImplementation(own, entries[i].replacement);
         }
         installedAny = YES;
-        dprintf(STDERR_FILENO,
-            "#### STRAY-DRAWABLE installed selector=%s class=%s "
-            "original=%p subclassOverride=%s types=%s\n",
-            entries[i].name, class_getName(drawableClass),
-            (void *)original, added ? "YES" : "NO",
-            types ?: "(nil)");
+        if (macws_is_render_paced_game_process() ||
+            macws_runtime_diagnostics_enabled()) {
+            dprintf(STDERR_FILENO,
+                "#### STRAY-DRAWABLE installed selector=%s class=%s "
+                "original=%p subclassOverride=%s types=%s\n",
+                entries[i].name, class_getName(drawableClass),
+                (void *)original, added ? "YES" : "NO",
+                types ?: "(nil)");
+        }
     }
-    if (installedAny) g_macws_stray_drawable_hooked_class = drawableClass;
+    if (installedAny) {
+        g_macws_stray_drawable_hooked_class = drawableClass;
+        atomic_store_explicit(&g_macws_drawable_hooked_class_fast,
+                              (uintptr_t)drawableClass,
+                              memory_order_release);
+    }
     pthread_mutex_unlock(&g_macws_stray_drawable_hook_lock);
 }
 
@@ -1427,7 +1826,9 @@ static id macws_stray_next_drawable_trace(id layer, SEL selector) {
     if (drawable) {
         macws_install_stray_drawable_class_trace([drawable class]);
         static _Atomic BOOL logged = NO;
-        if (!atomic_exchange_explicit(
+        if ((macws_is_render_paced_game_process() ||
+             macws_runtime_diagnostics_enabled()) &&
+            !atomic_exchange_explicit(
                 &logged, YES, memory_order_acq_rel)) {
             id texture = nil;
             @try { texture = [drawable texture]; }
@@ -1476,19 +1877,188 @@ static void macws_install_stray_drawable_present_trace(void) {
                 (macws_next_drawable_fn)original;
             method_setImplementation(
                 nextDrawableMethod, (IMP)macws_stray_next_drawable_trace);
-            dprintf(STDERR_FILENO,
-                "#### STRAY-DRAWABLE installed selector=%s class=%s "
-                "original=%p types=%s\n",
-                sel_getName(nextDrawableSelector), class_getName(metalLayer),
-                (void *)original,
-                method_getTypeEncoding(nextDrawableMethod) ?: "(nil)");
+            if (macws_is_render_paced_game_process() ||
+                macws_runtime_diagnostics_enabled()) {
+                dprintf(STDERR_FILENO,
+                    "#### STRAY-DRAWABLE installed selector=%s class=%s "
+                    "original=%p types=%s\n",
+                    sel_getName(nextDrawableSelector),
+                    class_getName(metalLayer), (void *)original,
+                    method_getTypeEncoding(nextDrawableMethod) ?: "(nil)");
+            }
         }
-    } else {
+    } else if (macws_is_render_paced_game_process() ||
+               macws_runtime_diagnostics_enabled()) {
         dprintf(STDERR_FILENO,
             "#### STRAY-DRAWABLE missing selector=%s class=%s\n",
             sel_getName(nextDrawableSelector),
             metalLayer ? class_getName(metalLayer) : "(nil)");
     }
+}
+
+// Chromium's macOS GPU process does not present its window through a
+// CAMetalLayer. Runtime sample /tmp/macws_vscode_gpu_66346.sample captured
+// its active Aquarium frame path as ANGLE Metal work followed by
+// -[CALayer setContents:] and CA::Context::commit_transaction, with no
+// CAMetalDrawable/presentDrawable frame in the same five-second sample. The
+// contents object is the IOSurface handed to the window compositor. Observe
+// that public boundary only in a --type=gpu-process helper, and only publish
+// when the IOSurface dimensions independently match displayd's fresh focused
+// window authority. The original setter always runs first and unmodified.
+typedef void (*macws_layer_set_contents_fn)(id, SEL, id);
+static macws_layer_set_contents_fn g_macws_layer_set_contents_orig = NULL;
+
+static BOOL macws_is_chromium_gpu_process(void) {
+    static dispatch_once_t onceToken;
+    static BOOL result = NO;
+    dispatch_once(&onceToken, ^{
+        int *argcPointer = _NSGetArgc();
+        char ***argvPointer = _NSGetArgv();
+        if (!argcPointer || !argvPointer || !*argvPointer) return;
+        for (int index = 1; index < *argcPointer; index++) {
+            const char *argument = (*argvPointer)[index];
+            if (argument && strcmp(argument, "--type=gpu-process") == 0) {
+                result = YES;
+                break;
+            }
+        }
+    });
+    return result;
+}
+
+static void macws_chromium_layer_set_contents_activity(
+        id layer, SEL selector, id contents) {
+    if (g_macws_layer_set_contents_orig)
+        g_macws_layer_set_contents_orig(layer, selector, contents);
+    if (!contents) return;
+
+    const char *contentsClass = object_getClassName(contents);
+    static _Atomic uint32_t witnessCount = 0;
+    uint32_t witness = atomic_fetch_add_explicit(
+        &witnessCount, 1, memory_order_relaxed) + 1;
+    BOOL isSurface = contentsClass && strstr(contentsClass, "IOSurface");
+    if (witness <= 8) {
+        dprintf(STDERR_FILENO,
+            "#### MACWS-RENDER-ACTIVITY layer-contents #%u pid=%d "
+            "layer=%s contents=%s surface=%s\n",
+            witness, getpid(), object_getClassName(layer) ?: "(nil)",
+            contentsClass ?: "(nil)", isSurface ? "YES" : "NO");
+    }
+    if (!isSurface) return;
+
+    IOSurfaceRef surface = (__bridge IOSurfaceRef)contents;
+    size_t width = IOSurfaceGetWidth(surface);
+    size_t height = IOSurfaceGetHeight(surface);
+    MacWSFocusedRenderAuthority authority = {0};
+    BOOL authorized = macws_note_render_activity_dimensions(
+        width, height, "CALayer.contents.IOSurface", contentsClass,
+        &authority);
+    if (!authorized) return;
+
+    // A/B-gated zero-copy transport for Chromium/Electron.  The producer's
+    // public CALayer boundary already owns the completed IOSurface which will
+    // be consumed by WindowServer. Transfer that same immutable generation to
+    // Host instead of waiting for WindowServer to wrap it in another AGX
+    // texture, composite the entire desktop, snapshot it, and send that copy.
+    // Both producer and Host independently join the helper to displayd's
+    // focused owner/window authority; the original setContents: call above is
+    // always preserved.
+    static dispatch_once_t directOnce;
+    static BOOL directEnabled = NO;
+    dispatch_once(&directOnce, ^{
+        const char *value = getenv("MACWS_FOCUSED_LAYER_DIRECT");
+        directEnabled = value
+            ? strcmp(value, "0") != 0
+            : access("/tmp/macws_focused_layer_direct", F_OK) == 0;
+    });
+    if (!directEnabled) return;
+
+    uint32_t surfaceID = IOSurfaceGetID(surface);
+    size_t bytesPerRow = IOSurfaceGetBytesPerRow(surface);
+    if (!surfaceID || width > UINT32_MAX || height > UINT32_MAX ||
+        bytesPerRow > UINT32_MAX) return;
+    // `authority` is the exact snapshot that passed freshness, geometry and
+    // process-ancestry validation above. Do not walk the process ancestry a
+    // second time on every 120-Hz frame; the authority file is revalidated at
+    // its bounded 100-ms refresh cadence, and Host/displayd independently
+    // authenticate the producer again before presenting it.
+    int32_t authorityOwner = authority.ownerPID;
+    uint32_t authorityLayer = authority.layerWindowID;
+
+    MacWSCatalystDrawableRecord record = {
+        .magic = MACWS_CATALYST_DRAWABLE_MAGIC,
+        .version = MACWS_CATALYST_DRAWABLE_VERSION,
+        .size = sizeof(record),
+        // The receiver authenticates producerPID against the Mach audit
+        // trailer. ownerPID is the already ancestry-validated focused parent
+        // published by displayd; Host joins that logical identity directly.
+        .ownerPID = authorityOwner,
+        .producerPID = getpid(),
+        .surfaceID = surfaceID,
+        .sequence = atomic_fetch_add_explicit(
+            &macws_catalyst_drawable_sequence, 1,
+            memory_order_relaxed) + 1,
+        .width = (uint32_t)width,
+        .height = (uint32_t)height,
+        .bytesPerRow = (uint32_t)bytesPerRow,
+        .ioSurfacePixelFormat = IOSurfaceGetPixelFormat(surface),
+        .metalPixelFormat = MTLPixelFormatBGRA8Unorm,
+        // CALayer's opaque property is the producer's composition contract.
+        // Runtime probe on the live VS Code Aquarium surface 338 (1822x1468)
+        // also found alpha=255 for all 2,674,696 pixels, but the transport
+        // must carry the semantic property instead of inferring it from one
+        // generation's contents.
+        .flags = [layer respondsToSelector:@selector(isOpaque)] &&
+                ((BOOL (*)(id, SEL))objc_msgSend)(
+                    layer, @selector(isOpaque))
+            ? MacWSCatalystDrawableOpaque : 0,
+    };
+    if (!MacWSCatalystDrawableRecordIsValid(&record, sizeof(record))) return;
+    static _Atomic bool firstDirectWitness = false;
+    if (!atomic_exchange_explicit(
+            &firstDirectWitness, true, memory_order_acq_rel)) {
+        dprintf(STDERR_FILENO,
+            "#### MACWS-FOCUSED-LAYER-DIRECT first-send producer=%d "
+            "authority-owner=%d layer=%u surface=%u size=%zux%zu "
+            "opaque=%s\n",
+            getpid(), authorityOwner, authorityLayer, surfaceID,
+            width, height,
+            (record.flags & MacWSCatalystDrawableOpaque) ? "YES" : "NO");
+    }
+    macws_publish_completed_catalyst_drawable(
+        record, (IOSurfaceRef)CFRetain(surface),
+        (uintptr_t)(__bridge void *)layer,
+        (uintptr_t)(__bridge void *)contents,
+        (uintptr_t)(__bridge void *)contents);
+}
+
+static void macws_install_chromium_layer_contents_activity(void) {
+    if (!macws_is_chromium_gpu_process()) return;
+    Class layerClass = objc_getClass("CALayer");
+    SEL selector = sel_registerName("setContents:");
+    Method method = layerClass
+        ? class_getInstanceMethod(layerClass, selector) : NULL;
+    if (!method) {
+        dprintf(STDERR_FILENO,
+            "#### MACWS-RENDER-ACTIVITY layer-contents install "
+            "missing class=%s selector=%s\n",
+            layerClass ? class_getName(layerClass) : "(nil)",
+            sel_getName(selector));
+        return;
+    }
+    IMP current = method_getImplementation(method);
+    if (macws_imp_equal_ignoring_pac(
+            current, (IMP)macws_chromium_layer_set_contents_activity))
+        return;
+    g_macws_layer_set_contents_orig =
+        (macws_layer_set_contents_fn)current;
+    method_setImplementation(
+        method, (IMP)macws_chromium_layer_set_contents_activity);
+    dprintf(STDERR_FILENO,
+        "#### MACWS-RENDER-ACTIVITY layer-contents installed pid=%d "
+        "class=%s original=%p types=%s\n",
+        getpid(), class_getName(layerClass), (void *)current,
+        method_getTypeEncoding(method) ?: "(nil)");
 }
 
 static void macws_install_catalyst_drawable_publisher(void) {
@@ -12856,8 +13426,100 @@ static void macws_log_plain_texture_surface_layout(
         static uint64_t leaseHitCount = 0;
         static uint64_t leaseNewCount = 0;
         static uint64_t leaseEvictCount = 0;
+        static dispatch_source_t leaseReaper = nil;
         dispatch_once(&leasePoolOnce, ^{
             leasePool = [NSMutableDictionary new];
+            // The compatibility pool is process-global because equal-shaped
+            // SkyLight intermediates genuinely overlap.  The allocation-time
+            // 256-MiB cap below protects live overlap, but it cannot reclaim an
+            // entry whose caller releases it after the final allocation.  The
+            // 2026-09-29 stress run runtime-confirmed this exact state in
+            // WindowServer.err: the pool reached 257 MiB/181 shapes and then
+            // remained resident while WindowServer was idle.  Reap only
+            // retain-count-proven idle entries after a reuse window; live Metal
+            // textures are never destroyed or aliased.
+            dispatch_queue_t queue = dispatch_get_global_queue(
+                QOS_CLASS_UTILITY, 0);
+            leaseReaper = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER,
+                0, 0, queue);
+            dispatch_source_set_timer(leaseReaper,
+                dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC),
+                15 * NSEC_PER_SEC, 5 * NSEC_PER_SEC);
+            dispatch_source_set_event_handler(leaseReaper, ^{
+                @autoreleasepool {
+                    const NSUInteger idleBudget = 64U * 1024U * 1024U;
+                    const CFTimeInterval minimumIdleAge = 15.0;
+                    NSUInteger before = 0;
+                    NSUInteger after = 0;
+                    NSUInteger freed = 0;
+                    NSUInteger evictedEntries = 0;
+                    CFTimeInterval now = (CFTimeInterval)
+                        clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1.0e9;
+                    @synchronized(leasePool) {
+                        before = leasePoolBytes;
+                        while (leasePoolBytes > idleBudget) {
+                            NSString *oldestKey = nil;
+                            NSMutableArray *oldestArray = nil;
+                            NSMutableDictionary *oldestEntry = nil;
+                            CFTimeInterval oldestTime = DBL_MAX;
+                            for (NSString *candidateKey in leasePool) {
+                                NSMutableArray *candidateArray =
+                                    leasePool[candidateKey];
+                                for (NSMutableDictionary *candidateEntry in
+                                         candidateArray) {
+                                    id candidateTexture =
+                                        candidateEntry[@"texture"];
+                                    CFIndex baseline =
+                                        [candidateEntry[@"baseline"]
+                                            longLongValue];
+                                    CFIndex current = candidateTexture
+                                        ? CFGetRetainCount((__bridge CFTypeRef)
+                                              candidateTexture) : 0;
+                                    CFTimeInterval lastTime =
+                                        [candidateEntry[@"last_time"]
+                                            doubleValue];
+                                    if (candidateTexture &&
+                                        current <= baseline && lastTime > 0.0 &&
+                                        now - lastTime >= minimumIdleAge &&
+                                        lastTime < oldestTime) {
+                                        oldestTime = lastTime;
+                                        oldestKey = candidateKey;
+                                        oldestArray = candidateArray;
+                                        oldestEntry = candidateEntry;
+                                    }
+                                }
+                            }
+                            if (!oldestEntry) break;
+                            IOSurfaceRef evictedSurface = (IOSurfaceRef)
+                                [oldestEntry[@"surface"] pointerValue];
+                            NSUInteger evictedBytes =
+                                [oldestEntry[@"bytes"] unsignedIntegerValue];
+                            [oldestArray removeObjectIdenticalTo:oldestEntry];
+                            if ([oldestArray count] == 0)
+                                [leasePool removeObjectForKey:oldestKey];
+                            leasePoolBytes = evictedBytes > leasePoolBytes
+                                ? 0 : leasePoolBytes - evictedBytes;
+                            freed += evictedBytes;
+                            evictedEntries++;
+                            leaseEvictCount++;
+                            if (evictedSurface) CFRelease(evictedSurface);
+                        }
+                        after = leasePoolBytes;
+                    }
+                    if (freed != 0) {
+                        dprintf(STDERR_FILENO,
+                            "#### MACWS-MEMORY-REAP pool=plain-texture "
+                            "entries=%lu freed=%luMB before=%luMB after=%luMB "
+                            "idle-age=%.0fs\n",
+                            (unsigned long)evictedEntries,
+                            (unsigned long)(freed / (1024U * 1024U)),
+                            (unsigned long)(before / (1024U * 1024U)),
+                            (unsigned long)(after / (1024U * 1024U)),
+                            minimumIdleAge);
+                    }
+                }
+            });
+            dispatch_resume(leaseReaper);
         });
 
         IOSurfaceRef surf = NULL;
@@ -12875,6 +13537,8 @@ static void macws_log_plain_texture_surface_layout(
                     // method family before another thread can inspect it.
                     CFRetain((__bridge CFTypeRef)candidate);
                     entry[@"last"] = @(leaseClock);
+                    entry[@"last_time"] = @((CFTimeInterval)
+                        clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1.0e9);
                     tex = candidate;
                     surf = (IOSurfaceRef)[entry[@"surface"] pointerValue];
                     if (macws_runtime_diagnostics_enabled()) leaseHitCount++;
@@ -12949,6 +13613,8 @@ static void macws_log_plain_texture_surface_layout(
                     entry[@"baseline"] = @(baseline);
                     entry[@"bytes"] = @(allocation);
                     entry[@"last"] = @(leaseClock);
+                    entry[@"last_time"] = @((CFTimeInterval)
+                        clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW) / 1.0e9);
                     [shapeEntries addObject:entry];
                     leasePoolBytes += allocation;
                     static NSUInteger lastPlainWitnessBucket = 0;
@@ -20241,24 +20907,32 @@ static void macws_install_stray_concrete_end_encoding(id encoder) {
 // AGXG13GFamilyCommandBuffer implements its own presentation methods instead
 // of inheriting _MTLCommandBuffer's implementations.  Hooking only the base
 // class therefore produced no cadence samples in the low-overhead production
-// profile even though the game was submitting work.  Install just these three
-// wrappers whenever present telemetry is requested.  The full render trace
-// below recognizes the same IMPs and will not wrap them twice.
+// profile even though the game was submitting work. Install these three
+// wrappers for every Metal process so a focused ordinary app can publish its
+// real presentation demand. Non-game apps take only the authorization/cadence
+// path; direct drawable publication and detailed timing remain game-gated.
+// The full render trace below recognizes the same IMPs and will not wrap them
+// twice.
 static void macws_install_stray_agx_present_trace(void) {
-    if (!macws_is_render_paced_game_process()) return;
-    // UE can present either by asking the command buffer to schedule a
-    // drawable or by calling the concrete CAMetalDrawable directly.  The
-    // low-overhead cadence witness must cover both public presentation paths;
-    // the drawable hook is installed lazily after the first nextDrawable so
-    // it records the concrete private class actually returned on this OS.
+    BOOL gameProcess = macws_is_render_paced_game_process();
+    // Metal clients can present either by asking the command buffer to
+    // schedule a drawable or by calling the concrete CAMetalDrawable
+    // directly. Chromium/ANGLE uses the latter for VS Code's WebGL surface.
+    // Cover both public presentation paths for every process; the drawable
+    // hook is installed lazily after the first nextDrawable so it records the
+    // concrete private class actually returned on this OS. Ordinary apps run
+    // only the authority/cadence path, while game publication/timing remains
+    // gated inside the drawable wrappers.
     macws_install_stray_drawable_present_trace();
     Class commandBuffer = objc_getClass("AGXG13GFamilyCommandBuffer");
     if (!commandBuffer) {
-        dprintf(STDERR_FILENO,
-            "#### STRAY-PRESENT missing AGXG13GFamilyCommandBuffer\n");
+        if (gameProcess) {
+            dprintf(STDERR_FILENO,
+                "#### STRAY-PRESENT missing AGXG13GFamilyCommandBuffer\n");
+        }
         return;
     }
-    if (macws_stray_drawable_timing_enabled()) {
+    if (gameProcess && macws_stray_drawable_timing_enabled()) {
         SEL commitSelector = sel_registerName("commit");
         Method commitMethod = class_getInstanceMethod(
             commandBuffer, commitSelector);
@@ -20309,9 +20983,11 @@ static void macws_install_stray_agx_present_trace(void) {
         SEL selector = sel_registerName(entries[i].name);
         Method method = class_getInstanceMethod(commandBuffer, selector);
         if (!method) {
-            dprintf(STDERR_FILENO,
-                "#### STRAY-PRESENT missing selector=%s class=%s\n",
-                entries[i].name, class_getName(commandBuffer));
+            if (gameProcess) {
+                dprintf(STDERR_FILENO,
+                    "#### STRAY-PRESENT missing selector=%s class=%s\n",
+                    entries[i].name, class_getName(commandBuffer));
+            }
             continue;
         }
         IMP current = method_getImplementation(method);
@@ -20325,11 +21001,13 @@ static void macws_install_stray_agx_present_trace(void) {
             Method own = class_getInstanceMethod(commandBuffer, selector);
             method_setImplementation(own, entries[i].replacement);
         }
-        dprintf(STDERR_FILENO,
-            "#### STRAY-PRESENT installed selector=%s class=%s "
-            "original=%p subclassOverride=%s types=%s\n",
-            entries[i].name, class_getName(commandBuffer),
-            (void *)current, added ? "YES" : "NO", types ?: "(nil)");
+        if (gameProcess) {
+            dprintf(STDERR_FILENO,
+                "#### STRAY-PRESENT installed selector=%s class=%s "
+                "original=%p subclassOverride=%s types=%s\n",
+                entries[i].name, class_getName(commandBuffer),
+                (void *)current, added ? "YES" : "NO", types ?: "(nil)");
+        }
     }
 }
 
@@ -22704,10 +23382,9 @@ static void install_agx_init_redirect(Class agx) {
     // patch: rendering proceeds with that texture slot UNBOUND, which
     // for placeholder bindings is exactly what we want (it's a
     // placeholder — there's no real environment map to sample).
-    {
-        unsigned int nc = 0;
-        Class *all = macws_copy_agx_driver_classes(&nc);
-        for (unsigned int side = 0; side < 2; side++) {
+    unsigned int nc = 0;
+    Class *all = macws_copy_agx_driver_classes(&nc);
+    for (unsigned int side = 0; side < 2; side++) {
             const char *sel_name = side == 0
                 ? "setFragmentTexture:atIndex:"
                 : "setVertexTexture:atIndex:";
@@ -22846,9 +23523,8 @@ static void install_agx_init_redirect(Class agx) {
             }
             fprintf(stderr, "#### MACWS_AGX_NATIVE nil-guard %s: %d class(es) wrapped\n",
                     sel_name, found);
-        }
-        free(all);
     }
+    free(all);
 
 #if !defined(__arm64e__) || !defined(LIBMACHOOK_ON_DEVICE_BUILD)
     // Swizzle AGXG13GFamilyDevice's newTextureWithDescriptor variants so the
@@ -23909,6 +24585,17 @@ __attribute__((constructor)) static void InitMetalHooks() {
     // constructor runs. Keep the AGX-init call as an idempotent fallback for
     // unusual dyld ordering, but wrap the specialization boundary first.
     macws_install_qc_desktop_function_compatibility();
+
+    // Install the public CAMetalLayer boundary before device creation.  The
+    // previous installation lived only in install_agx_init_redirect(), which
+    // is reached when Metal calls getMetalPluginClassForService. Chromium's
+    // GPU helper can acquire/present a CAMetalDrawable without taking that
+    // hook after exec, so its real WebGL presents were never observable and
+    // WindowServer remained at the 100-ms idle cadence. CAMetalLayer is a
+    // QuartzCore class already mapped by this image; the wrapper only records
+    // an authorized, window-sized drawable and otherwise forwards unchanged.
+    macws_install_stray_drawable_present_trace();
+    macws_install_chromium_layer_contents_activity();
 
     // Install the plugin-class hook unconditionally. It reads the shared
     // cached policy, which selects native AGX by default and the legacy path

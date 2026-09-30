@@ -21,7 +21,13 @@
 #define MACWS_RENDER_ACTIVITY_PATH \
     "/private/tmp/macws_render_activity"
 #define MACWS_RENDER_ACTIVITY_MAGIC 0x4d575241u /* "MWRA" */
-#define MACWS_RENDER_ACTIVITY_VERSION 1u
+#define MACWS_RENDER_ACTIVITY_LEGACY_VERSION 1u
+#define MACWS_RENDER_ACTIVITY_AUTHORITY_VERSION 2u
+#define MACWS_RENDER_ACTIVITY_VERSION 3u
+#define MACWS_RENDER_AUTHORITY_PATH \
+    "/private/tmp/macws_render_authority"
+#define MACWS_RENDER_AUTHORITY_MAGIC 0x4d575255u /* "MWRU" */
+#define MACWS_RENDER_AUTHORITY_VERSION 1u
 #define MACWS_DIRECT_DRAWABLE_ACTIVITY_PATH \
     "/private/tmp/macws_direct_drawable_activity"
 #define MACWS_DIRECT_DRAWABLE_ACTIVITY_MAGIC 0x4d574441u /* "MWDA" */
@@ -50,8 +56,43 @@ typedef struct __attribute__((packed)) {
     uint16_t size;
     uint64_t timestampNS;
     uint32_t targetPaceUS;
-    uint32_t reserved;
+    // Version 2 identifies the process which presented the real drawable.
+    // Version 1 left these bytes zero and remains accepted only as the legacy
+    // game signal during a rolling package update.
+    int32_t producerPID;
+    // Version 3 adds the monotonic count of authority-matched, window-sized
+    // presentations.  It is sampled through the existing 10-Hz activity
+    // write, so profiling can distinguish producer cadence from WindowServer
+    // and Host cadence without adding per-frame I/O or logging.
+    uint64_t presentSequence;
 } MacWSRenderActivityRecord;
+
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t size;
+    uint64_t timestampNS;
+    uint32_t targetPaceUS;
+    int32_t producerPID;
+} MacWSRenderActivityRecordV2;
+
+// displayd owns this authorization edge after matching a visible, focused
+// AppKit window to the real SkyLight layer graph. A Metal-presenting child
+// (Chromium's GPU helper, for example) may request an active compositor pace
+// only while it remains a descendant of this exact owner and its drawable
+// matches the observed window-sized IOSurface. Both producer and WindowServer
+// validate this record; freshness makes a dead displayd or focus change fail
+// closed to the cool idle cadence.
+typedef struct __attribute__((packed)) {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t size;
+    uint64_t timestampNS;
+    int32_t ownerPID;
+    uint32_t layerWindowID;
+    uint32_t width;
+    uint32_t height;
+} MacWSRenderAuthorityRecord;
 
 // macwsdisplayd publishes this only after the Host's direct-drawable
 // heartbeat has matched a live, focused SkyLight layer carrying

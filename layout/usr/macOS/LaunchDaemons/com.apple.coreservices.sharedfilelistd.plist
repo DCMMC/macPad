@@ -21,6 +21,19 @@
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<!-- The MacWS desktop currently runs as uid 0. Ventura's root user
+		     record names /var/root, while Finder persists the canonical
+		     /private/var/root spelling. CoreServicesInternal otherwise first
+		     resolves every favorite relative to /var/root, rejects that
+		     candidate because its path string is non-canonical, marks the
+		     bookmark stale, and rewrites it forever. Keep the service's own
+		     CoreFoundation home identity canonical; this changes neither the
+		     account database nor the bookmark validation result. -->
+		<key>CFFIXED_USER_HOME</key>
+		<string>/private/var/root</string>
+	</dict>
 	<key>StandardOutPath</key>
 	<string>/var/jb/var/mobile/sharedfilelistd.out</string>
 	<key>StandardErrorPath</key>

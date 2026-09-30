@@ -20,9 +20,11 @@ import time
 
 
 THRESHOLDS = {
-    "target_fps": 60.0,
-    "minimum_active_average_fps": 55.0,
-    "minimum_one_percent_low_fps": 45.0,
+    # Cadence floors are resolved from the measured panel maximum in each
+    # MacWSHost profile.  A fixed 60-fps gate made a 120-Hz iPad report PASS
+    # while missing every second refresh opportunity.
+    "minimum_active_average_fraction": 0.90,
+    "minimum_one_percent_low_fraction": 0.75,
     "maximum_input_bridge_p95_ms": 8.0,
     "maximum_input_to_visible_p95_ms": 50.0,
     "maximum_real_app_main_dispatch_p95_ms": 16.7,
@@ -33,6 +35,21 @@ THRESHOLDS = {
     "minimum_visible_interval_samples": 30,
     "minimum_input_visible_samples": 12,
 }
+
+
+def cadence_thresholds(profile):
+    target = profile.get("target", {}).get("display_maximum_fps")
+    if not isinstance(target, (int, float)) or target <= 0:
+        target = profile.get("target", {}).get("active_fps", 60.0)
+    if not isinstance(target, (int, float)) or target <= 0:
+        target = 60.0
+    return {
+        "target_fps": float(target),
+        "minimum_active_average_fps": float(target) *
+            THRESHOLDS["minimum_active_average_fraction"],
+        "minimum_one_percent_low_fps": float(target) *
+            THRESHOLDS["minimum_one_percent_low_fraction"],
+    }
 
 
 class Remote:
@@ -335,6 +352,7 @@ def score_profile(profile, *, target_pid, system_gesture=False,
                   require_system_selection=False,
                   app_input_latency=None):
     visible = profile.get("visible_presentation", {})
+    cadence_gate = cadence_thresholds(profile)
     counters = profile.get("counters", {})
     motion_source = select_motion_source(profile, target_pid, system_gesture)
     transport = profile.get("presentation_transport", {})
@@ -382,10 +400,10 @@ def score_profile(profile, *, target_pid, system_gesture=False,
         checks.update({
         "motion_active_average_fps":
             motion_metric.get("active_average_fps", 0) >=
-            THRESHOLDS["minimum_active_average_fps"],
+            cadence_gate["minimum_active_average_fps"],
         "motion_one_percent_low_fps":
             motion_metric.get("one_percent_low_fps", 0) >=
-            THRESHOLDS["minimum_one_percent_low_fps"],
+            cadence_gate["minimum_one_percent_low_fps"],
         "enough_motion_samples": frame.get("samples", 0) >=
             THRESHOLDS["minimum_visible_interval_samples"],
         "input_to_visible_p95":
@@ -433,6 +451,7 @@ def score_profile(profile, *, target_pid, system_gesture=False,
     return {
         "result": "PASS" if all(checks.values()) else "FAIL",
         "checks": checks,
+        "cadence_thresholds": cadence_gate,
         "target_source": motion_source,
         "target_direct_drawable": direct_target,
         "presentation_transport": transport,

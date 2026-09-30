@@ -803,11 +803,11 @@ static void SignalInteractionWake(void) {
     }
 }
 
-// WindowServer's coexistence completion scaffold deliberately idles at 10 Hz
-// to avoid holding the native AGX stack hot while nothing is changing.  VNC
+// WindowServer's coexistence completion scaffold deliberately uses a slow
+// static-desktop cadence to avoid holding native AGX hot. VNC
 // already publishes this boot-relative activity witness, but the iPad-native
 // Host used to leave it untouched, so a live touch/keyboard session remained
-// stuck at the idle 100-ms interval.  Publish the same transport-neutral
+// stuck at the idle interval. Publish the same transport-neutral
 // interaction timestamp from the central broker.  Writes are bounded to 120
 // Hz and happen before target probing, so even the first click selects the
 // 16.667-ms interactive interval at WindowServer's next SwapEnd boundary.

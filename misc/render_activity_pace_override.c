@@ -60,7 +60,9 @@ int main(int argc, char **argv) {
     MacWSRenderActivityRecord record = {0};
     if (pread(descriptor, &record, sizeof(record), 0) != sizeof(record) ||
         record.magic != MACWS_RENDER_ACTIVITY_MAGIC ||
-        record.version != MACWS_RENDER_ACTIVITY_VERSION ||
+        (record.version != MACWS_RENDER_ACTIVITY_VERSION &&
+         record.version != MACWS_RENDER_ACTIVITY_AUTHORITY_VERSION &&
+         record.version != MACWS_RENDER_ACTIVITY_LEGACY_VERSION) ||
         record.size != sizeof(record)) {
         fprintf(stderr, "render activity record is absent or invalid\n");
         close(descriptor);
