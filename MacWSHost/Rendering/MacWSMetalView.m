@@ -330,6 +330,12 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     int32_t _reportedFullscreenCanvasPID;
     uint32_t _reportedFullscreenCanvasWindowID;
     CGRect _reportedFullscreenCanvasPixels;
+    // Chromium has no application-declared FullscreenCanvas capability. It
+    // may still become an exact native-fullscreen canvas after its descendant
+    // IOSurface has independently joined the focused catalog window at the
+    // complete final-composite extent. Keep that runtime proof distinct so a
+    // later window-sized drawable can revoke only the inferred capability.
+    BOOL _inferredDescendantFullscreenCanvas;
     NSSet<NSNumber *> *_shadowWindowIDs;
     BOOL _directTouchUsesPrimaryDrag;
     uint64_t _surfaceTextureImports;
@@ -960,9 +966,18 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
             MacWSStreamWindowFullscreenCanvas) != 0;
         MacWSStreamWindowFlags ordinaryRequired =
             MacWSStreamWindowVisible | MacWSStreamWindowOnScreen;
+        MacWSStreamWindowFlags spaceTransitionRequired =
+            MacWSStreamWindowFocused | MacWSStreamWindowVisible |
+            MacWSStreamWindowFrontmostApplication;
+        BOOL focusedSpaceTransition = descendantProducer &&
+            !fullscreenCanvas && self.targetPID == logicalOwnerPID &&
+            self.targetWindowID == 0 && [self hasFinalCompositeFrame] &&
+            (descriptor.flags & spaceTransitionRequired) ==
+                spaceTransitionRequired;
         if (!fullscreenCanvas &&
             (!descendantProducer ||
-             (descriptor.flags & ordinaryRequired) != ordinaryRequired))
+             ((descriptor.flags & ordinaryRequired) != ordinaryRequired &&
+              !focusedSpaceTransition)))
             continue;
         if (descendantProducer && !fullscreenCanvas) {
             uint64_t widthDifference = direct.width > descriptor.pixelWidth
@@ -975,9 +990,12 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
             // not a scalable preview.  The old 20% tolerance joined a new
             // resize generation to stale window geometry and let retained
             // pixels overwrite a correct final composite.  Only tolerate
-            // backing-scale rounding at the pixel boundary.
+            // the bounded backing-scale rounding shared with displayd.
             if (descriptor.pixelWidth == 0 || descriptor.pixelHeight == 0 ||
-                widthDifference > 2u || heightDifference > 2u) continue;
+                widthDifference >
+                    MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS ||
+                heightDifference >
+                    MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS) continue;
         }
         uint64_t score = (uint64_t)descriptor.pixelWidth *
             (uint64_t)descriptor.pixelHeight;
@@ -1011,6 +1029,69 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         _reportedFullscreenCanvasWindowID = matchedWindowID;
         _reportedFullscreenCanvasPixels =
             CGRectMake(0, 0, canvasWidth, canvasHeight);
+    }
+    uint64_t canvasWidthDifference = direct.width > canvasWidth
+        ? direct.width - canvasWidth : canvasWidth - direct.width;
+    uint64_t canvasHeightDifference = direct.height > canvasHeight
+        ? direct.height - canvasHeight : canvasHeight - direct.height;
+    BOOL inferredDescendantFullscreenCanvas = descendantProducer &&
+        matchedWindowID != 0 && logicalOwnerPID == self.targetPID &&
+        self.targetWindowID == 0 && [self hasFinalCompositeFrame] &&
+        MacWSAppInputEndpointReady(logicalOwnerPID) &&
+        [identitySource isEqualToString:
+            @"focused-descendant-layer-catalog"] &&
+        canvasWidth != 0 && canvasHeight != 0 &&
+        canvasWidthDifference <=
+            MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS &&
+        canvasHeightDifference <=
+            MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS;
+    if (inferredDescendantFullscreenCanvas) {
+        if (!_inferredDescendantFullscreenCanvas ||
+            _reportedFullscreenCanvasPID != logicalOwnerPID ||
+            _reportedFullscreenCanvasWindowID != matchedWindowID) {
+            MacWSLog(@"runtime-confirmed descendant-fullscreen-canvas "
+                     "pid=%d window=%u drawable=%ux%u canvas=%ux%u "
+                     "source=strict-focused-catalog-join",
+                     logicalOwnerPID, matchedWindowID,
+                     direct.width, direct.height, canvasWidth, canvasHeight);
+        }
+        _inferredDescendantFullscreenCanvas = YES;
+        NSMutableSet<NSNumber *> *capabilities =
+            [_fullscreenCanvasPIDs mutableCopy] ?: [NSMutableSet set];
+        [capabilities addObject:@(logicalOwnerPID)];
+        _fullscreenCanvasPIDs = [capabilities copy];
+        _reportedFullscreenCanvasPID = logicalOwnerPID;
+        _reportedFullscreenCanvasWindowID = matchedWindowID;
+        _reportedFullscreenCanvasPixels =
+            CGRectMake(0, 0, canvasWidth, canvasHeight);
+    } else if (_inferredDescendantFullscreenCanvas &&
+               logicalOwnerPID == self.targetPID) {
+        BOOL explicitFullscreenCapability = NO;
+        for (MacWSStreamWindow *window in _latestWindows) {
+            MacWSStreamWindowDescriptor descriptor = window.descriptor;
+            if (descriptor.ownerPID == logicalOwnerPID &&
+                (descriptor.flags & MacWSStreamWindowFullscreenCanvas) != 0) {
+                explicitFullscreenCapability = YES;
+                break;
+            }
+        }
+        _inferredDescendantFullscreenCanvas = NO;
+        if (!explicitFullscreenCapability) {
+            NSMutableSet<NSNumber *> *capabilities =
+                [_fullscreenCanvasPIDs mutableCopy] ?: [NSMutableSet set];
+            [capabilities removeObject:@(logicalOwnerPID)];
+            _fullscreenCanvasPIDs = [capabilities copy];
+            if (_reportedFullscreenCanvasPID == logicalOwnerPID) {
+                _reportedFullscreenCanvasPID = 0;
+                _reportedFullscreenCanvasWindowID = 0;
+                _reportedFullscreenCanvasPixels = CGRectZero;
+            }
+        }
+        MacWSLog(@"descendant-fullscreen-canvas cleared pid=%d "
+                 "drawable=%ux%u canvas=%ux%u explicit=%@",
+                 logicalOwnerPID, direct.width, direct.height,
+                 canvasWidth, canvasHeight,
+                 explicitFullscreenCapability ? @"YES" : @"NO");
     }
     if (matchedWindowID != 0 && canvasWidth != 0 && canvasHeight != 0) {
         CFTimeInterval now = CACurrentMediaTime();
@@ -1448,6 +1529,7 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     _scheduledCatalystDrawableFrame = nil;
     [_catalystDrawableCompositor removeAllFrames];
     _lastDirectDrawableReceiptTime = 0.0;
+    _inferredDescendantFullscreenCanvas = NO;
     if (_directDrawableContinuousPacing) {
         _directDrawableContinuousPacing = NO;
         self.paused = YES;
@@ -3352,9 +3434,12 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
                     _directDrawableHeartbeatLayerID) {
                 focusedDirectCompositeIdentitySeen = YES;
                 if (fabs(descriptor.destinationWidth -
-                         baseCatalystFrame.record.width) > 2.0 ||
+                         baseCatalystFrame.record.width) >
+                        MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS ||
                     fabs(descriptor.destinationHeight -
-                         baseCatalystFrame.record.height) > 2.0) continue;
+                         baseCatalystFrame.record.height) >
+                        MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS)
+                    continue;
                 focusedDirectCompositeLayer = candidate;
                 break;
             }

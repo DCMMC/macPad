@@ -6,6 +6,9 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL = (ROOT / "include" / "macws_host_protocol.h").read_text()
+STREAM_PROTOCOL = (
+    ROOT / "include" / "macws_stream_protocol.h"
+).read_text()
 DISPLAYD = (ROOT / "macwsdisplayd" / "main.m").read_text()
 METAL = (ROOT / "libmachook" / "Metal_hooks.x").read_text()
 MACHOOK = (ROOT / "libmachook" / "mac_hooks.m").read_text()
@@ -146,6 +149,7 @@ class RenderActivityAuthorityContract(unittest.TestCase):
         self.assertIn(
             "client.catalogFrontmostOwnerPID = frontmostPID", catalog
         )
+
         self.assertIn(
             "client.catalogFrontmostWindowID = frontmostWindowID", catalog
         )
@@ -167,6 +171,75 @@ class RenderActivityAuthorityContract(unittest.TestCase):
             final_composite.index("RetireFocusedRenderAuthority()"),
         )
 
+    def test_fullscreen_authority_promotes_exact_canvas_destination_size(self):
+        publisher = DISPLAYD.split(
+            "static BOOL PublishFocusedRenderAuthority("
+            "MacWSTransientLayer *layer) {", 1
+        )[1].split(
+            "static BOOL PublishFocusedWindowClientAuthorityIfAvailable", 1
+        )[0]
+        for token in (
+            "client.mode == MacWSStreamModeFullscreen",
+            "client.catalogFrontmostFocused",
+            "client.catalogFrontmostOwnerPID == layer.ownerPID",
+            "client.catalogFrontmostWindowID == layer.windowID",
+            "destinationMatchesCanvas",
+            "width = canvasWidth",
+            "height = canvasHeight",
+        ):
+            self.assertIn(token, publisher)
+
+    def test_fullscreen_catalog_preserves_exact_authority_during_spaces(self):
+        client = DISPLAYD.split(
+            "@interface MacWSDisplayClient : NSObject", 1
+        )[1].split("@end", 1)[0]
+        for token in (
+            "catalogFrontmostPixelWidth",
+            "catalogFrontmostPixelHeight",
+            "catalogFrontmostFocused",
+        ):
+            self.assertIn(token, client)
+
+        fallback = DISPLAYD.split(
+            "static BOOL PublishFocusedFullscreenCatalogAuthorityIfAvailable",
+            1,
+        )[1].split("static BOOL MacWSLayerSurfaceMatchesSize", 1)[0]
+        for token in (
+            "client.mode != MacWSStreamModeFullscreen",
+            "client.catalogFrontmostFocused",
+            "client.focusedWindowOwners",
+            "PublishFocusedRenderAuthorityIdentity(",
+        ):
+            self.assertIn(token, fallback)
+
+        final_composite = DISPLAYD.split(
+            "static void SuspendFullscreenLayerCapturesForFinalComposite", 2
+        )[2].split(
+            "static void ResumeFullscreenLayerCapturesForFallback", 1
+        )[0]
+        catalog_call = (
+            "PublishFocusedFullscreenCatalogAuthorityIfAvailable()"
+        )
+        self.assertIn(catalog_call, final_composite)
+        self.assertLess(
+            final_composite.index(catalog_call),
+            final_composite.index("RetireFocusedRenderAuthority()"),
+        )
+
+    def test_host_and_displayd_share_strict_rounding_bound(self):
+        self.assertIn(
+            "#define MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS 4u",
+            STREAM_PROTOCOL,
+        )
+        host = (ROOT / "MacWSHost" / "Rendering" /
+                "MacWSMetalView.m").read_text()
+        self.assertIn(
+            "MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS", host
+        )
+        self.assertIn(
+            "MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS", DISPLAYD
+        )
+
     def test_focused_window_direct_suspends_redundant_capture_and_pacing(self):
         validator = DISPLAYD.split(
             "static BOOL ValidateDirectDrawableWindowBase(", 1
@@ -176,8 +249,7 @@ class RenderActivityAuthorityContract(unittest.TestCase):
             "client.windowID != layerWindowID",
             "client.catalogFrontmostWindowID != layerWindowID",
             "client.catalogFrontmostOwnerPID != ownerPID",
-            "widthDifference > 2u",
-            "heightDifference > 2u",
+            "MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS",
         ):
             self.assertIn(token, validator)
         self.assertIn("BOOL ownsBaseSuspension", validator)
@@ -313,8 +385,9 @@ class RenderActivityAuthorityContract(unittest.TestCase):
         callback = view.split(
             "- (void)catalystDrawableDidPresent:", 1
         )[1].split("- (NSString *)exportCatalystDrawableProbeForPID:", 1)[0]
-        self.assertIn("widthDifference > 2u", callback)
-        self.assertIn("heightDifference > 2u", callback)
+        self.assertIn(
+            "MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS", callback
+        )
         self.assertIn("direct-drawable-authority-cleared", callback)
         self.assertIn("[_streamClient clearDirectDrawableActivity]", callback)
         self.assertIn("BOOL geometryChanged", callback)
@@ -518,8 +591,7 @@ class RenderActivityAuthorityContract(unittest.TestCase):
             'rejectionReason = @"catalog-size"',
             "layer.catalogPixelWidth",
             "layer.catalogPixelHeight",
-            "widthDifference > 2u",
-            "heightDifference > 2u",
+            "MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS",
         ):
             self.assertIn(token, validator)
         self.assertNotIn("widthDifference * 5u", validator)
@@ -575,6 +647,7 @@ class RenderActivityAuthorityContract(unittest.TestCase):
         direct = destination.split("if (directWindowAuthority)", 1)[1]
         direct = direct.split("return CGRectMake(\n", 2)[1]
         self.assertNotIn("IOSurfaceGetWidth(layer.latestSurface)", direct)
+
         self.assertNotIn("IOSurfaceGetHeight(layer.latestSurface)", direct)
 
         handler = DISPLAYD.split(
@@ -587,6 +660,54 @@ class RenderActivityAuthorityContract(unittest.TestCase):
         self.assertIn(
             "explicitFullscreen || catalogCoversDesktop", handler
         )
+
+    def test_descendant_full_canvas_requires_strict_catalog_join(self):
+        callback = (ROOT / "MacWSHost" / "Rendering" /
+                    "MacWSMetalView.m").read_text().split(
+            "- (void)catalystDrawableDidPresent:", 1
+        )[1].split("- (NSString *)exportCatalystDrawableProbeForPID:", 1)[0]
+        for token in (
+            "inferredDescendantFullscreenCanvas = descendantProducer",
+            "matchedWindowID != 0",
+            "logicalOwnerPID == self.targetPID",
+            "self.targetWindowID == 0",
+            "[self hasFinalCompositeFrame]",
+            "MacWSAppInputEndpointReady(logicalOwnerPID)",
+            '@"focused-descendant-layer-catalog"',
+            "MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS",
+            "[capabilities addObject:@(logicalOwnerPID)]",
+            "[capabilities removeObject:@(logicalOwnerPID)]",
+            "_reportedFullscreenCanvasPixels =",
+        ):
+            self.assertIn(token, callback)
+
+    def test_native_space_transition_recovers_exact_focused_direct_authority(self):
+        catalog = DISPLAYD.split(
+            "static void SendWindowList(MacWSDisplayClient *client) {", 1
+        )[1].split("static void BroadcastWindowList", 1)[0]
+        self.assertIn("transitionCandidateCount == 1", catalog)
+        self.assertIn("workspaceFrontmost.processIdentifier", catalog)
+        self.assertIn("client.focusedWindowOwners[@(windowID)]", catalog)
+        self.assertIn("MacWSStreamWindowFocused | MacWSStreamWindowVisible", catalog)
+        self.assertIn("runtime-confirmed fullscreen-space-catalog-authority", catalog)
+
+        validator = DISPLAYD.split(
+            "static MacWSTransientLayer *ValidatedDirectDrawableLayer(", 1
+        )[1].split("static BOOL ValidateDirectDrawableWindowBase", 1)[0]
+        self.assertIn("BOOL focusedSpaceTransition", validator)
+        self.assertIn("MacWSStreamWindowFrontmostApplication", validator)
+        self.assertIn("client.catalogFrontmostFocused", validator)
+        self.assertIn("client.catalogFrontmostWindowID == layerWindowID", validator)
+
+        view = (ROOT / "MacWSHost" / "Rendering" /
+                "MacWSMetalView.m").read_text()
+        callback = view.split(
+            "- (void)catalystDrawableDidPresent:", 1
+        )[1].split("- (NSString *)exportCatalystDrawableProbeForPID:", 1)[0]
+        self.assertIn("BOOL focusedSpaceTransition", callback)
+        self.assertIn("self.targetWindowID == 0", callback)
+        self.assertIn("[self hasFinalCompositeFrame]", callback)
+        self.assertIn("MacWSStreamWindowFrontmostApplication", callback)
 
     def test_geometry_motion_temporarily_restores_desktop_compositor(self):
         publisher = DISPLAYD.split(

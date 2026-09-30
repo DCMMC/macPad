@@ -33,6 +33,14 @@
 #define MACWS_STREAM_MAX_WINDOWS 256u
 #define MACWS_STREAM_MAX_DAMAGE_RECTS 64u
 #define MACWS_STREAM_MAX_LAYER_GEOMETRY 64u
+// AppKit window bounds are expressed in logical points while Chromium's
+// completed drawable is already in backing pixels.  During a native
+// fullscreen transition the two independently rounded edges can differ by
+// two logical points on a 2x display.  Keep one shared, pixel-sized bound at
+// every consumer so Host and displayd cannot disagree about the same exact
+// window generation.  This remains deliberately far below a resize-scale
+// tolerance: a genuine geometry change must wait for a matching catalog.
+#define MACWS_DIRECT_DRAWABLE_GEOMETRY_TOLERANCE_PIXELS 4u
 #define MACWS_WINDOW_METRICS_MAGIC 0x4d57474du /* "MWGM" */
 #define MACWS_WINDOW_METRICS_VERSION 3u
 #define MACWS_WINDOW_METRICS_V2_ENTRY_SIZE 20u

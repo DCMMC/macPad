@@ -154,6 +154,7 @@ static void MacWSLogUnityNGUIInputState(const char *phase);
 static BOOL MacWSWindowPresentationIsOnScreen(id window,
                                               BOOL *knownOut);
 static id MacWSPresentingWindow(id window, id application);
+static char MacWSTransientWindowAssociationKey;
 static id MacWSRootPresentingWindow(id window, id application);
 static BOOL MacWSRuntimeDiagnosticsEnabled(void);
 static int MacWSWorkspaceWillSleepToken = -1;
@@ -8051,27 +8052,86 @@ static void MacWSHandleOpenDocuments(MacWSInputRecord record,
 }
 
 static void MacWSHandlePerformQuit(id application) {
-    // RE-confirmed via the live Ventura 13.4 AppKit image on the target:
-    // -[NSApplication(NSAppleEventHandling) _handleAEQuit] is the no-argument
-    // method at unslid 0x183a34b78. Its control flow asks
-    // NSAppleEventManager for the current event, resolves targetForAction:,
-    // calls _shouldTerminate, and schedules
-    // _terminateFromSender:askIfShouldTerminate:saveWindows:. Entering here
-    // restores the exact AppKit lifecycle that Dock's failed aevt/quit would
-    // have delivered; it does not force a disabled NSMenuItem or signal the
-    // process. A nil current AppleEvent takes AppKit's ordinary default quit
-    // reason while preserving delegate/document cancellation.
-    SEL handleQuit = sel_registerName("_handleAEQuit");
+    // PerformQuit is already the semantic replacement for a menu/Dock quit
+    // command which could not cross the chroot AppleEvent boundary.  Do not
+    // enter AppKit's private _handleAEQuit without a current AppleEvent:
+    // runtime-confirmed with Maps on iPad13,6, that path returned without
+    // terminating even though the record reached this process.  The public
+    // NSApplication action is the normal cooperative lifecycle entry and
+    // still preserves delegate/document save and cancellation decisions.
+    // It is also the same route proven by the last-window close fallback.
+    SEL terminate = sel_registerName("terminate:");
     BOOL supported = application && ((MacWSMsgBoolSEL)objc_msgSend)(
-        application, sel_registerName("respondsToSelector:"), handleQuit);
-    int16_t status = supported
-        ? ((int16_t (*)(id, SEL))objc_msgSend)(application, handleQuit)
-        : INT16_MIN;
+        application, sel_registerName("respondsToSelector:"), terminate);
+    // Remember only a transient which existed before the quit request. Maps'
+    // first-run What's New panel is application-modal; Ventura's public
+    // terminate: waits for that panel indefinitely in this chroot, so both
+    // menu-bar and Dock quit appear to do nothing. Never select a primary
+    // document window or a save panel created by the termination attempt.
+    // performClose: remains delegate-vetoable, and we retry quit only after
+    // AppKit confirms that exact auxiliary window is no longer visible.
+    SEL modalWindowSelector = sel_registerName("modalWindow");
+    id auxiliaryWindow = application && ((MacWSMsgBoolSEL)objc_msgSend)(
+        application, sel_registerName("respondsToSelector:"),
+        modalWindowSelector)
+        ? ((MacWSMsgID)objc_msgSend)(application, modalWindowSelector) : nil;
+    if (auxiliaryWindow && !((MacWSMsgBool)objc_msgSend)(
+            auxiliaryWindow, sel_registerName("isVisible")))
+        auxiliaryWindow = nil;
+    id keyWindow = application ? ((MacWSMsgID)objc_msgSend)(
+        application, sel_registerName("keyWindow")) : nil;
+    NSArray *windows = application ? ((MacWSMsgID)objc_msgSend)(
+        application, sel_registerName("windows")) : nil;
+    for (id candidate in (auxiliaryWindow ? @[] : windows)) {
+        BOOL visible = ((MacWSMsgBool)objc_msgSend)(
+            candidate, sel_registerName("isVisible"));
+        NSNumber *publishedTransient = objc_getAssociatedObject(
+            candidate, &MacWSTransientWindowAssociationKey);
+        if (!visible ||
+            (!publishedTransient.boolValue &&
+             !MacWSPresentingWindow(candidate, application)))
+            continue;
+        auxiliaryWindow = candidate;
+        if (candidate == keyWindow) break;
+    }
+    // Close a preexisting application-modal panel before entering terminate:.
+    // Calling terminate: first can enter a nested loop which services neither
+    // this endpoint nor main-queue recovery work. The two public AppKit
+    // actions in this order are runtime-proven with Maps; either delegate may
+    // still veto, and a primary/document window is never touched.
+    if (supported && auxiliaryWindow) {
+        SEL performClose = sel_registerName("performClose:");
+        BOOL canClose = ((MacWSMsgBoolSEL)objc_msgSend)(
+            auxiliaryWindow, sel_registerName("respondsToSelector:"),
+            performClose);
+        if (!canClose) return;
+        ((MacWSMsgVoidID)objc_msgSend)(
+            auxiliaryWindow, performClose, nil);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     150 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            BOOL closeCommitted = !((MacWSMsgBool)objc_msgSend)(
+                auxiliaryWindow, sel_registerName("isVisible"));
+            fprintf(stderr,
+                "#### APP-INPUT PERFORM-QUIT-AUXILIARY pid=%d "
+                "class=%s close-committed=%s retry=%s\n",
+                getpid(), object_getClassName(auxiliaryWindow),
+                closeCommitted ? "YES" : "NO",
+                closeCommitted ? "YES" : "NO");
+            fflush(stderr);
+            if (closeCommitted)
+                ((MacWSMsgVoidID)objc_msgSend)(
+                    application, terminate, nil);
+        });
+        return;
+    }
     fprintf(stderr,
-        "#### APP-INPUT PERFORM-QUIT pid=%d route=AppKit-AE "
-        "supported=%s status=%d\n",
-        getpid(), supported ? "YES" : "NO", status);
+        "#### APP-INPUT PERFORM-QUIT pid=%d "
+        "route=NSApplication.terminate supported=%s\n",
+        getpid(), supported ? "YES" : "NO");
     fflush(stderr);
+    if (supported)
+        ((MacWSMsgVoidID)objc_msgSend)(application, terminate, nil);
 }
 
 static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
@@ -11310,6 +11370,56 @@ static void *MacWSAppInputThread(void *unused) {
                 0.0, (MacWSInputUptimeSeconds() - record.timestamp) * 1.0e6);
             record.reserved = (uint32_t)fmin(transportUS, UINT32_MAX);
         }
+        // A semantic quit can arrive while an application is inside an
+        // application-modal panel loop. Runtime evidence from Maps' first-run
+        // What's New panel showed that a CFRunLoopPerformBlock token queued in
+        // the background thread's snapshot of the main-loop mode remained
+        // pending indefinitely: RX completed, but the unconditional
+        // PERFORM-QUIT main-thread witness never appeared. libdispatch's main
+        // queue is serviced by AppKit in that nested loop (and is already the
+        // proven route for accepted menu actions), so deliver this one
+        // application-scoped control command there directly. Do not also put
+        // it in the input FIFO; pointer/key ordering is irrelevant once the
+        // user has requested application termination, and duplicate delivery
+        // could run termination delegates twice.
+        if (record.kind == MacWSInputKindPerformQuit) {
+            CFRunLoopRef mainRunLoop = CFRunLoopGetMain();
+            __block BOOL delivered = NO;
+            void (^deliverOnce)(void) = ^{
+                if (delivered) return;
+                delivered = YES;
+                @autoreleasepool {
+                    MacWSPostInputOnMainThread(record);
+                }
+            };
+            dispatch_async(dispatch_get_main_queue(), deliverOnce);
+            // NSApplication's application-modal and native event-tracking
+            // loops are deliberately not members of the default/common mode
+            // sets on every macOS release. Register the same guarded block in
+            // those documented AppKit modes. Every copy executes on the main
+            // thread and shares delivered, so at most one lifecycle request
+            // reaches the application even if several modes subsequently run.
+            if (mainRunLoop) {
+                CFStringRef activeMode =
+                    CFRunLoopCopyCurrentMode(mainRunLoop);
+                if (activeMode)
+                    CFRunLoopPerformBlock(
+                        mainRunLoop, activeMode, deliverOnce);
+                CFRunLoopPerformBlock(
+                    mainRunLoop, kCFRunLoopDefaultMode, deliverOnce);
+                CFRunLoopPerformBlock(
+                    mainRunLoop, kCFRunLoopCommonModes, deliverOnce);
+                CFRunLoopPerformBlock(
+                    mainRunLoop, CFSTR("NSModalPanelRunLoopMode"),
+                    deliverOnce);
+                CFRunLoopPerformBlock(
+                    mainRunLoop, CFSTR("NSEventTrackingRunLoopMode"),
+                    deliverOnce);
+                if (activeMode) CFRelease(activeMode);
+                CFRunLoopWakeUp(mainRunLoop);
+            }
+            continue;
+        }
         // During a real NSControl tracking loop the main thread is synchronous
         // inside sendEvent(mouseDown), and that private tracker does not run
         // our CFRunLoop common-mode drain. NSApplication documents subthread
@@ -11670,6 +11780,16 @@ static void MacWSPublishWindowMetrics(void) {
         BOOL visible = orderedVisible && windowLevel == 0;
         id presentingWindow = MacWSPresentingWindow(window, application);
         BOOL transient = presentingWindow != nil;
+        // Retain the exact object-level classification used by the published
+        // catalog. During an application-modal loop AppKit can temporarily
+        // change mainWindow/modalWindow before a semantic quit is drained;
+        // recomputing then made Maps' already-published transient look like a
+        // primary window and entered terminate:'s non-returning modal path.
+        // Associations die with the NSWindow and are refreshed on every
+        // metrics generation, so no PID/title/geometry guess is involved.
+        objc_setAssociatedObject(
+            window, &MacWSTransientWindowAssociationKey,
+            transient ? @YES : nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         SEL hasShadowSelector = sel_registerName("hasShadow");
         BOOL hasShadow = visible &&
             ((MacWSMsgBoolSEL)objc_msgSend)(
