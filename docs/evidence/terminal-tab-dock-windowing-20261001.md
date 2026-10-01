@@ -94,6 +94,32 @@ all-black surface after the respring, so this run does not claim a new
 screenshot witness; the native controller's `presented=NO`
 completion and the unchanged `1134x824` model are the runtime witnesses.
 
+## Follow-up: stock Files parity (2026-10-02)
+
+The first retained-assertion policy still required the complete native
+`screenEdgePadding` above the Dock before considering a Host frame able to
+coexist. A full iPadOS capture showed Files and the Dock coexisting, then a
+diagnostic-only same-calculator witness measured the stock Files geometry
+without inferring it from pixels:
+
+```text
+1790870982.200 item-layout-stock-witness bundle=com.apple.DocumentsApp scene=sceneID:com.apple.DocumentsApp-191BD95C-D57F-4DAE-BA5B-98C735C3D5E8 role=1 frame={{106, 24.5}, {1177, 807}} dock-height=114.5 container={{0, 0}, {1389, 970}} edge-padding=24.0 scale=2.0 prefers-dock-hidden=NO skip=YES
+```
+
+The comparable Host case was `1134x824`. With `dockTop=970-114.5=855.5`
+and the 24-point top boundary, it still has 7.5 points between its bottom and
+the Dock. Requiring another full 24 points therefore hid the Dock 16.5 points
+too early.
+
+The corrected policy preserves the native 24-point gap when it fits, then
+allows only that empty gap to contract to a floor of eight physical pixels
+(4 points at this screen's 2x scale). At `824` points high it chooses the full
+available 7.5-point gap and translates the unchanged frame to `y=24`; it does
+not resize the Scene. At heights where fewer than eight physical pixels
+remain, the retained native Dock assertion still provides collision-free
+behavior. The temporary all-item geometry logger was removed after collecting
+the witness.
+
 ## Regression contracts
 
 `misc/test_terminal_tab_dock_contract.py` enforces that:

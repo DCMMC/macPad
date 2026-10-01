@@ -2096,7 +2096,8 @@ static NSArray<NSNumber *> *MacWSDenseCandidates(NSArray<NSNumber *> *source,
 // would merely hide macOS pixels behind a blank strip inside the wrong frame.
 static CGRect MacWSHostFrameAvoidingFloatingDock(
         CGRect frame, CGRect containerBounds, CGFloat floatingDockHeight,
-        CGFloat screenEdgePadding, NSString *sceneIdentifier) {
+        CGFloat screenEdgePadding, CGFloat screenScale,
+        NSString *sceneIdentifier) {
     if (!sceneIdentifier.length || CGRectIsEmpty(frame) ||
         CGRectIsEmpty(containerBounds)) return frame;
 
@@ -2143,12 +2144,22 @@ static CGRect MacWSHostFrameAvoidingFloatingDock(
     CGFloat padding = isfinite(screenEdgePadding) &&
         screenEdgePadding > 0.0 ? screenEdgePadding : 0.0;
     CGFloat topBoundary = CGRectGetMinY(containerBounds) + padding;
-    // Preserve the same native edge padding below the window instead of
-    // placing its border exactly against the Dock's layout boundary. The
-    // latter was visibly perceived as overlap in the 2778x1940 composite at
-    // 1790869047 even though its numeric maxY equalled 855.5 exactly.
-    CGFloat translatedY = dockTop - padding - frame.size.height;
-    BOOL canFitWithDock = translatedY >= topBoundary;
+    // Runtime-confirmed on iPad13,6/20D67 at 1790870982.200: Files receives
+    // frame {{106,24.5},{1177,807}} with dockTop=855.5 and the native 24pt
+    // edge padding. The former Host rule required that full 24pt even for a
+    // slightly taller 824pt frame, so it hid the Dock although 7.5pt of real
+    // separation remained. Preserve the full native gap whenever possible,
+    // then compress only that gap down to eight physical pixels. Never allow
+    // the zero-gap contact that was visibly reported as overlap, and never
+    // shrink the user's authoritative frame.
+    CGFloat effectiveScale = isfinite(screenScale) && screenScale > 0.0
+        ? screenScale : UIScreen.mainScreen.scale;
+    if (!isfinite(effectiveScale) || effectiveScale <= 0.0)
+        effectiveScale = 2.0;
+    CGFloat minimumDockGap = 8.0 / effectiveScale;
+    CGFloat availableDockGap =
+        dockTop - topBoundary - frame.size.height;
+    BOOL canFitWithDock = availableDockGap + 0.5 >= minimumDockGap;
     if (hasYieldAssertion) {
         // While the assertion is active the live Dock height is normally 0.
         // Keep the user's frame untouched. Once their resized height can fit
@@ -2160,9 +2171,12 @@ static CGRect MacWSHostFrameAvoidingFloatingDock(
         return frame;
     }
 
-    CGFloat safeBottom = dockTop - padding;
+    CGFloat safeBottom = dockTop - minimumDockGap;
     if (CGRectGetMaxY(frame) <= safeBottom + 0.5) return frame;
     if (canFitWithDock) {
+        CGFloat dockGap = MIN(padding, MAX(minimumDockGap,
+                                           availableDockGap));
+        CGFloat translatedY = dockTop - dockGap - frame.size.height;
         frame.origin.y = translatedY;
     } else {
         // The requested size cannot fit between the native top margin and the
@@ -2396,7 +2410,7 @@ overlappingModelBeforeDragging:(id)overlappingModelBeforeDragging
                 NSSelectorFromString(@"screenEdgePadding"));
             frame = MacWSHostFrameAvoidingFloatingDock(
                 frame, containerBounds, floatingDockHeight,
-                screenEdgePadding, scene);
+                screenEdgePadding, screenScale, scene);
             if (!CGRectEqualToRect(originalFrame, frame)) {
                 MacWSWindowingLogLine([NSString stringWithFormat:
                     @"item-layout-dock-avoidance scene=%@ dock-height=%.1f container=%@ original=%@ result=%@",

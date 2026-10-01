@@ -45,13 +45,14 @@ class FloatingDockGeometryContract(unittest.TestCase):
     def test_helper_keeps_final_frame_inside_live_dock_exclusion(self):
         helper = body(WINDOWING, "static CGRect MacWSHostFrameAvoidingFloatingDock(")
         self.assertIn("CGRectGetMaxY(containerBounds) - floatingDockHeight", helper)
-        self.assertIn("safeBottom = dockTop - padding", helper)
-        self.assertIn("translatedY = dockTop - padding - frame.size.height", helper)
+        self.assertIn("safeBottom = dockTop - minimumDockGap", helper)
+        self.assertIn("translatedY = dockTop - dockGap - frame.size.height", helper)
         self.assertIn("frame.origin.y = translatedY", helper)
         self.assertNotIn("frame.size.height =", helper)
         self.assertNotIn("prefersDockHidden", helper)
         self.assertNotIn("return CGRectIntegral(frame)", helper)
-        self.assertIn("translatedY >= topBoundary", helper)
+        self.assertIn("dockTop - topBoundary - frame.size.height", helper)
+        self.assertIn("canFitWithDock", helper)
         self.assertIn("MacWSRequestFloatingDockYield(sceneIdentifier, frame)", helper)
 
     def test_only_exact_host_item_is_adjusted_after_stock_calculation(self):
@@ -113,10 +114,14 @@ class FloatingDockGeometryContract(unittest.TestCase):
             WINDOWING,
         )
 
-    def test_translation_preserves_native_padding_above_visible_dock(self):
+    def test_translation_adapts_gap_without_touching_or_resizing(self):
         helper = body(WINDOWING, "static CGRect MacWSHostFrameAvoidingFloatingDock(")
-        self.assertIn("dockTop - padding - frame.size.height", helper)
+        self.assertIn("minimumDockGap = 8.0 / effectiveScale", helper)
+        self.assertIn("availableDockGap", helper)
+        self.assertIn("MIN(padding, MAX(minimumDockGap", helper)
+        self.assertIn("dockTop - dockGap - frame.size.height", helper)
         self.assertIn("topBoundary", helper)
+        self.assertNotIn("frame.size.height =", helper)
 
 
 if __name__ == "__main__":
