@@ -27,6 +27,7 @@
 #include <objc/runtime.h>
 
 #include "macws_host_protocol.h"
+#include "macws_text_input.h"
 
 typedef uint32_t CGDirectDisplayID;
 typedef uint32_t CGEventType;
@@ -190,8 +191,8 @@ static bool IsNativeKeyboardProxyRecord(const MacWSInputRecord *record) {
     uint32_t modifiers = MacWSInputModifiersForScene(record->sceneID);
     return record->source == MacWSInputSourceHardwareKeyboard ||
         (record->source == MacWSInputSourceSoftwareKeyboard &&
-         (record->contactID >= 0xff00u ||
-          (modifiers & (0x40000u | 0x80000u | 0x100000u)) != 0));
+         MacWSSoftwareKeyRequiresNativeProxy(
+             record->contactID, modifiers));
 }
 
 static bool RecordIsValid(const MacWSInputRecord *record) {

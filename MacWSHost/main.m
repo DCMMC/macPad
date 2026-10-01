@@ -45,6 +45,7 @@
 #include "macws_control_protocol.h"
 #include "macws_catalyst_drawable_protocol.h"
 #include "macws_host_protocol.h"
+#include "macws_text_input.h"
 #include "macws_touch_policy.h"
 #include "macws_viewport_math.h"
 #include "macws_window_configuration.h"
@@ -1511,8 +1512,10 @@ typedef void (^MacWSCompactMenuSelection)(MacWSMenuItem *item);
     UIButton *_keyboardButton;
     UIButton *_retryStartupButton;
     UITextField *_keyboardProxy;
+    BOOL _keyboardProxyResetting;
     UIView *_softwareKeyBar;
     NSLayoutConstraint *_softwareKeyBarHeightConstraint;
+    NSLayoutConstraint *_softwareKeyBarTrailingConstraint;
     UITextField *_appSearchField;
     NSArray<UIButton *> *_softModifierButtons;
     uint32_t _softModifiers;
@@ -1895,9 +1898,18 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     scroll.showsHorizontalScrollIndicator = NO;
     [scroll addSubview:stack];
     [input addSubview:scroll];
+    UILayoutGuide *inputSafe = input.safeAreaLayoutGuide;
+    _softwareKeyBarTrailingConstraint =
+        [scroll.trailingAnchor constraintEqualToAnchor:inputSafe.trailingAnchor
+                                               constant:-72];
     [NSLayoutConstraint activateConstraints:@[
-        [scroll.leadingAnchor constraintEqualToAnchor:input.leadingAnchor],
-        [scroll.trailingAnchor constraintEqualToAnchor:input.trailingAnchor],
+        [scroll.leadingAnchor constraintEqualToAnchor:inputSafe.leadingAnchor],
+        // iPadOS keeps its hardware-keyboard/input-method switcher in the
+        // bottom-trailing corner. That system-owned control does not always
+        // contribute a safe-area inset, so leave a bounded lane for it. The
+        // MacWS keys remain horizontally scrollable in narrow Stage Manager
+        // windows instead of becoming unreachable underneath the switcher.
+        _softwareKeyBarTrailingConstraint,
         [scroll.topAnchor constraintEqualToAnchor:input.topAnchor],
         [scroll.bottomAnchor constraintEqualToAnchor:input.bottomAnchor],
         [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:8],
@@ -2500,6 +2512,9 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     [NSNotificationCenter.defaultCenter addObserver:self
         selector:@selector(nativeSceneOcclusionDidChange:)
         name:MacWSSceneOcclusionChangedNotification object:nil];
+    [NSNotificationCenter.defaultCenter addObserver:self
+        selector:@selector(systemKeyboardFrameDidChange:)
+        name:UIKeyboardWillChangeFrameNotification object:nil];
 
     _metalView = [[MacWSMetalView alloc] initWithFrame:CGRectZero];
     _metalView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -2747,12 +2762,16 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     _keyboardProxy.translatesAutoresizingMaskIntoConstraints = NO;
     _keyboardProxy.delegate = self;
     _keyboardProxy.text = @" ";
-    _keyboardProxy.autocorrectionType = UITextAutocorrectionTypeNo;
+    _keyboardProxy.keyboardType = UIKeyboardTypeDefault;
+    _keyboardProxy.autocorrectionType = UITextAutocorrectionTypeDefault;
     _keyboardProxy.autocapitalizationType = UITextAutocapitalizationTypeNone;
     _keyboardProxy.smartDashesType = UITextSmartDashesTypeNo;
     _keyboardProxy.smartQuotesType = UITextSmartQuotesTypeNo;
     _keyboardProxy.spellCheckingType = UITextSpellCheckingTypeNo;
     _keyboardProxy.alpha = 0.01;
+    [_keyboardProxy addTarget:self
+                       action:@selector(keyboardProxyEditingChanged:)
+             forControlEvents:UIControlEventEditingChanged];
     [root addSubview:_keyboardProxy];
     // The modifier row belongs to the MacWS window layout, not to the floating
     // iPad keyboard. Giving it an explicit 52-point region prevents it from
@@ -3982,13 +4001,71 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     }];
 }
 
+- (void)resetKeyboardProxyBuffer {
+    if (!_keyboardProxy) return;
+    _keyboardProxyResetting = YES;
+    _keyboardProxy.text = @" ";
+    UITextPosition *end = _keyboardProxy.endOfDocument;
+    if (end) {
+        _keyboardProxy.selectedTextRange =
+            [_keyboardProxy textRangeFromPosition:end toPosition:end];
+    }
+    _keyboardProxyResetting = NO;
+}
+
+- (void)systemKeyboardFrameDidChange:(NSNotification *)notification {
+    if (!_softwareKeyBarTrailingConstraint || !self.isViewLoaded) return;
+    NSValue *frameValue = notification.userInfo[UIKeyboardFrameEndUserInfoKey];
+    if (![frameValue isKindOfClass:NSValue.class]) return;
+    CGRect keyboardFrame = [frameValue CGRectValue];
+    CGRect localFrame = [self.view convertRect:keyboardFrame fromView:nil];
+    CGRect overlap = CGRectIntersection(self.view.bounds, localFrame);
+    BOOL fullWidthSoftwareKeyboard = !CGRectIsNull(overlap) &&
+        !CGRectIsEmpty(overlap) && overlap.size.height > 100.0 &&
+        overlap.size.width >= self.view.bounds.size.width * 0.75;
+    // A docked software keyboard already owns the complete lower edge. With
+    // Magic Keyboard (or a floating keyboard), iPadOS instead leaves its
+    // compact input-method control over the bottom-right of the app window.
+    // Reserve only that trailing lane; keeping the bar itself pinned to the
+    // root bottom avoids introducing a visible strip below macOS content.
+    _softwareKeyBarTrailingConstraint.constant =
+        fullWidthSoftwareKeyboard ? 0.0 : -72.0;
+}
+
+- (void)keyboardProxyEditingChanged:(UITextField *)textField {
+    if (textField != _keyboardProxy || _keyboardProxyResetting) return;
+    NSString *buffer = textField.text ?: @"";
+    BOOL beginsWithSentinel = [buffer hasPrefix:@" "];
+    BOOL hasMarkedText = textField.markedTextRange != nil;
+    MacWSKeyboardProxyEditAction action = MacWSClassifyKeyboardProxyEdit(
+        buffer.length, beginsWithSentinel, hasMarkedText);
+    if (action == MacWSKeyboardProxyEditAwaitingComposition ||
+        action == MacWSKeyboardProxyEditIdle) return;
+    if (action == MacWSKeyboardProxyEditCommitText) {
+        NSString *committed = beginsWithSentinel
+            ? [buffer substringFromIndex:1] : buffer;
+        if (committed.length) {
+            [_metalView emitSoftwareText:committed modifiers:_softModifiers];
+            MacWSDiagnosticLog(@"software-text-commit utf16=%lu target=%d "
+                "window=%u input-mode=%@",
+                (unsigned long)committed.length, _windowOwnerPID, _windowID,
+                textField.textInputMode.primaryLanguage ?: @"unknown");
+        }
+    }
+    [self resetKeyboardProxyBuffer];
+}
+
 - (void)keyboardAction {
     if (_keyboardProxy.isFirstResponder) {
+        if (_keyboardProxy.markedTextRange) {
+            [_keyboardProxy unmarkText];
+            [self keyboardProxyEditingChanged:_keyboardProxy];
+        }
         [_keyboardProxy resignFirstResponder];
         [self setButton:_keyboardButton title:@"打开虚拟键盘"
                    image:@"keyboard"];
     } else {
-        _keyboardProxy.text = @" ";
+        [self resetKeyboardProxyBuffer];
         if ([_keyboardProxy becomeFirstResponder]) {
             _metalView.softwareKeyboardActive = YES;
             [self setButton:_keyboardButton title:@"收起虚拟键盘"
@@ -3999,6 +4076,12 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 
 - (void)textFieldDidBeginEditing:(UITextField *)textField {
     if (textField != _keyboardProxy) return;
+    if (MacWSClassifyKeyboardProxyEdit(
+            textField.text.length, [textField.text hasPrefix:@" "],
+            textField.markedTextRange != nil) ==
+            MacWSKeyboardProxyEditRestoreSentinel) {
+        [self resetKeyboardProxyBuffer];
+    }
     _metalView.softwareKeyboardActive = YES;
     _softwareKeyBar.hidden = NO;
     _softwareKeyBarHeightConstraint.constant = 52;
@@ -4011,6 +4094,8 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 
 - (void)textFieldDidEndEditing:(UITextField *)textField {
     if (textField != _keyboardProxy) return;
+    if (textField.markedTextRange) [textField unmarkText];
+    [self keyboardProxyEditingChanged:textField];
     _metalView.softwareKeyboardActive = NO;
     _softwareKeyBarHeightConstraint.constant = 0;
     [UIView animateWithDuration:0.20 animations:^{
@@ -4050,15 +4135,28 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
                 replacementString:(NSString *)string {
     (void)range;
     if (textField != _keyboardProxy) return YES;
-    if (string.length == 0)
+    if (textField.markedTextRange) return YES;
+    BOOL deletesSentinel = string.length == 0 &&
+        [textField.text isEqualToString:@" "] &&
+        range.location == 0 && range.length == 1;
+    if (deletesSentinel) {
         [_metalView emitSoftwareKeySym:0xff08 modifiers:_softModifiers];
-    else
-        [_metalView emitSoftwareText:string modifiers:_softModifiers];
-    return NO;
+        return NO;
+    }
+    // Let UIKit mutate its real text-input client. While a Chinese/Japanese
+    // IME owns markedTextRange, editingChanged waits without forwarding the
+    // composing Latin letters. Once the candidate is committed and the marked
+    // range disappears, keyboardProxyEditingChanged: forwards only the final
+    // text to the exact AppKit window/caret and restores the sentinel.
+    return YES;
 }
 
 - (BOOL)textFieldShouldReturn:(UITextField *)textField {
     if (textField == _keyboardProxy) {
+        if (textField.markedTextRange) {
+            [textField unmarkText];
+            [self keyboardProxyEditingChanged:textField];
+        }
         [_metalView emitSoftwareKeySym:0xff0d modifiers:_softModifiers];
         return NO;
     }

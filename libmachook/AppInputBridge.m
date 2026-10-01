@@ -34,6 +34,7 @@
 #import "macws_power_lifecycle.h"
 #import "macws_menu_protocol.h"
 #import "macws_stream_protocol.h"
+#import "macws_text_input.h"
 #import "macws_window_configuration.h"
 #import "MacWSCatalystInputPolicy.h"
 #import "MacWSInputLatency.h"
@@ -6289,7 +6290,12 @@ static BOOL MacWSPostKeyRecord(MacWSInputRecord record, id application,
     // Ordinary typing retains the established CG-backed path.
     BOOL commandKeyEquivalent = (modifiers & 0x100000u) != 0;
     BOOL controlModified = (modifiers & 0x40000u) != 0;
+    BOOL exactSoftwareUnicode =
+        record.source == MacWSInputSourceSoftwareKeyboard &&
+        MacWSKeySymIsEncodedUnicode(keySym) &&
+        !MacWSSoftwareKeyRequiresNativeProxy(keySym, (uint32_t)modifiers);
     BOOL canWrapCGEvent = keySym != 0xff1bu && !commandKeyEquivalent &&
+        !exactSoftwareUnicode &&
         createKeyboardCGEvent && setCGEventFlags &&
         class_respondsToSelector(object_getClass(eventClass),
                                  eventWithCGEvent);
@@ -9191,6 +9197,34 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         }
         if (!keyWindow) keyWindow = ((MacWSMsgID)objc_msgSend)(
             application, sel_registerName("mainWindow"));
+        BOOL exactSoftwareUnicode =
+            record.source == MacWSInputSourceSoftwareKeyboard &&
+            MacWSKeySymIsEncodedUnicode(record.contactID) &&
+            !MacWSSoftwareKeyRequiresNativeProxy(
+                record.contactID,
+                MacWSInputModifiersForScene(record.sceneID));
+        if (exactSoftwareUnicode && keyWindow) {
+            id currentKeyWindow = ((MacWSMsgID)objc_msgSend)(
+                application, sel_registerName("keyWindow"));
+            if (currentKeyWindow != keyWindow &&
+                ((MacWSMsgBool)objc_msgSend)(
+                    keyWindow, sel_registerName("canBecomeKeyWindow"))) {
+                ((MacWSMsgVoid)objc_msgSend)(
+                    keyWindow, sel_registerName("makeKeyWindow"));
+            }
+            if (MacWSRuntimeDiagnosticsEnabled() &&
+                record.kind == MacWSInputKindKeyDown) {
+                id firstResponder = ((MacWSMsgID)objc_msgSend)(
+                    keyWindow, sel_registerName("firstResponder"));
+                fprintf(stderr,
+                    "#### APP-INPUT TEXT-FOCUS pid=%d window=%u "
+                    "first-responder=%s keysym=%#x\n",
+                    getpid(), requestedWindowNumber,
+                    firstResponder ? object_getClassName(firstResponder) : "nil",
+                    record.contactID);
+                fflush(stderr);
+            }
+        }
         NSInteger keyWindowNumber = keyWindow
             ? ((MacWSMsgInteger)objc_msgSend)(
                 keyWindow, sel_registerName("windowNumber")) : 0;

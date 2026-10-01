@@ -23,6 +23,7 @@ class KeyboardSnapshotWireTests(unittest.TestCase):
 #include <math.h>
 #include <string.h>
 #include "macws_host_protocol.h"
+#include "macws_text_input.h"
 ''' + source[start:end] + r'''
 int main(void) {
     assert(sizeof(MacWSInputRecord)==84);
@@ -53,7 +54,8 @@ int main(void) {
     assert(!IsNativeKeyboardProxyRecord(NULL));
     const uint32_t modifiers[]={0,0x10000u,0x20000u,0x30000u,
         0x40000u,0x80000u,0x100000u,0x1e0000u};
-    const uint32_t symbols[]={'a','A',0xfeffu,0xff00u,0xff1bu,0xffffu};
+    const uint32_t symbols[]={
+        'a','A',0xfeffu,0xff00u,0xff1bu,0xffffu,0x01004f60u,0x0101f600u};
     for(unsigned source=0;source<=MacWSInputSourceMax;source++)
     for(unsigned m=0;m<sizeof(modifiers)/sizeof(*modifiers);m++)
     for(unsigned k=0;k<sizeof(symbols)/sizeof(*symbols);k++) {
@@ -61,7 +63,7 @@ int main(void) {
             .contactID=symbols[k],.sceneID=MacWSInputSceneForWindow(0,modifiers[m])};
         bool expected=source==MacWSInputSourceHardwareKeyboard ||
             (source==MacWSInputSourceSoftwareKeyboard &&
-             (symbols[k]>=0xff00u || (modifiers[m]&0x1c0000u)));
+             MacWSSoftwareKeyRequiresNativeProxy(symbols[k],modifiers[m]));
         assert(IsNativeKeyboardProxyRecord(&r)==expected);
         r.kind=MacWSInputKindKeyUp;
         assert(IsNativeKeyboardProxyRecord(&r)==expected);
