@@ -26,7 +26,7 @@ Features:
     - Geekbench 6 GPU 32359 score in my iPad Pro m1
 * Hardware video encode/decode
 * Virtual keyboard
-* Two Retina HiDPI display modes (pixel-matched Standard and supersampled More Space)
+* Two Retina HiDPI display modes (pixel-matched Standard and native-drawable Larger)
 * Native WiFi/Bluetooth/Apple pencil/Screen mirror, etc. supports
 * Window Mode:
     - Run macOS applications like iOS native windows

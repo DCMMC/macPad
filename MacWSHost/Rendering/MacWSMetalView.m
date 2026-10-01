@@ -1592,8 +1592,13 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
 }
 
 - (void)setDisplayDensity:(MacWSHostDisplayDensity)displayDensity {
+    MacWSHostDisplayDensity previous = _displayDensity;
     _displayDensity = MacWSNormalizedDisplayDensity(displayDensity);
     _lastRequestedWindowSize = CGSizeZero;
+    _submittedPresentWitness = NO;
+    MacWSLog(@"display-density changed previous=%u next=%u factor=%.2f",
+             (unsigned)previous, (unsigned)_displayDensity,
+             MacWSDisplayDensityFactor(_displayDensity));
     [self resetViewportZoom];
     [self geometryDidChange];
 }
@@ -1803,12 +1808,12 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     self.userInteractionEnabled = _macWSInputEnabled && !_windowTooSmall;
     if (_windowTooSmall) {
         NSString *densityName = self.displayDensity ==
-            MacWSHostDisplayDensityRetinaMoreSpace
-                ? @"Retina 更多空间" : @"Retina 标准";
+            MacWSHostDisplayDensityRetinaLarger
+                ? @"Retina 放大" : @"Retina 标准";
         _tooSmallLabel.text = [NSString stringWithFormat:
             @"窗口太小\n\n此 macOS 应用至少需要 %.0f × %.0f 点\n"
              "当前 %@ 模式需要约 %.0f × %.0f iPad 点\n\n"
-             "请放大 iPadOS 窗口，或切换到 Retina 更多空间。",
+             "请放大 iPadOS 窗口，或切换到 Retina 标准。",
             self.minimumLogicalSize.width,
             self.minimumLogicalSize.height,
             densityName, requiredWidth, requiredHeight];
@@ -2715,25 +2720,41 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
          "  VOut o; o.position = float4(vertices[vid].xy, 0.0, 1.0);\n"
          "  o.uv = vertices[vid].zw; return o;\n"
          "}\n"
-         "fragment half4 macws_fragment(VOut in [[stage_in]],\n"
-         "    texture2d<half> image [[texture(0)]]) {\n"
+         "half4 macws_quality_sample(texture2d<half> image, float2 uv) {\n"
          "  constexpr sampler s(coord::normalized, address::clamp_to_edge,\n"
          "                      filter::linear);\n"
-         "  return image.sample(s, in.uv);\n"
+         "  half4 center = image.sample(s, uv);\n"
+         "  float2 size = float2(image.get_width(), image.get_height());\n"
+         "  float2 dx = dfdx(uv) * size;\n"
+         "  float2 dy = dfdy(uv) * size;\n"
+         "  float sourcePerPixelX = length(float2(dx.x, dy.x));\n"
+         "  float sourcePerPixelY = length(float2(dx.y, dy.y));\n"
+         "  if (sourcePerPixelX >= 0.995f && sourcePerPixelY >= 0.995f)\n"
+         "    return center;\n"
+         "  float2 texel = 1.0f / size;\n"
+         "  half3 left = image.sample(s, uv - float2(texel.x, 0.0f)).rgb;\n"
+         "  half3 right = image.sample(s, uv + float2(texel.x, 0.0f)).rgb;\n"
+         "  half3 up = image.sample(s, uv - float2(0.0f, texel.y)).rgb;\n"
+         "  half3 down = image.sample(s, uv + float2(0.0f, texel.y)).rgb;\n"
+         "  half3 low = min(center.rgb, min(min(left, right), min(up, down)));\n"
+         "  half3 high = max(center.rgb, max(max(left, right), max(up, down)));\n"
+         "  half3 sharpened = center.rgb * 1.4h\n"
+         "      - (left + right + up + down) * 0.1h;\n"
+         "  return half4(clamp(sharpened, low, high), center.a);\n"
+         "}\n"
+         "fragment half4 macws_fragment(VOut in [[stage_in]],\n"
+         "    texture2d<half> image [[texture(0)]]) {\n"
+         "  return macws_quality_sample(image, in.uv);\n"
          "}\n"
          "fragment half4 macws_fragment_opaque(VOut in [[stage_in]],\n"
          "    texture2d<half> image [[texture(0)]]) {\n"
-         "  constexpr sampler s(coord::normalized, address::clamp_to_edge,\n"
-         "                      filter::linear);\n"
-         "  half4 pixel = image.sample(s, in.uv);\n"
+         "  half4 pixel = macws_quality_sample(image, in.uv);\n"
          "  return half4(pixel.rgb, 1.0h);\n"
          "}\n"
          "fragment half4 macws_direct_composite(VOut in [[stage_in]],\n"
          "    texture2d<half> desktop [[texture(0)]],\n"
          "    texture2d<half> direct [[texture(1)]],\n"
          "    constant float4 *geometry [[buffer(0)]]) {\n"
-         "  constexpr sampler s(coord::normalized, address::clamp_to_edge,\n"
-         "                      filter::linear);\n"
          "  float4 destination = geometry[0];\n"
          "  if (in.uv.x >= destination.x && in.uv.x <= destination.z &&\n"
          "      in.uv.y >= destination.y && in.uv.y <= destination.w) {\n"
@@ -2741,12 +2762,12 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
          "        (destination.zw - destination.xy);\n"
          "    float4 source = geometry[1];\n"
          "    float2 directUV = mix(source.xy, source.zw, fraction);\n"
-         "    half4 foreground = direct.sample(s, directUV);\n"
+         "    half4 foreground = macws_quality_sample(direct, directUV);\n"
          "    if (foreground.a >= 0.999h) return foreground;\n"
-         "    half4 background = desktop.sample(s, in.uv);\n"
+         "    half4 background = macws_quality_sample(desktop, in.uv);\n"
          "    return foreground + background * (1.0h - foreground.a);\n"
          "  }\n"
-         "  return desktop.sample(s, in.uv);\n"
+         "  return macws_quality_sample(desktop, in.uv);\n"
          "}\n"
          "fragment half4 macws_shadow(VOut in [[stage_in]],\n"
          "    constant float4 *geometry [[buffer(0)]]) {\n"

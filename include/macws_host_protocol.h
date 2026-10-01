@@ -316,16 +316,16 @@ enum {
 typedef uint16_t MacWSHostDisplayDensity;
 enum {
     // Both selectable modes keep AppKit's real 2x Retina backing. Standard
-    // maps that source to the iPad drawable without resampling. More Space
-    // establishes more AppKit logical space per Scene point, so presentation
-    // only reduces a supersampled source; it never enlarges too few pixels.
+    // maps that source to the iPad drawable without resampling. Larger keeps
+    // the iPad drawable at its native screen scale and performs the required
+    // macOS-style HiDPI enlargement in MacWSHost's Metal presentation pass.
     MacWSHostDisplayDensityRetinaStandard = 1,
-    MacWSHostDisplayDensityRetinaMoreSpace = 2,
+    MacWSHostDisplayDensityRetinaLarger = 2,
     // Source-compatible names retained for older clients/producers.
     MacWSHostDisplayDensityTouchComfort =
         MacWSHostDisplayDensityRetinaStandard,
     MacWSHostDisplayDensityKeyboard =
-        MacWSHostDisplayDensityRetinaMoreSpace,
+        MacWSHostDisplayDensityRetinaLarger,
     // Persisted non-Retina enlargement modes. They are intentionally no
     // longer selectable and normalize to Retina Standard on upgrade.
     MacWSHostDisplayDensityComfort = 3,
@@ -335,15 +335,15 @@ enum {
 
 static inline MacWSHostDisplayDensity MacWSNormalizedDisplayDensity(
         MacWSHostDisplayDensity density) {
-    if (density == MacWSHostDisplayDensityRetinaMoreSpace)
-        return MacWSHostDisplayDensityRetinaMoreSpace;
+    if (density == MacWSHostDisplayDensityRetinaLarger)
+        return MacWSHostDisplayDensityRetinaLarger;
     return MacWSHostDisplayDensityRetinaStandard;
 }
 
 static inline double MacWSDisplayDensityFactor(
         MacWSHostDisplayDensity density) {
     density = MacWSNormalizedDisplayDensity(density);
-    if (density == MacWSHostDisplayDensityRetinaMoreSpace) return 0.85;
+    if (density == MacWSHostDisplayDensityRetinaLarger) return 1.25;
     return 1.0;
 }
 

@@ -20,7 +20,7 @@ static void AssertNativeSampling(float viewWidth, float viewHeight,
         &content));
     // Geometry may letterbox or clip, but the source's sampling density is
     // preserved up to the one-pixel rounding of the final drawable axes.
-    float expectedScale = fminf(1.0f, displayScale * density / 2.0f);
+    float expectedScale = displayScale * density / 2.0f;
     assert(fabsf(content.width / viewWidth * pixels.width -
                  sourceWidth * expectedScale) <=
            content.width / viewWidth * 0.5f + 0.01f);
@@ -33,7 +33,7 @@ int main(void) {
     assert(MacWSNormalizedDisplayDensity(0) ==
         MacWSHostDisplayDensityRetinaStandard);
     assert(MacWSNormalizedDisplayDensity(MacWSHostDisplayDensityKeyboard) ==
-        MacWSHostDisplayDensityRetinaMoreSpace);
+        MacWSHostDisplayDensityRetinaLarger);
     assert(MacWSNormalizedDisplayDensity(MacWSHostDisplayDensityComfort) ==
         MacWSHostDisplayDensityRetinaStandard);
     assert(MacWSNormalizedDisplayDensity(
@@ -45,7 +45,7 @@ int main(void) {
     assert(MacWSDisplayDensityFactor(
         MacWSHostDisplayDensityRetinaStandard) == 1);
     assert(MacWSDisplayDensityFactor(
-        MacWSHostDisplayDensityRetinaMoreSpace) == 0.85);
+        MacWSHostDisplayDensityRetinaLarger) == 1.25);
     MacWSPresentationDrawableSize pixels = {0};
     // Runtime first-frame regression: a Retina source was permanently
     // presented at one pixel/point after an awaiting-source drawable.
@@ -74,14 +74,14 @@ int main(void) {
     AssertNativeSampling(938, 558, 1876, 1116, 1, 2);
     AssertNativeSampling(1060, 760, 1806, 1084, 1, 2); // letterbox
     AssertNativeSampling(500, 300, 1806, 1084, 1, 2); // clipping
-    // Retina More Space asks AppKit for a larger 2x source and downsamples it
-    // into the native iPad drawable. Unlike the removed 125/150% modes, the
-    // source pixel budget is never smaller than the destination pixel budget.
-    AssertNativeSampling(373.15f, 267.8f, 878, 630, 0.85f, 2);
+    // Retina Larger keeps a full panel-native 2x drawable. The former path
+    // allocated only sourceBacking/density = 1.6 pixels per Scene point and
+    // left UIKit to enlarge that smaller drawable again.
+    AssertNativeSampling(850, 600, 1360, 960, 1.25f, 2);
     assert(MacWSComputePresentationDrawableSize(
-        850, 600, 2000, 1412, 2, 0.85f, 2, true, &pixels));
+        850, 600, 1360, 960, 2, 1.25f, 2, true, &pixels));
     assert(Near(pixels.width, 1700) && Near(pixels.height, 1200));
-    assert(2000 >= pixels.width && 1412 >= pixels.height);
+    assert(1360 < pixels.width && 960 < pixels.height);
     AssertNativeSampling(987, 582, 1806, 1084, 1, 1); // 1x display
 
     // Fullscreen source fit must preserve the drawable's Scene aspect even

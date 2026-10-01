@@ -94,9 +94,12 @@ static inline bool MacWSComputeNativeWindowPresentationRect(
 // never be used here: fitting a differently shaped source with the previous
 // drawable's scale shrinks the pixel budget on each layout pass.
 //
-// Both drawable axes use one scale in UIKit coordinates. Window mode draws
-// at its fixed logical density; fullscreen draws an aspect-fitted desktop.
-// Capping at the display's scale prevents needless offscreen supersampling.
+// Both drawable axes use one scale in UIKit coordinates. Window mode always
+// allocates the panel-native drawable budget. In particular, a Retina Larger
+// source must be enlarged by MacWSHost's quality-controlled Metal pass rather
+// than allocating a smaller CAMetalDrawable which UIKit enlarges a second
+// time. Fullscreen draws an aspect-fitted desktop. Capping at the display's
+// scale prevents needless offscreen supersampling.
 static inline bool MacWSComputePresentationDrawableSize(
         float viewWidth, float viewHeight,
         float sourcePixelWidth, float sourcePixelHeight,
@@ -115,7 +118,7 @@ static inline bool MacWSComputePresentationDrawableSize(
         if (!isfinite(sourceBackingScale) || sourceBackingScale < 0.5f ||
             sourceBackingScale > 8.0f || !isfinite(densityScale) ||
             densityScale < 0.5f || densityScale > 2.0f) return false;
-        sourcePixelsPerViewPoint = sourceBackingScale / densityScale;
+        sourcePixelsPerViewPoint = displayScale;
     } else {
         sourcePixelsPerViewPoint = fmaxf(sourcePixelWidth / viewWidth,
                                          sourcePixelHeight / viewHeight);

@@ -3035,9 +3035,9 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
                 forControlEvents:UIControlEventValueChanged];
 
     _densityControl = [[UISegmentedControl alloc]
-        initWithItems:@[@"Retina 标准", @"Retina 更多空间"]];
+        initWithItems:@[@"Retina 标准", @"Retina 放大"]];
     _densityControl.selectedSegmentIndex =
-        _metalView.displayDensity == MacWSHostDisplayDensityRetinaMoreSpace
+        _metalView.displayDensity == MacWSHostDisplayDensityRetinaLarger
             ? 1 : 0;
     [_densityControl addTarget:self action:@selector(densityChanged:)
                forControlEvents:UIControlEventValueChanged];
@@ -3277,8 +3277,8 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     [_inputModeControl setTitle:(english ? @"Precision Trackpad" : @"精确触控板")
               forSegmentAtIndex:1];
     NSArray *density = english
-        ? @[@"Retina Standard", @"Retina More Space"]
-        : @[@"Retina 标准", @"Retina 更多空间"];
+        ? @[@"Retina Standard", @"Retina Larger"]
+        : @[@"Retina 标准", @"Retina 放大"];
     NSArray *presentationResolution = english
         ? @[@"Auto Sharp", @"Always Sharp", @"Performance"]
         : @[@"自动清晰", @"始终清晰", @"性能优先"];
@@ -4133,15 +4133,15 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 
 - (void)densityChanged:(UISegmentedControl *)sender {
     MacWSHostDisplayDensity density = sender.selectedSegmentIndex == 1
-        ? MacWSHostDisplayDensityRetinaMoreSpace
+        ? MacWSHostDisplayDensityRetinaLarger
         : MacWSHostDisplayDensityRetinaStandard;
     _metalView.displayDensity = density;
     [NSUserDefaults.standardUserDefaults setInteger:density
                                               forKey:@"MacWSDisplayDensity"];
-    if (density == MacWSHostDisplayDensityRetinaMoreSpace) {
+    if (density == MacWSHostDisplayDensityRetinaLarger) {
         _inputLabel.text = MacWSLocalized(
-            @"显示：Retina 更多空间 · AppKit 保持 2× backing，只缩小超采样源，不放大源像素",
-            @"Display: Retina More Space · AppKit stays at 2x; a supersampled source is only reduced, never enlarged");
+            @"显示：Retina 放大 · 原生 2× iPad drawable，由 Metal 高质量放大 macOS Retina 源",
+            @"Display: Retina Larger · native 2x iPad drawable with quality Metal scaling of the macOS Retina source");
     } else {
         _inputLabel.text = MacWSLocalized(
             @"显示：Retina 标准 · macOS backing 像素与 iPad drawable 逐像素匹配",
@@ -6067,6 +6067,15 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         [self repairDesktopAction];
     } else if ([action isEqualToString:@"capture"]) {
         [self captureAction];
+    } else if ([action isEqualToString:@"retina-standard"] ||
+               [action isEqualToString:@"retina-larger"]) {
+        _densityControl.selectedSegmentIndex =
+            [action isEqualToString:@"retina-larger"] ? 1 : 0;
+        [self densityChanged:_densityControl];
+        [self setNotice:[action isEqualToString:@"retina-larger"]
+            ? MacWSLocalized(@"已切换 Retina 放大", @"Retina Larger enabled")
+            : MacWSLocalized(@"已切换 Retina 标准", @"Retina Standard enabled")
+                 success:YES];
     } else if ([action isEqualToString:@"test-open-file"]) {
         [self performSemanticShortcutForDiagnostics:@"⌘O"];
     } else if ([action isEqualToString:@"test-quit"]) {
@@ -8676,6 +8685,7 @@ static void MacWSDeduplicateWindowScenes(void) {
                @"amadine", @"word", @"excel",
                @"powerpoint", @"asphalt",
                @"recover", @"repair", @"repair-desktop", @"capture",
+               @"retina-standard", @"retina-larger",
                @"test-open-file", @"test-quit", @"test-pasteboard-write",
                @"test-pasteboard-abstract-text",
                @"test-pasteboard-read", @"test-drag-snapshot",
