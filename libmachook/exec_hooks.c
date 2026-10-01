@@ -167,6 +167,26 @@ typedef struct {
     char *insert_entry;
 } selected_env_t;
 
+// codex-code-mode-host embeds V8 and creates the isolate lazily on the first
+// session/execute request. Runtime-confirmed on iPadOS 16.3 with host UUID
+// 4D33D3D9-A8E6-3023-9E9B-53FA38F8CE89: the unmodified launch environment
+// fails 4/4 times in IsolateGroup::EnsureCodeRange, while the same framed IPC
+// request completes 4/4 times with both existing W^X compatibility adapters.
+// Scope that required launch contract to the helper executable itself so it
+// also holds when Codex, app-server, a shell, or an MCP caller starts it.
+static bool is_codex_code_mode_host(const char *path) {
+    if (!path || !*path) return false;
+    const char *basename = strrchr(path, '/');
+    basename = basename ? basename + 1 : path;
+    return strcmp(basename, "codex-code-mode-host") == 0;
+}
+
+static bool env_key_matches(const char *entry, const char *key) {
+    if (!entry || !key) return false;
+    size_t key_len = strlen(key);
+    return strncmp(entry, key, key_len) == 0 && entry[key_len] == '=';
+}
+
 static bool is_macws_insert_library(const char *path) {
     return path &&
         (strcmp(path, "/usr/local/lib/libmachook.dylib") == 0 ||
@@ -257,10 +277,13 @@ static selected_env_t env_select_insert(char *const envp[], const char *path) {
     // that launch contract here, at the parent/child exec boundary, rather
     // than changing bash itself or relying on a particular Terminal profile.
     bool terminal_bash = terminal_direct_bash_child(path, envp);
+    bool code_mode_host = is_codex_code_mode_host(path);
 
     selected_env_t selected = {0};
-    // insert dylib + four Terminal shell entries + trailing NULL.
-    selected.items = calloc(count + (terminal_bash ? 6 : 2), sizeof(char *));
+    // Insert dylib + optional Terminal shell entries + optional Code Mode JIT
+    // entries + trailing NULL.
+    size_t extra = (terminal_bash ? 6 : 2) + (code_mode_host ? 2 : 0);
+    selected.items = calloc(count + extra, sizeof(char *));
     const char *insert = insert_for_target(path, NULL);
     selected.insert_entry = env_build_selected_insert(source, insert);
     if (!selected.items || !selected.insert_entry) {
@@ -283,6 +306,11 @@ static selected_env_t env_select_insert(char *const envp[], const char *path) {
              strncmp(source[i], "PATH=", 5) == 0)) {
             continue;
         }
+        if (code_mode_host &&
+            (env_key_matches(source[i], "MACWS_JIT_MPROTECT_COMPAT") ||
+             env_key_matches(source[i], "MACWS_JIT_FAULT_WRITE_COMPAT"))) {
+            continue;
+        }
         selected.items[out++] = source[i];
     }
     if (terminal_bash) {
@@ -292,6 +320,10 @@ static selected_env_t env_select_insert(char *const envp[], const char *path) {
         selected.items[out++] =
             "PATH=/opt/local/bin:/opt/local/sbin:/usr/local/bin:"
             "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
+    }
+    if (code_mode_host) {
+        selected.items[out++] = "MACWS_JIT_MPROTECT_COMPAT=1";
+        selected.items[out++] = "MACWS_JIT_FAULT_WRITE_COMPAT=1";
     }
     selected.items[out++] = selected.insert_entry;
     selected.items[out] = NULL;
@@ -311,7 +343,22 @@ static pthread_mutex_t g_exec_env_lock = PTHREAD_MUTEX_INITIALIZER;
 typedef struct {
     char *old_value;
     int had_old_value;
+    char *old_jit_mprotect;
+    int had_old_jit_mprotect;
+    char *old_jit_fault_write;
+    int had_old_jit_fault_write;
+    int managed_codex_jit;
 } saved_insert_t;
+
+static void save_environment_value(const char *key, char **old_value,
+                                   int *had_old_value) {
+    const char *old = getenv(key);
+    if (!old) return;
+    char *copy = strdup(old);
+    if (!copy) return;
+    *old_value = copy;
+    *had_old_value = 1;
+}
 
 static saved_insert_t process_env_select_insert(const char *path) {
     saved_insert_t saved = {0};
@@ -330,7 +377,25 @@ static saved_insert_t process_env_select_insert(const char *path) {
     } else {
         setenv("DYLD_INSERT_LIBRARIES", insert_for_target(path, NULL), 1);
     }
+    if (is_codex_code_mode_host(path)) {
+        saved.managed_codex_jit = 1;
+        save_environment_value("MACWS_JIT_MPROTECT_COMPAT",
+            &saved.old_jit_mprotect, &saved.had_old_jit_mprotect);
+        save_environment_value("MACWS_JIT_FAULT_WRITE_COMPAT",
+            &saved.old_jit_fault_write, &saved.had_old_jit_fault_write);
+        setenv("MACWS_JIT_MPROTECT_COMPAT", "1", 1);
+        setenv("MACWS_JIT_FAULT_WRITE_COMPAT", "1", 1);
+    }
     return saved;
+}
+
+static void restore_environment_value(const char *key, char *old_value,
+                                      int had_old_value) {
+    if (had_old_value && old_value)
+        setenv(key, old_value, 1);
+    else
+        unsetenv(key);
+    free(old_value);
 }
 
 static void process_env_restore_insert(saved_insert_t *saved) {
@@ -339,6 +404,12 @@ static void process_env_restore_insert(saved_insert_t *saved) {
     else
         unsetenv("DYLD_INSERT_LIBRARIES");
     free(saved->old_value);
+    if (saved->managed_codex_jit) {
+        restore_environment_value("MACWS_JIT_MPROTECT_COMPAT",
+            saved->old_jit_mprotect, saved->had_old_jit_mprotect);
+        restore_environment_value("MACWS_JIT_FAULT_WRITE_COMPAT",
+            saved->old_jit_fault_write, saved->had_old_jit_fault_write);
+    }
 }
 
 // VS Code's macOS shell-environment resolver starts an interactive login

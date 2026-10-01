@@ -127,8 +127,8 @@ env	MACWS_HID_BYPASS	off	diagnostic/A-B	Broad HID compatibility hooks are not pr
 env	MACWS_IOMFB_SWAP_TRACE	off	diagnostic	Swap ABI trace.
 env	MACWS_IOKIT_COMPAT_DIAGNOSTICS	off	diagnostic	Logs the exact IOMatchCategory IOAcceleratorES-to-IOAccelerator registry translation without changing its production behavior.
 env	MACWS_IOSURF_TRACE	off	diagnostic	Per-IOSurface creation trace.
-env	MACWS_JIT_MPROTECT_COMPAT	on	VS Code,Chrome,Steam	Chromium MAP_JIT/W^X compatibility without verbose trace.
-env	MACWS_JIT_FAULT_WRITE_COMPAT	on	VS Code,Steam	Page-granular V8/CEF W^X adapter; only faulted 16-KiB writer pages become RW before RX restore.
+env	MACWS_JIT_MPROTECT_COMPAT	on	VS Code,Chrome,Steam,Codex Code Mode	Chromium/V8 MAP_JIT/W^X compatibility without verbose trace; exec_hooks injects it only into the exact codex-code-mode-host target when Codex starts that helper.
+env	MACWS_JIT_FAULT_WRITE_COMPAT	on	VS Code,Steam,Codex Code Mode	Page-granular V8/CEF W^X adapter; only faulted 16-KiB writer pages become RW before RX restore, and exec_hooks injects it into the exact codex-code-mode-host target.
 env	MACWS_JIT_MPROTECT_TRACE	off	diagnostic	Per-mprotect JIT trace; pre-opens /tmp/macws_jit_forwarded.bin and records any SIGBUS that the W^X adapter cannot handle using one fixed-size async-signal-safe write.
 env	MACWS_MONO_INTERPRETER	off	7DTD arm64 rehost diagnostic	Calls Unity 2022.3.62f2 Mono's public mono_jit_set_aot_mode with MONO_AOT_MODE_INTERP_ONLY (8) before runtime initialization and rebinds that exact UUID's late pthread_jit_write_protect_np import to the existing W^X adapter. This opt-in experiment currently reaches MonoManager ReloadAssembly but then faults in mono_gc_memmove_aligned reading an uncommitted reservation; it is not a production fix.
 env	MACWS_MONO_JIT_COMPAT	auto	7DTD ARM game	Keeps Unity 2022.3.62f2 Mono in its normal JIT mode while rebinding only that exact UUID's late pthread_jit_write_protect_np import to the existing W^X adapter; injected only into the verified copied native-arm64 7 Days To Die runtime.
