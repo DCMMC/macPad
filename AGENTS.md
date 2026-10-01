@@ -1,6 +1,8 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This is the authoritative operating memory for coding agents and human
+maintainers working in this repository. `CLAUDE.md` points here so Codex,
+Claude Code, and other agents share one set of constraints and facts.
 
 ## Project Overview
 
@@ -50,10 +52,9 @@ round-trips), counters advancing, frames landing. Not `etime`.
 | `findOrCreate<X>ProgramVariant` stub-prologue 5-insn `movz/movk*3/ret 0x1000-byte calloc` (whack-a-mole, removed by `247da92`) | Every new variant lookup was its own null deref | NSBundle registration via `bundleWithPath:` + `loadAndReturnError:` so `setupCompiler:`'s `pathForResource:ds.g13g` resolves → `Device->0x318` (AGX::Compiler*) is real → ALL variant lookups succeed naturally |
 | Blanket `__assert_rtn → log+return` (still in tree, **lazy**) | Masks `_state_stack.empty() "Unbalanced Composites"` at MetalContext.mm:411 → SkyLight composite state stack leaks every frame | Find why intermediate composite ops early-return (currently ResCreate FAIL inside AGXIOC) and fix THAT |
 
-See `[[feedback-no-lazy-nop-ret-bypass]]` in agent memory for the
-catalogue + the diagnostic technique (`MACWS_AGX_CRASH_DIAG` register +
-memory dump in `mac_hooks.m`) that turns these into one-cycle
-root-cause solves.
+The catalogue above is the durable replacement for the former private-agent
+memory note. Use the `MACWS_AGX_CRASH_DIAG` register and memory dump in
+`mac_hooks.m` to turn this class of crash into a reproducible root-cause trace.
 
 ## Evidence Discipline (load-bearing rule — read second)
 
@@ -99,10 +100,358 @@ caught:
    The actual reject site that returns `0xe00002c2 = kIOReturnNoBandwidth`
    is elsewhere in `IOGPUFamily` and is still being RE'd.
 
-See `[[cross-image-objc-class-register-and-ioconnect-heap-blocker]]` for
-the corrected attribution (the "LATE UPDATE" section at the top).
+The corrected attribution is retained in the historical AGX snapshot below so
+it is available to every agent without an external memory store.
 
-## Current Goal & Progress (AGX-Native, NO Sim Path)
+## Current Project Memory and Operating Baseline (2026-10-01)
+
+This section is the current summary. Later sections retain detailed and
+historical bring-up knowledge. If an older section conflicts with this one,
+the current source, focused tests, dated evidence under `docs/evidence/`, and
+this section take precedence—in that order.
+
+### Product and release status
+
+MacWS/macPad is a controlled research beta that runs a Ventura 13.4 macOS
+userspace and WindowServer on jailbroken Apple-silicon iPads. macOS arm64 code
+runs natively; iPadOS remains responsible for the kernel, AGX GPU, display,
+audio hardware, UIKit windows, touch, pointer, keyboard, power state, and
+memorystatus policy.
+
+This is not a VM and not a remote-desktop product. The production UI maps
+macOS windows into iPadOS `UIWindowScene`s and transports IOSurfaces into an
+iOS-native Metal host. VNC remains a diagnostic/recovery observer; it is not
+the normal presentation path.
+
+Do not describe the project as generally production-ready or compatible with
+all M-series/A-series devices. Private frameworks, Mach-O UUIDs, instruction
+patterns, GPU ABIs, and jailbreak trust behavior are version-specific.
+
+### Validated platform matrix
+
+| Device / OS | Jailbreak | macOS userspace | Evidence-backed status |
+|---|---|---|---|
+| iPad13,6 (M1), iPadOS 16.3.1 / 20D67 | Dopamine rootless | Ventura 13.4 / 22F66 | Primary and broadest validation target: native AGX desktop, window/fullscreen Host, 120-Hz paths, input/IME, VS Code, Steam, Office workloads, system apps and interop |
+| iPad14,5 (M2), iPadOS 16.0 / 20A8372 | Dopamine rootless | Ventura 13.4 / 22F66 | Exact MTLCompilerService UUID adapter, VS Code web rendering, Steam/arm64 Unity 7DTD, direct presentation and audio paths validated; coverage is narrower than M1 |
+| iPad13,7, iPadOS 16.6 | NathanLR | Ventura rootfs experiment | Unsupported: runtime-confirmed CoreTrust signing cannot admit the patched macOS shared-cache closure and AMFI rejects the helper; package install fails closed without `/var/jb/usr/bin/jbctl` |
+| Any other device/build | unknown | unknown | Porting target, not supported until its identities, ABI and runtime witnesses are added |
+
+The current package structurally requires a Dopamine-compatible dynamic
+trustcache backend. Do not install or replace a user's jailbreak, and do not
+weaken the postinstall refusal on NathanLR to make installation appear to
+work.
+
+Never commit passwords, SSH private keys, API keys, NAS credentials, public
+addresses, or user-specific hostnames. Use placeholders in documentation and
+temporary environment variables such as `MACWS_DEVICE`,
+`MACWS_DEVICE_PORT`, and `MACWS_SUDO_PASSWORD`. Rotate any credential exposed
+during an interactive debug session.
+
+### Current end-to-end architecture
+
+```text
+macOS application / WindowServer in Ventura chroot
+  ├─ libmachook: exact runtime compatibility, input bridge, Metal hooks
+  ├─ AppInputBridge: exact PID/window AppKit delivery and metrics
+  ├─ WindowServer final composite or exact-window IOSurface stream
+  └─ qualifying producer: authenticated completed direct drawable
+                         │ Mach right + versioned descriptor
+                         ▼
+macwsdisplayd / macwsinputd / macwsinteropd
+  ├─ validate sender identity, dimensions, sequence and ownership
+  ├─ retain latest state with bounded in-flight surfaces
+  └─ route input/clipboard/files to the represented macOS owner
+                         │
+                         ▼
+MacWSHost + MacWSWindowing on iPadOS
+  ├─ one macOS logical window per UIWindowScene
+  ├─ native Metal presentation into the iPad drawable
+  ├─ UIKit touch, pointer, keyboard, IME and Stage Manager integration
+  └─ macwshostd lifecycle, app launch, lock/sleep and service recovery
+```
+
+Production rendering follows a layered policy:
+
+1. Every supported application has an IOSurface/Metal presentation path. The
+   exact-window stream is the ordinary window-mode fallback; WindowServer's
+   completed final composite is authoritative for the full Aqua workspace.
+2. A window or region may use direct-drawable acceleration only after strict
+   producer identity, owner/window, geometry, sequence and completion checks.
+3. A resize, scene disconnect, owner transition or stale geometry invalidates
+   the direct surface before fallback resumes. Never stretch or retain an old
+   drawable through a geometry transition merely to keep FPS high.
+4. Streams are latest-state, not unbounded FIFOs. Producer and consumer lease
+   counts are bounded; a slow consumer drops obsolete work instead of growing
+   memory or blocking WindowServer.
+
+Important component ownership:
+
+- `MacWSHost/`: iOS Scene UI, Metal presentation, gestures, keyboard/IME,
+  performance monitor, direct-drawable receiver and compositor.
+- `MacWSWindowing/`: SpringBoard/Stage Manager integration and Scene geometry.
+- `macwshostd/`: trusted iOS-side lifecycle, app launcher, sleep coordinator,
+  Steam helpers and service recovery.
+- `libmachook/`: injected macOS-side compatibility and interposition. Keep
+  unrelated policies out of the monolithic files when a protocol-owned module
+  exists.
+- `macwsdisplayd/`: authenticated display receive/catalog boundary.
+- `macwsinputd/` + `libmachook/AppInputBridge.m`: versioned input transport and
+  exact AppKit delivery.
+- `macwsinteropd/`: clipboard/file/drag interoperability.
+- `macwsaudiooutd/`: iOS-native hardware output for the shared PCM ring.
+- `autosignd/` + postinstall scripts: exact dependency-closure signing and
+  Dopamine trustcache admission.
+- `MTLCompilerBypassOSCheck/`: exact-UUID compiler-service request adapter.
+- `misc/metal2metal.py` and related modules: fail-closed AIR-to-AIR profiles;
+  this is not a generic shader or Metal validation bypass.
+- `MTLSimDriverHost/`: legacy/diagnostic compatibility. Native AGX is the
+  production target.
+
+### Evidence-backed user-visible state
+
+Display and windows:
+
+- Window mode and full Aqua workspace run through IOSurface/Metal rather than
+  RFB encoding.
+- A 120-Hz panel is configured with an 80…120 Hz adaptive range. Corrected
+  VS Code TestUFO window-mode runs delivered about 117.7–117.9 visible FPS;
+  foreground YouTube 4K60 delivered about 59.2 visible FPS while the panel
+  scheduler remained about 119.9 Hz.
+- The direct receive source consumes at most two queued drawables per main
+  queue invocation. This bounded catch-up removed sequence gaps without
+  starving `MTKView` display ticks.
+- Focused direct windows lease pacing authority so redundant WindowServer
+  work returns to a 100-ms desktop cadence while the iOS panel remains 120 Hz.
+- Retina modes are `Standard` (1.0) and `Larger UI` (1.25). Removed 125/150%
+  legacy modes must normalize to Standard. “More Space” was rejected because
+  it made UI smaller, opposite to the requested behavior.
+- Exact unbounded AppKit windows can grow beyond the virtual `NSScreen`; real
+  application min/max/aspect/increment constraints still apply. Transient and
+  genuinely bounded windows keep native AppKit constraints.
+
+Input and interoperability:
+
+- Input records carry source, sequence, PID and exact window identity. Do not
+  collapse software toolbar, hardware keyboard and global pointer routes.
+- iOS IME owns marked-text composition. Only committed Unicode is encoded and
+  delivered to the exact AppKit window while preserving its first responder.
+- Software-toolbar arrows and modifier chords stay on exact AppInput routing;
+  the toolbar's own keyboard-down button dismisses UIKit input. Narrow windows
+  reserve a trailing safe lane for the iPad input-method controls.
+- While the iOS IME proxy is first responder, physical Magic Keyboard
+  navigation and Control/Command chords route to macOS; printable composition
+  remains with UIKit, and Command-Tab/Command-Space remain iPadOS shortcuts.
+  The source/RE contract is verified; do not claim a final physical-key
+  acceptance beyond the dated evidence.
+- Electron/Catalyst precise scrolling no longer performs a synchronous global
+  WindowServer hit test for every continuation event. Begin-time ownership
+  validation remains; this is route-based, not a VS Code bundle-ID exception.
+- Text, rich clipboard representations, files and cross-app drag use bounded,
+  versioned payloads with origin/generation and path validation.
+
+Power, heat and memory:
+
+- Do not lower frame rate as the first response to heat. Profile producer,
+  receipt, submit, completion, panel tick, CPU, power and thermal state to find
+  duplicated work or blocking operations.
+- Background/occluded Scenes suspend their streams and status polling.
+  MacWSHost leaves the iOS idle timer enabled. `macwshostd` observes the real
+  lock state, publishes workspace sleep/wake, and pauses the macOS display
+  completion boundary while locked.
+- Idle scenes use event-driven/latest-state delivery and a 100-ms idle
+  completion cadence. Close TestUFO/Aquarium/video pages after every run;
+  multiple hidden benchmarks are real workload, not harmless tabs.
+- Release stale direct surfaces, retired Scene controllers, old process
+  generations and graphics pools. Do not interpret cached/reclaimable RAM as a
+  leak without allocation ownership and time-series evidence.
+- The five-minute watchdog records thermal state and temperature and
+  intervenes only at `critical`. The retired free-memory percentage guard must
+  not return; iOS/XNU memorystatus is the reclamation authority.
+- Power A/B comparisons require comparable starting thermal state, charging
+  state, workload, duration and visible output. A hotter run at a different
+  DVFS point is not a valid energy comparison.
+
+Application-specific memory:
+
+- VS Code/Electron has exact adapters for address-space/JIT/W^X constraints,
+  GPU rendering, audio and lifecycle. The current Code Mode host V8 crash is
+  fixed at the exec boundary by injecting the existing page-granular W^X
+  contract only into the exact `codex-code-mode-host` basename. The fixed
+  framed protocol executes JavaScript; this is not an abort/FatalOOM bypass.
+- Steam's client/CEF, semaphores, cache ownership and lifecycle have scoped
+  adapters. A Steam UI success is not proof that every game works.
+- Stock 7 Days to Die app 251570 is x86_64 beyond just its launcher. iOS 16.0
+  lacks the kernel translated-task/Rosetta contract; successful `oahd` AOT
+  generation does not make x86_64 `exec` work. Do not pursue QEMU/binfmt as if
+  it were an installed drop-in solution.
+- The tested 7DTD path uses the exact Unity 2022.3.62f2 arm64 player with the
+  game's data. M2 startup/title presentation reached about 116 FPS, Shift
+  stress and the 48-kHz audio ring passed, and duplicate players are reused
+  rather than relaunched. This is not an in-world M2 MacBook-equivalent FPS
+  claim. The iPad14,5 one-time 0.35 dynamic-scale profile is exact-device
+  gated and must not alter M1 preferences.
+- Office, Maps, Settings, Weather, Finder, Terminal, Activity Monitor, Steam,
+  VS Code and several other workloads have dated evidence. Do not generalize
+  that to a new version or to unrecorded apps such as Edge/Asobi without a
+  fresh visible-output and interaction witness.
+
+### Non-negotiable agent workflow
+
+For every new device, OS build, app version, feature or regression:
+
+1. **Inventory without mutation.** Record `hw.machine`, iPadOS version/build,
+   jailbreak/trustcache tools, macOS `ProductVersion`/`ProductBuildVersion`,
+   rootfs mount, free space, target Mach-O architectures, UUIDs and hashes.
+2. **Preserve a baseline.** Reproduce one bounded scenario and copy the exact
+   crash/log/profile excerpt. Stop duplicate apps, old benchmark tabs and
+   orphan `grep`, `tail`, `sample`, `oslog` or debugger jobs before measuring.
+3. **Separate FACT from THEORY.** A source comment is not runtime evidence;
+   uptime is not visible output; a successful build is not device acceptance.
+4. **Find the producing layer.** Trace backwards from the invalid state to the
+   operation that should have created/populated/retired it. Never start with a
+   NOP, forced branch, blanket constant return or zero-filled fake object.
+5. **RE the exact binary when private ABI is involved.** Match UUID/hash,
+   preserve the disassembly and validate every patched instruction before
+   writing. Unknown identities must fail closed.
+6. **Run a one-variable A/B.** Instrument bounded counters/timestamps; avoid
+   logging per frame in production. Preserve rejected hypotheses in a dated
+   evidence note so another agent does not repeat them.
+7. **Implement the narrow upstream invariant.** Prefer capability, route,
+   class, geometry, exact path, UUID or protocol-version gates over bundle-ID
+   special cases. Diagnostics must default off and must not be prerequisites.
+8. **Test locally.** Run focused tests, the full `misc/test_*.py` suite when
+   feasible, runtime-switch audit, protocol tests, `bash -n` for changed shell
+   scripts and `git diff --check`.
+9. **Build the affected architectures.** `libmachook` requires both arm64 and
+   arm64e thin installed images. SpringBoard code requires the validated
+   Apple-ld64 artifact; an on-device lld result is not interchangeable.
+10. **Deploy through the project pipeline.** Verify source hashes and installed
+    artifacts. Avoid direct in-place `scp` over a signed dylib: reusing the
+    vnode can leave the kernel's code-signature cache stale.
+11. **Accept on visible/protocol output.** Require the appropriate pixels,
+    sequence advance, input result, XPC response, audio callback or other real
+    endpoint. Recheck crash reports and thermal state.
+12. **Clean up.** Close generated webviews, stop finite samplers, remove only
+    explicitly scoped diagnostic markers and ensure no debug process remains.
+13. **Document and synchronize.** Add/update a dated evidence file, tests and
+    runtime-switch inventory. Keep this repository and `../macPad` aligned for
+    shared files, then commit and push each repository separately.
+
+### New-device/version porting checklist
+
+Useful read-only inventory commands (replace placeholders; never commit
+credentials):
+
+```bash
+ssh -p <port> <user>@<device> 'uname -a; sw_vers 2>/dev/null || true; sysctl hw.machine kern.osversion'
+ssh -p <port> <user>@<device> 'ls -l /var/jb/usr/bin/jbctl /var/mnt/rootfs/System/Library/CoreServices/SystemVersion.plist'
+ssh -p <port> <user>@<device> 'file /var/mnt/rootfs/path/to/target; otool -l /var/mnt/rootfs/path/to/target | grep -A5 LC_UUID'
+```
+
+Then build a compatibility matrix before editing:
+
+- device model/SoC, iPadOS version and build;
+- jailbreak and whether live CDHashes can be admitted;
+- macOS rootfs version/build and target architecture slices;
+- WindowServer, SpringBoard, Metal/AGX, MTLCompilerService and app UUIDs;
+- display pixel/point size and maximum refresh rate;
+- working baseline for CLI, WindowServer, exact-window display, input and
+  recovery.
+
+Port hardcoded patches by semantic function and validated instruction window,
+not by adding a broad OS-version conditional. Keep the previous identities in
+the allowlist and run a regression on the older device before declaring the
+new target supported.
+
+### Build, deploy and recovery shortcuts
+
+For an already prepared device tree, prefer the content-verified pipeline:
+
+```bash
+MACWS_DEVICE=<user@device> \
+MACWS_DEVICE_PORT=<port> \
+MACWS_SUDO_PASSWORD=<temporary-password> \
+bash misc/device_pipeline.sh --component libmachook
+
+# Complete package and bounded workspace restart when the change crosses
+# package/plist/daemon boundaries:
+MACWS_DEVICE=<user@device> MACWS_DEVICE_PORT=<port> \
+MACWS_SUDO_PASSWORD=<temporary-password> \
+bash misc/device_pipeline.sh --component full --restart-workspace
+```
+
+Components are `runtime`, `display`, `input`, `workspace`, `host`, `hostd`,
+`compiler`, `libmachook`, `metal`, and `full`. Choose the smallest component
+that contains the change; use `full` when a package payload, launch job,
+SpringBoard tweak, dependency or postinstall contract changed.
+
+Representative local gates:
+
+```bash
+python3 -m unittest discover -s misc -p 'test_*.py'
+python3 misc/audit_runtime_switches.py
+cc -std=c11 -Wall -Wextra -Werror -Iinclude \
+  misc/macws_protocol_test.c -lm -o /tmp/macws_protocol_test
+/tmp/macws_protocol_test
+bash -n misc/device_pipeline.sh misc/cleanup_all.sh \
+  layout/usr/macOS/bin/macos_gui.sh
+git diff --check
+```
+
+Runtime control:
+
+```bash
+sudo bash /var/jb/usr/macOS/bin/macos_gui.sh production
+sudo bash /var/jb/usr/macOS/bin/macos_gui.sh status
+sudo bash /var/jb/usr/macOS/bin/macos_gui.sh restart coexist
+sudo bash /var/jb/usr/macOS/bin/macos_gui.sh stop
+```
+
+Emergency cleanup after a crash loop or abandoned profiling session:
+
+```bash
+sudo bash /var/jb/var/mobile/MacWSBootingGuide/misc/cleanup_all.sh
+```
+
+Large rootfs archives should remain compressed while stored on archival/NAS
+disks. Do not unpack millions of small files onto a slow archival volume.
+Prefer a direct resumable rsync 3.x transfer using
+`--partial --append-verify --info=progress2` to suitable target/staging
+storage, verify the archive hash, and unpack on the device or SSD-backed
+filesystem. Apple's bundled openrsync 2.6.9 lacks those exact options. A relay
+Mac may stream the transfer without extracting locally. Never put Apple
+rootfs/framework payloads in Git.
+
+### Performance and profiling contract
+
+Use `misc/macws_frame_power_profile.py` for sustained display/power work and
+`misc/macws_ui_profile.py` for gesture/input scenarios. A valid 120-Hz claim
+counts unique producer sequences that reach the real Host drawable-presented
+callback; repeatedly presenting one old IOSurface does not count.
+
+Before every scored run:
+
+- require a known target PID/window and a single foreground workload;
+- start at a recorded thermal state, preferably `nominal`;
+- close other TestUFO/Aquarium/video/game instances;
+- use a finite sampler and an automatic cleanup command;
+- capture producer/Host cadence, latency distributions, retention, command
+  errors, process CPU deltas, power/temperature and boundary RSS/IOSurface;
+- compare like-for-like resolution, quality, charging and thermal conditions.
+
+After every run, verify the cleanup command succeeded and inspect the process
+list. A forgotten benchmark or recursive log scan can materially heat the
+device and invalidate the next result.
+
+## Historical AGX Bring-up Snapshot (not the current project goal)
+
+The following section records an early direct-AGX blocker investigation. It
+is retained to prevent repeated dead ends, but later milestones solved the
+production rendering path. Do not infer from its phrase “only remaining
+viable path” that a full per-call Metal XPC proxy is the current architecture.
+The current architecture and acceptance rules are described above and in
+`docs/displaystream-host-architecture.md`, `docs/metal2metal.md`, and the
+dated evidence tree.
 
 **Goal:** Run macOS WindowServer in chroot on jailbroken iPad13,6 (iOS
 16.3 arm64) using **real iOS AGX kernel driver only**
@@ -171,7 +520,7 @@ Confirmed gaps (memory: `backdrop-blur-tile-pipeline-blocked`):
 | Borrow opened io_connect_t from helper | ❌ Disproved this session | EXC_GUARD ILLEGAL_MOVE; see blocker #3. |
 | Synth buffer via `pinnedGPULocation:` in chroot | ❌ Disproved | `pinnedGPULocation:` also routes through sel=0xa internally → same kernel rejection. Verified: pin5 call hangs the chroot thread. |
 
-### Only remaining viable path (NOT implemented; substantial work)
+### Historical proposed path (not current; retained to explain a rejected direction)
 
 **Full Metal proxy**: chroot serializes every `MTL*` operation
 (`setBuffer/setTexture/setRenderPipelineState/draw…/blit*/commit`) →
@@ -222,7 +571,7 @@ the device's interactive shell, so pass it explicitly:
 
 ```bash
 # From macOS, over SSH (one-liner):
-ssh -p 2222 root@192.168.5.8 \
+ssh -p <SSH_PORT> mobile@<DEVICE> \
   'THEOS=/var/jb/var/mobile/theos bash /var/jb/var/mobile/MacWSBootingGuide/misc/build_on_ios.sh'
 ```
 
@@ -231,7 +580,7 @@ build version → fix arm64e interpose section → re-sign → postinst.
 
 After a successful build, verify with:
 ```bash
-ssh -p 2222 root@192.168.5.8 'sudo bash /var/jb/usr/macOS/bin/run_bash.sh -c "echo hi"'
+ssh -p <SSH_PORT> mobile@<DEVICE> 'sudo bash /var/jb/usr/macOS/bin/run_bash.sh -c "echo hi"'
 # Expected output: "chdir: No such file or directory" (harmless), then "hi", exit 0
 ```
 
@@ -268,7 +617,9 @@ After install, on the device:
 sudo bash /var/jb/usr/macOS/bin/postinst.sh
 ```
 
-There are no automated tests. Debug with:
+The repository now has focused unit/contract tests under `misc/`. Run the
+focused test for the changed subsystem first, then the complete suite when
+feasible. Runtime investigation still commonly uses:
 ```bash
 sudo oslog | grep "AMFI\|debugbydcmmc\|launchd\|launchser\|WindowSer\|MTL\|Metal\|Terminal\|iolation"
 ```
@@ -277,7 +628,10 @@ sudo oslog | grep "AMFI\|debugbydcmmc\|launchd\|launchser\|WindowSer\|MTL\|Metal
 
 ### Subprojects
 
-The root `Makefile` builds six subprojects:
+The root `Makefile` is the aggregate build entry point for the iOS host,
+daemons, tweaks, injected macOS compatibility layer, launch helpers and shared
+protocol code. The historical core groups are described below; inspect the
+current `SUBPROJECTS` value before assuming the list is exhaustive.
 
 **iOS-side (run in iOS context):**
 - `MTLCompilerBypassOSCheck/` — CydiaSubstrate tweak that patches `MTLCompilerService` platform checks so it will compile Metal shaders for a macOS (non-iOS) target.
@@ -450,10 +804,10 @@ python3                           # iOS procursus python3
 - `jbctl trustcache info` — no sudo needed (read-only, dumps all CDHashes)
 - `jbctl trustcache list` — **broken**, always returns empty; use `info` instead
 
-**Non-interactive sudo pattern** (for scripting from macOS via SSH):
-```bash
-echo 'alpine' | sudo -S bash /var/jb/usr/macOS/bin/run_bash.sh -c "command"
-```
+Prefer interactive `sudo` or the credential handling in
+`misc/device_pipeline.sh`. If automation is unavoidable, pass a temporary
+secret through the runner's environment; never put a password literal in a
+script, prompt, log, or repository.
 
 ### Extracting and Registering CDHashes
 
@@ -570,15 +924,15 @@ sudo launchctl load   /var/jb/usr/macOS/LaunchDaemons/com.apple.WindowServer.pli
 | `MACWS_AGX_CRASH_DIAG` | Installs a SIGSEGV handler that dumps x0–x29, sp, faulting PC, the 64 bytes around PC, and 64-byte memory at x19 + at `*(x19+0x28)`. **Critical** for AGX-native crashes where the C++ frame is mid-vector-op and lldb can't unwind | every AGX-native debug session — sole reason the Mempool::grow root cause was findable |
 | `MACWS_IOSURF_TRACE` | Logs every `IOSurfaceCreate` call + size + IOSurfaceID | when chasing cross-process IOSurface bridge issues |
 | `MACWS_ABORT_TRACE` | Installs a hook that prints stack frames on `abort()` / `__assert_rtn` before the program dies | tracing where assert hits came from |
-| `MACWS_HID_BYPASS` | Skip the bulk hook of 15 IOHIDEventSystem* APIs (kept narrow because bulk-hooking caused silent PAC-dispatch crashes) | leave OFF in production; see [[iomfbserver-bus-adraln-fix]] |
-| `MACWS_AGC_VERIFY_BYPASS` | Skip `verifyLoweredIR` in AGXCompilerCore | out-of-process MTLCompilerService runs the compile, so this is INERT in chroot — see [[agx-renamer-out-of-process-confirmed]] |
+| `MACWS_HID_BYPASS` | Skip the bulk hook of 15 IOHIDEventSystem* APIs (kept narrow because bulk-hooking caused silent PAC-dispatch crashes) | leave OFF in production; the bulk hook produced a runtime-confirmed PAC-dispatch crash |
+| `MACWS_AGC_VERIFY_BYPASS` | Skip `verifyLoweredIR` in AGXCompilerCore | out-of-process MTLCompilerService runs the compile, so this is inert in the chroot |
 | `MACWS_AGC_FASTMATH_HOOK` | Renamer patch for `agx.air.fract.v3f16.fast` | superseded by `MTLCompilerBypassOSCheck` tweak (also out-of-process) |
 | `MACWS_AGX_RENAMER_PATCH` | Alternative renamer patch entry-point | superseded — see above |
 | `MACWS_AGX_OBJC_AUTDA_PATCH` | Patch libobjc `autda` → `xpacd` to survive pre-PAC-signed ObjC ivars (on-device lld arm64e fixup ABI) | runtime-confirmed needed only on certain re-signing flows; keep OFF unless diagnosing `autda` traps |
 | `MACWS_AGX_SKIP_BIND_UPDATE` | NOP `MTLBindings::update_for_render_pass` BL inside AGX render-pass init (was a band-aid for setupDeferred crashes) | now implicit when `MACWS_AGX_NATIVE=1`; opt-out via `MACWS_AGX_KEEP_BIND_UPDATE=1` if testing without the skip |
 | `MACWS_AGX_TEX_BYPASS_GATE` | Bypass the `validateBufferTextureWithSize:` magic-footer check (`0x99b7d4010ce3ead3 / 0x92482f97c0394fd0`) | superseded by always-on patch in `objc_hooks.c`; A/B knob |
 | `MACWS_KEEP_VALIDATE_ALWAYS` | Restore the always-validate path | opposite of above — only when intentionally A/B'ing |
-| `MACWS_KEEP_ASSERT_BYPASS` | Keep the blanket `__assert_rtn → log+return` patch even after fixes land | LAZY — see [[feedback-no-lazy-nop-ret-bypass]]. Only honor with explicit user instruction |
+| `MACWS_KEEP_ASSERT_BYPASS` | Keep the blanket `__assert_rtn → log+return` patch even after fixes land | diagnostic scaffold only; never treat it as a fix, and honor it only for an explicitly requested A/B |
 | `MACWS_KEEP_RENDER_UPDATE_CBZ` | Keep render_update CBZ-bypass | LAZY — same as above |
 | `MACWS_GOT_SKIP_AUTH` | Skip authenticated-GOT slot patching during chained-fixup walker | diagnostic only — used while bootstrapping the chained-fixups walker; should be OFF in prod |
 | `MACWS_GOT_RAW_AUTH` | Write raw (unsigned) pointer into auth-GOT (no `ptrauth_sign_unauthenticated`) | diagnostic only |
@@ -587,7 +941,7 @@ sudo launchctl load   /var/jb/usr/macOS/LaunchDaemons/com.apple.WindowServer.pli
 
 | File / key | Value | Purpose |
 |---|---|---|
-| `layout/Library/LaunchDaemons/com.macwsguide.alloc.plist` `KeepAlive` | `False` | Prevents respawn loop when handler crashes — see [[ws-crash-loop-stop-immediately]] |
+| `layout/Library/LaunchDaemons/com.macwsguide.alloc.plist` `KeepAlive` | `False` | Prevents a runtime-confirmed rapid respawn loop when the handler crashes |
 | `layout/Library/LaunchDaemons/com.macwsguide.alloc.plist` `ThrottleInterval` | `60` | Lower bound on respawn cadence even if launchd-side flag flips |
 | `layout/Library/LaunchDaemons/com.macwsguide.alloc.plist` `RunAtLoad` | `True` | macwsallocd should be up before WS so the XPC service answer for `borrow-agx-conn` / `alloc-iosurf` is already listening |
 
@@ -628,19 +982,19 @@ This is the standard tool for signing after any `port install`, `brew install`, 
 
 ```bash
 # Sign everything MacPorts installed (most common case after port install):
-echo 'alpine' | sudo -S bash /var/jb/usr/macOS/bin/sign_installed.sh macports
+sudo bash /var/jb/usr/macOS/bin/sign_installed.sh macports
 
 # Sign everything Homebrew installed:
-echo 'alpine' | sudo -S bash /var/jb/usr/macOS/bin/sign_installed.sh homebrew
+sudo bash /var/jb/usr/macOS/bin/sign_installed.sh homebrew
 
 # Sign both (default):
-echo 'alpine' | sudo -S bash /var/jb/usr/macOS/bin/sign_installed.sh
+sudo bash /var/jb/usr/macOS/bin/sign_installed.sh
 
 # Sign an arbitrary directory (e.g. after extracting a tarball):
-echo 'alpine' | sudo -S bash /var/jb/usr/macOS/bin/sign_installed.sh /var/mnt/rootfs/usr/local/myapp
+sudo bash /var/jb/usr/macOS/bin/sign_installed.sh /var/mnt/rootfs/usr/local/myapp
 
 # After pip install — sign new .so files in Python site-packages:
-echo 'alpine' | sudo -S bash /var/jb/usr/macOS/bin/sign_installed.sh \
+sudo bash /var/jb/usr/macOS/bin/sign_installed.sh \
   /var/mnt/rootfs/opt/local/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages
 ```
 
@@ -658,12 +1012,12 @@ export ALL_PROXY=socks5h://127.0.0.1:1082
 EOF
 
 # Run it (no shebang needed — bash -s reads from stdin or bash <path> executes directly):
-echo 'alpine' | sudo -S bash /var/jb/usr/macOS/bin/run_bash.sh /tmp/myscript.sh
+sudo bash /var/jb/usr/macOS/bin/run_bash.sh /tmp/myscript.sh
 ```
 
 Or pipe inline via stdin (script stays on iOS filesystem):
 ```bash
-echo 'alpine' | sudo -S bash /var/jb/usr/macOS/bin/run_bash.sh -s << 'EOF'
+sudo bash /var/jb/usr/macOS/bin/run_bash.sh -s << 'EOF'
 export PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 echo "hello from chroot"
 EOF
@@ -798,7 +1152,7 @@ done
 
 ```bash
 # Quick smoke test — must exit 0 and print "hi":
-ssh -p 2222 root@192.168.5.8 \
+ssh -p <SSH_PORT> mobile@<DEVICE> \
   'sudo bash /var/jb/usr/macOS/bin/run_bash.sh -c "echo hi" 2>&1; echo "exit: $?"'
 # "chdir: No such file or directory" on stderr is harmless (falls back to /).
 # Any non-zero exit or SIGTRAP means libmachook is broken.
@@ -914,7 +1268,7 @@ Key lldb commands for diagnosing hangs:
 
 ### Skill: USB SSH via `iproxy` (port 22222 → device 22)
 
-WiFi SSH (`ssh -p 2222 root@192.168.5.8`) is the comfortable path but fails
+Wi-Fi SSH (`ssh -p <SSH_PORT> mobile@<DEVICE>`) is convenient but can fail
 when the device WiFi flaps under heavy iOS load (high load average kills WiFi
 keepalive). USB SSH stays up regardless of CPU pressure.
 
@@ -1076,7 +1430,8 @@ each variant. The expected outcomes:
 | Some perturbations cause `IOServiceClose`-on-error | The kernel is doing input validation, fuzz has triggered a different validation path |
 
 **RE-confirmed for sel=0x9 ResCreate**: all 10 perturbations fail `0xe00002c2`.
-Conclusion: structural — see [[agx-direct-path-all-three-paths-blocked]].
+Conclusion: structural for this historical path; the three blocked approaches
+and their evidence are summarized earlier in this file.
 
 ### Skill: One-shot hex dump for large opaque struct inputs
 
