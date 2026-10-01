@@ -30,6 +30,13 @@ int main(void) {
     assert(MacWSWindowTrailingAnchorOrigin(0, 1194, 1341, true) == 0);
     assert(MacWSWindowTrailingAnchorOrigin(0, 1194, 1000, true) == 194);
     assert(MacWSWindowTrailingAnchorOrigin(0, 1194, 1341, false) == -147);
+    assert(MacWSWindowScreenConstraintPolicy(true, true, true) ==
+        (MacWSWindowScreenConstraintPolicyUnboundedWidth |
+         MacWSWindowScreenConstraintPolicyUnboundedHeight));
+    assert(MacWSWindowScreenConstraintPolicy(true, false, true) ==
+        MacWSWindowScreenConstraintPolicyUnboundedHeight);
+    assert(MacWSWindowScreenConstraintPolicy(false, true, true) ==
+        MacWSWindowScreenConstraintPolicyNone);
     assert(MacWSWindowAxisValueAfterScreenConstraint(
         1341, 1194, true) == 1341);
     assert(MacWSWindowAxisValueAfterScreenConstraint(

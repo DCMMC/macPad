@@ -138,6 +138,7 @@ static uint64_t MacWSWindowMetricsGeneration;
 static id MacWSWindowGeometryObserverInstance;
 static BOOL MacWSWindowMetricsEventPublishPending;
 static char MacWSWindowConfigureAckKey;
+static char MacWSWindowScreenConstraintPolicyKey;
 static void MacWSPublishWindowMetrics(void);
 static void MacWSEnqueueAppInputRecord(MacWSInputRecord record);
 extern void MacWSInstallPreviewCoreImageRendererAdapter(void);
@@ -175,7 +176,7 @@ typedef struct {
 } MacWSHostConfigureFrameContext;
 static __thread MacWSHostConfigureFrameContext
     MacWSCurrentHostConfigureFrameContext;
-static __thread BOOL MacWSLoggedHostConfigureScreenConstraint;
+static __thread uint8_t MacWSLoggedHostConfigureScreenConstraintScopes;
 
 static void MacWSPostWorkspacePowerNotification(BOOL sleeping) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -493,56 +494,87 @@ static CGRect MacWSAppInputConstrainFrameRect(id self, SEL selector,
         : requested;
     MacWSHostConfigureFrameContext context =
         MacWSCurrentHostConfigureFrameContext;
-    if (context.window == self) {
+    BOOL configureTransaction = context.window == self;
+    CGRect applicationConstrainedFrame = context.applicationConstrainedFrame;
+    CGSize screenExtent = context.screenExtent;
+    BOOL unboundedWidth = context.unboundedWidth;
+    BOOL unboundedHeight = context.unboundedHeight;
+    if (!configureTransaction) {
+        NSNumber *policyNumber = objc_getAssociatedObject(
+            self, &MacWSWindowScreenConstraintPolicyKey);
+        uint8_t policy = policyNumber
+            ? (uint8_t)[policyNumber unsignedCharValue]
+            : MacWSWindowScreenConstraintPolicyNone;
+        if (policy != MacWSWindowScreenConstraintPolicyNone) {
+            id effectiveScreen = screen ?: ((MacWSMsgID)objc_msgSend)(
+                self, sel_registerName("screen"));
+            CGRect screenFrame = effectiveScreen
+                ? ((MacWSMsgRect)objc_msgSend)(
+                    effectiveScreen, sel_registerName("frame"))
+                : CGRectZero;
+            applicationConstrainedFrame = requested;
+            screenExtent = screenFrame.size;
+            unboundedWidth =
+                (policy & MacWSWindowScreenConstraintPolicyUnboundedWidth) != 0;
+            unboundedHeight =
+                (policy & MacWSWindowScreenConstraintPolicyUnboundedHeight) != 0;
+        }
+    }
+    BOOL sceneOwnedConstraint = configureTransaction ||
+        unboundedWidth || unboundedHeight;
+    if (sceneOwnedConstraint) {
         CGRect screenConstrained = constrained;
         BOOL restoreWidth = MacWSWindowAxisScreenConstraintShouldBeRestored(
-            context.applicationConstrainedFrame.size.width,
-            constrained.size.width, context.screenExtent.width,
-            context.unboundedWidth);
+            applicationConstrainedFrame.size.width,
+            constrained.size.width, screenExtent.width,
+            unboundedWidth);
         BOOL restoreHeight = MacWSWindowAxisScreenConstraintShouldBeRestored(
-            context.applicationConstrainedFrame.size.height,
-            constrained.size.height, context.screenExtent.height,
-            context.unboundedHeight);
+            applicationConstrainedFrame.size.height,
+            constrained.size.height, screenExtent.height,
+            unboundedHeight);
         constrained.origin.x = MacWSWindowAxisValueAfterScreenConstraint(
-            context.applicationConstrainedFrame.origin.x,
+            applicationConstrainedFrame.origin.x,
             constrained.origin.x, restoreWidth);
         constrained.size.width = MacWSWindowAxisValueAfterScreenConstraint(
-            context.applicationConstrainedFrame.size.width,
+            applicationConstrainedFrame.size.width,
             constrained.size.width, restoreWidth);
         constrained.origin.y = MacWSWindowAxisValueAfterScreenConstraint(
-            context.applicationConstrainedFrame.origin.y,
+            applicationConstrainedFrame.origin.y,
             constrained.origin.y, restoreHeight);
         constrained.size.height = MacWSWindowAxisValueAfterScreenConstraint(
-            context.applicationConstrainedFrame.size.height,
+            applicationConstrainedFrame.size.height,
             constrained.size.height, restoreHeight);
         BOOL restoredScreenConstraint =
             fabs(screenConstrained.origin.x - constrained.origin.x) > 0.25 ||
             fabs(screenConstrained.origin.y - constrained.origin.y) > 0.25 ||
             fabs(screenConstrained.size.width - constrained.size.width) > 0.25 ||
             fabs(screenConstrained.size.height - constrained.size.height) > 0.25;
+        uint8_t scope = configureTransaction ? 1u : 2u;
         if (restoredScreenConstraint &&
-            (!MacWSLoggedHostConfigureScreenConstraint ||
+            ((MacWSLoggedHostConfigureScreenConstraintScopes & scope) == 0 ||
              MacWSRuntimeDiagnosticsEnabled())) {
             fprintf(stderr,
                 "#### APP-INPUT CONFIGURE-SCREEN-CONSTRAINT pid=%d "
+                "scope=%s "
                 "window=%ld requested=(%.1f,%.1f %.1fx%.1f) "
                 "screen=(%.1f,%.1f %.1fx%.1f) "
                 "restored=(%.1f,%.1f %.1fx%.1f) unbounded=%s x %s\n",
                 getpid(),
+                configureTransaction ? "transaction" : "scene-owned",
                 (long)((MacWSMsgInteger)objc_msgSend)(
                     self, sel_registerName("windowNumber")),
-                context.applicationConstrainedFrame.origin.x,
-                context.applicationConstrainedFrame.origin.y,
-                context.applicationConstrainedFrame.size.width,
-                context.applicationConstrainedFrame.size.height,
+                applicationConstrainedFrame.origin.x,
+                applicationConstrainedFrame.origin.y,
+                applicationConstrainedFrame.size.width,
+                applicationConstrainedFrame.size.height,
                 screenConstrained.origin.x, screenConstrained.origin.y,
                 screenConstrained.size.width, screenConstrained.size.height,
                 constrained.origin.x, constrained.origin.y,
                 constrained.size.width, constrained.size.height,
-                context.unboundedWidth ? "YES" : "NO",
-                context.unboundedHeight ? "YES" : "NO");
+                unboundedWidth ? "YES" : "NO",
+                unboundedHeight ? "YES" : "NO");
             fflush(stderr);
-            MacWSLoggedHostConfigureScreenConstraint = YES;
+            MacWSLoggedHostConfigureScreenConstraintScopes |= scope;
         }
     }
     Class applicationClass = objc_getClass("NSApplication");
@@ -8917,6 +8949,14 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
             (record.flags & MacWSInputFlagConfigureAnchorTopLeft) != 0;
         BOOL anchorTopRight =
             (record.flags & MacWSInputFlagConfigureAnchorTopRight) != 0;
+        uint8_t screenConstraintPolicy = MacWSWindowScreenConstraintPolicy(
+            anchorTopLeft || anchorTopRight,
+            unboundedWidth, unboundedHeight);
+        objc_setAssociatedObject(window,
+            &MacWSWindowScreenConstraintPolicyKey,
+            screenConstraintPolicy == MacWSWindowScreenConstraintPolicyNone
+                ? nil : [NSNumber numberWithUnsignedChar:screenConstraintPolicy],
+            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         id windowScreen = ((MacWSMsgID)objc_msgSend)(
             window, sel_registerName("screen"));
         CGRect targetScreen = ((MacWSMsgRect)objc_msgSend)(

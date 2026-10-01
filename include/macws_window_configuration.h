@@ -101,10 +101,29 @@ static inline double MacWSWindowTrailingAnchorOrigin(
     return screenOrigin + screenExtent - windowExtent;
 }
 
+enum {
+    MacWSWindowScreenConstraintPolicyNone = 0,
+    MacWSWindowScreenConstraintPolicyUnboundedWidth = 1u << 0,
+    MacWSWindowScreenConstraintPolicyUnboundedHeight = 1u << 1,
+};
+
+// Exact Host Scenes remain the geometry authority after the synchronous
+// ConfigureWindow setter returns: AppKit may run another frame-constraint pass
+// while completing the resize.  Persist only the axes for which the
+// application published no reachable upper bound.  A real application maximum
+// therefore remains authoritative throughout the window's lifetime.
+static inline uint8_t MacWSWindowScreenConstraintPolicy(
+        bool exactHostScene, bool unboundedWidth, bool unboundedHeight) {
+    if (!exactHostScene) return MacWSWindowScreenConstraintPolicyNone;
+    return (unboundedWidth
+                ? MacWSWindowScreenConstraintPolicyUnboundedWidth : 0) |
+        (unboundedHeight
+                ? MacWSWindowScreenConstraintPolicyUnboundedHeight : 0);
+}
+
 // AppKit's screen constraint is a placement policy, not an application size
-// limit. During one explicitly scoped Host configure transaction, restore the
-// already application-constrained value only on an axis whose published
-// maximum is the transport's unbounded sentinel.
+// limit. Restore the application-requested value only on a Scene-owned axis
+// whose published maximum is the transport's unbounded sentinel.
 static inline double MacWSWindowAxisValueAfterScreenConstraint(
         double applicationConstrainedValue, double screenConstrainedValue,
         bool restoreApplicationConstrainedValue) {
