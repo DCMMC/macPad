@@ -315,13 +315,19 @@ enum {
 
 typedef uint16_t MacWSHostDisplayDensity;
 enum {
-    // One AppKit logical point maps to one UIKit Scene point. Retina backing
-    // scale is applied only while allocating/presenting drawable pixels and
-    // never feeds back into native Scene geometry.
-    MacWSHostDisplayDensityTouchComfort = 1,
-    // Retained persisted values, no longer selectable. More-space migrates
-    // to pixel matching; the old mild enlargement migrates to 125 percent.
-    MacWSHostDisplayDensityKeyboard = 2,
+    // Both selectable modes keep AppKit's real 2x Retina backing. Standard
+    // maps that source to the iPad drawable without resampling. More Space
+    // establishes more AppKit logical space per Scene point, so presentation
+    // only reduces a supersampled source; it never enlarges too few pixels.
+    MacWSHostDisplayDensityRetinaStandard = 1,
+    MacWSHostDisplayDensityRetinaMoreSpace = 2,
+    // Source-compatible names retained for older clients/producers.
+    MacWSHostDisplayDensityTouchComfort =
+        MacWSHostDisplayDensityRetinaStandard,
+    MacWSHostDisplayDensityKeyboard =
+        MacWSHostDisplayDensityRetinaMoreSpace,
+    // Persisted non-Retina enlargement modes. They are intentionally no
+    // longer selectable and normalize to Retina Standard on upgrade.
     MacWSHostDisplayDensityComfort = 3,
     MacWSHostDisplayDensityComfort125 = 4,
     MacWSHostDisplayDensityComfort150 = 5,
@@ -329,19 +335,15 @@ enum {
 
 static inline MacWSHostDisplayDensity MacWSNormalizedDisplayDensity(
         MacWSHostDisplayDensity density) {
-    if (density == MacWSHostDisplayDensityComfort ||
-        density == MacWSHostDisplayDensityComfort125)
-        return MacWSHostDisplayDensityComfort125;
-    if (density == MacWSHostDisplayDensityComfort150)
-        return MacWSHostDisplayDensityComfort150;
-    return MacWSHostDisplayDensityTouchComfort;
+    if (density == MacWSHostDisplayDensityRetinaMoreSpace)
+        return MacWSHostDisplayDensityRetinaMoreSpace;
+    return MacWSHostDisplayDensityRetinaStandard;
 }
 
 static inline double MacWSDisplayDensityFactor(
         MacWSHostDisplayDensity density) {
     density = MacWSNormalizedDisplayDensity(density);
-    if (density == MacWSHostDisplayDensityComfort125) return 1.25;
-    if (density == MacWSHostDisplayDensityComfort150) return 1.50;
+    if (density == MacWSHostDisplayDensityRetinaMoreSpace) return 0.85;
     return 1.0;
 }
 

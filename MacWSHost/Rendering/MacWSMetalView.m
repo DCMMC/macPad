@@ -532,7 +532,7 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     self.multipleTouchEnabled = YES;
     self.inputMode = MacWSHostInputModeDirect;
     self.fixedZoomScale = 1.5;
-    self.displayDensity = MacWSHostDisplayDensityTouchComfort;
+    self.displayDensity = MacWSHostDisplayDensityRetinaStandard;
     // Status polling enables interaction only after WindowServer, the input
     // socket and an exact-PID acknowledged frame are all present.  A stale
     // screenshot must never look like a live, touchable workspace.
@@ -1803,13 +1803,12 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     self.userInteractionEnabled = _macWSInputEnabled && !_windowTooSmall;
     if (_windowTooSmall) {
         NSString *densityName = self.displayDensity ==
-            MacWSHostDisplayDensityComfort150 ? @"舒适放大 150%" :
-            (self.displayDensity == MacWSHostDisplayDensityComfort125
-                ? @"舒适放大 125%" : @"像素匹配 Retina");
+            MacWSHostDisplayDensityRetinaMoreSpace
+                ? @"Retina 更多空间" : @"Retina 标准";
         _tooSmallLabel.text = [NSString stringWithFormat:
             @"窗口太小\n\n此 macOS 应用至少需要 %.0f × %.0f 点\n"
              "当前 %@ 模式需要约 %.0f × %.0f iPad 点\n\n"
-             "请放大 iPadOS 窗口，或切换到像素匹配模式。",
+             "请放大 iPadOS 窗口，或切换到 Retina 更多空间。",
             self.minimumLogicalSize.width,
             self.minimumLogicalSize.height,
             densityName, requiredWidth, requiredHeight];

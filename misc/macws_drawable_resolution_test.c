@@ -31,14 +31,21 @@ static void AssertNativeSampling(float viewWidth, float viewHeight,
 
 int main(void) {
     assert(MacWSNormalizedDisplayDensity(0) ==
-        MacWSHostDisplayDensityTouchComfort);
+        MacWSHostDisplayDensityRetinaStandard);
     assert(MacWSNormalizedDisplayDensity(MacWSHostDisplayDensityKeyboard) ==
-        MacWSHostDisplayDensityTouchComfort);
+        MacWSHostDisplayDensityRetinaMoreSpace);
     assert(MacWSNormalizedDisplayDensity(MacWSHostDisplayDensityComfort) ==
-        MacWSHostDisplayDensityComfort125);
-    assert(MacWSDisplayDensityFactor(MacWSHostDisplayDensityTouchComfort) == 1);
-    assert(MacWSDisplayDensityFactor(MacWSHostDisplayDensityComfort125) == 1.25);
-    assert(MacWSDisplayDensityFactor(MacWSHostDisplayDensityComfort150) == 1.50);
+        MacWSHostDisplayDensityRetinaStandard);
+    assert(MacWSNormalizedDisplayDensity(
+        MacWSHostDisplayDensityComfort125) ==
+        MacWSHostDisplayDensityRetinaStandard);
+    assert(MacWSNormalizedDisplayDensity(
+        MacWSHostDisplayDensityComfort150) ==
+        MacWSHostDisplayDensityRetinaStandard);
+    assert(MacWSDisplayDensityFactor(
+        MacWSHostDisplayDensityRetinaStandard) == 1);
+    assert(MacWSDisplayDensityFactor(
+        MacWSHostDisplayDensityRetinaMoreSpace) == 0.85);
     MacWSPresentationDrawableSize pixels = {0};
     // Runtime first-frame regression: a Retina source was permanently
     // presented at one pixel/point after an awaiting-source drawable.
@@ -67,15 +74,14 @@ int main(void) {
     AssertNativeSampling(938, 558, 1876, 1116, 1, 2);
     AssertNativeSampling(1060, 760, 1806, 1084, 1, 2); // letterbox
     AssertNativeSampling(500, 300, 1806, 1084, 1, 2); // clipping
-    AssertNativeSampling(484, 380, 880, 640, 1.10f, 2);
-    // Enlarged modes preserve the existing source-pixel budget; they must not
-    // fall back to one drawable pixel per UIKit point or feed prior drawable
-    // scale into logical geometry. Final iPad composition enlarges the source.
-    AssertNativeSampling(1100, 800, 1760, 1280, 1.25f, 2);
-    AssertNativeSampling(1320, 960, 1760, 1280, 1.50f, 2);
-    AssertNativeSampling(611.25f, 378.75f, 1760, 1280, 1.25f, 2);
-    AssertNativeSampling(733.5f, 454.5f, 1760, 1280, 1.50f, 2);
+    // Retina More Space asks AppKit for a larger 2x source and downsamples it
+    // into the native iPad drawable. Unlike the removed 125/150% modes, the
+    // source pixel budget is never smaller than the destination pixel budget.
     AssertNativeSampling(373.15f, 267.8f, 878, 630, 0.85f, 2);
+    assert(MacWSComputePresentationDrawableSize(
+        850, 600, 2000, 1412, 2, 0.85f, 2, true, &pixels));
+    assert(Near(pixels.width, 1700) && Near(pixels.height, 1200));
+    assert(2000 >= pixels.width && 1412 >= pixels.height);
     AssertNativeSampling(987, 582, 1806, 1084, 1, 1); // 1x display
 
     // Fullscreen source fit must preserve the drawable's Scene aspect even

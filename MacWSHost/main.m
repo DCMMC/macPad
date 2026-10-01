@@ -3035,10 +3035,10 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
                 forControlEvents:UIControlEventValueChanged];
 
     _densityControl = [[UISegmentedControl alloc]
-        initWithItems:@[@"像素匹配", @"舒适 125%", @"舒适 150%"]];
+        initWithItems:@[@"Retina 标准", @"Retina 更多空间"]];
     _densityControl.selectedSegmentIndex =
-        _metalView.displayDensity == MacWSHostDisplayDensityComfort150 ? 2 :
-        (_metalView.displayDensity == MacWSHostDisplayDensityComfort125 ? 1 : 0);
+        _metalView.displayDensity == MacWSHostDisplayDensityRetinaMoreSpace
+            ? 1 : 0;
     [_densityControl addTarget:self action:@selector(densityChanged:)
                forControlEvents:UIControlEventValueChanged];
 
@@ -3277,8 +3277,8 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     [_inputModeControl setTitle:(english ? @"Precision Trackpad" : @"精确触控板")
               forSegmentAtIndex:1];
     NSArray *density = english
-        ? @[@"Pixel Match", @"Larger 125%", @"Larger 150%"]
-        : @[@"像素匹配", @"舒适 125%", @"舒适 150%"];
+        ? @[@"Retina Standard", @"Retina More Space"]
+        : @[@"Retina 标准", @"Retina 更多空间"];
     NSArray *presentationResolution = english
         ? @[@"Auto Sharp", @"Always Sharp", @"Performance"]
         : @[@"自动清晰", @"始终清晰", @"性能优先"];
@@ -3287,9 +3287,10 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     NSArray *zoom = english ? @[@"Two-Finger Double-Tap 1.5×",
                                 @"Two-Finger Double-Tap 2.0×"]
                             : @[@"双指双击 1.5×", @"双指双击 2.0×"];
-    for (NSInteger index = 0; index < 3; index++) {
+    for (NSInteger index = 0; index < 2; index++)
         [_densityControl setTitle:density[(NSUInteger)index]
                 forSegmentAtIndex:index];
+    for (NSInteger index = 0; index < 3; index++) {
         [_performanceHUDControl setTitle:hud[(NSUInteger)index]
                 forSegmentAtIndex:index];
         [_presentationResolutionControl
@@ -4131,22 +4132,20 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 }
 
 - (void)densityChanged:(UISegmentedControl *)sender {
-    MacWSHostDisplayDensity density = sender.selectedSegmentIndex == 2
-        ? MacWSHostDisplayDensityComfort150
-        : (sender.selectedSegmentIndex == 1
-            ? MacWSHostDisplayDensityComfort125
-            : MacWSHostDisplayDensityTouchComfort);
+    MacWSHostDisplayDensity density = sender.selectedSegmentIndex == 1
+        ? MacWSHostDisplayDensityRetinaMoreSpace
+        : MacWSHostDisplayDensityRetinaStandard;
     _metalView.displayDensity = density;
     [NSUserDefaults.standardUserDefaults setInteger:density
                                               forKey:@"MacWSDisplayDensity"];
-    if (density != MacWSHostDisplayDensityTouchComfort) {
-        _inputLabel.text = [NSString stringWithFormat:
-            MacWSLocalized(@"显示：舒适放大 %.0f%% · 保留源 Retina 像素；逐像素显示请选择像素匹配",
-                @"Display: larger %.0f%% · preserves source Retina pixels; choose Pixel Match for exact mapping"),
-            MacWSDensityModeFactor(density) * 100.0];
+    if (density == MacWSHostDisplayDensityRetinaMoreSpace) {
+        _inputLabel.text = MacWSLocalized(
+            @"显示：Retina 更多空间 · AppKit 保持 2× backing，只缩小超采样源，不放大源像素",
+            @"Display: Retina More Space · AppKit stays at 2x; a supersampled source is only reduced, never enlarged");
     } else {
-        _inputLabel.text = MacWSLocalized(@"显示：像素匹配 Retina · macOS 与 iPadOS 逻辑尺寸 1:1",
-            @"Display: Pixel Match Retina · macOS and iPadOS logical size 1:1");
+        _inputLabel.text = MacWSLocalized(
+            @"显示：Retina 标准 · macOS backing 像素与 iPad drawable 逐像素匹配",
+            @"Display: Retina Standard · macOS backing pixels match the iPad drawable one for one");
     }
 }
 
