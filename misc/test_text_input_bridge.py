@@ -46,6 +46,14 @@ class TextInputBridgeTests(unittest.TestCase):
         self.assertIn("@selector(dismissSoftwareKeyboardTapped:)", host)
         self.assertIn("scroll.trailingAnchor constraintEqualToAnchor:dismiss.leadingAnchor", host)
         self.assertIn("[self.view.window endEditing:YES]", host)
+        self.assertIn("[self.view bringSubviewToFront:_softwareKeyBar]", host)
+        self.assertIn(
+            "_controlDismissLayer.bottomAnchor constraintEqualToAnchor:\n"
+            "            _softwareKeyBar.topAnchor",
+            host,
+        )
+        self.assertIn("software-toolbar-key keysym=", host)
+        self.assertIn("software-toolbar-modifier mask=", host)
         self.assertIn(
             "_softwareKeyBar.bottomAnchor constraintEqualToAnchor:root.bottomAnchor",
             host,

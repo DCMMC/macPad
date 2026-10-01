@@ -45,6 +45,7 @@
 #include "macws_control_protocol.h"
 #include "macws_catalyst_drawable_protocol.h"
 #include "macws_host_protocol.h"
+#include "macws_keyboard_text_input.h"
 #include "macws_text_input.h"
 #include "macws_touch_policy.h"
 #include "macws_viewport_math.h"
@@ -3213,7 +3214,11 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         [_controlDismissLayer.leadingAnchor constraintEqualToAnchor:root.leadingAnchor],
         [_controlDismissLayer.trailingAnchor constraintEqualToAnchor:root.trailingAnchor],
         [_controlDismissLayer.topAnchor constraintEqualToAnchor:root.topAnchor],
-        [_controlDismissLayer.bottomAnchor constraintEqualToAnchor:root.bottomAnchor],
+        // Keep the transparent control-center dismissal surface out of the
+        // interactive software-keyboard row. When the row is hidden, its top
+        // equals root.bottom and the original dismissal area is preserved.
+        [_controlDismissLayer.bottomAnchor constraintEqualToAnchor:
+            _softwareKeyBar.topAnchor],
         [_controlPanel.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:12],
         [_controlPanel.topAnchor constraintEqualToAnchor:controlTop constant:12],
         [_controlPanel.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-12],
@@ -3912,11 +3917,17 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 }
 
 - (BOOL)forwardHardwarePressEvent:(UIPressesEvent *)event {
-    if (_keyboardProxy.isFirstResponder || _appSearchField.isFirstResponder ||
-        !event)
+    if (_appSearchField.isFirstResponder || !event)
         return NO;
+    BOOL textInputActive = _keyboardProxy.isFirstResponder;
     BOOL forwarded = NO;
     for (UIPress *press in event.allPresses) {
+        UIKey *key = press.key;
+        if (textInputActive &&
+            (!key || !MacWSHardwareKeyRequiresMacRouteDuringTextInput(
+                (uint32_t)key.keyCode, (uint32_t)key.modifierFlags))) {
+            continue;
+        }
         BOOL keyDown = NO;
         switch (press.phase) {
             case UIPressPhaseBegan:
@@ -3934,8 +3945,10 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
                                                keyDown:keyDown] || forwarded;
     }
     if (forwarded && MacWSHostDiagnosticsEnabled()) {
-        MacWSLog(@"hardware-key-window-route presses=%lu target=%d",
-                 (unsigned long)event.allPresses.count, _metalView.targetPID);
+        MacWSLog(@"hardware-key-window-route presses=%lu target=%d "
+                 "text-input-active=%@",
+                 (unsigned long)event.allPresses.count, _metalView.targetPID,
+                 textInputActive ? @"YES" : @"NO");
     }
     return forwarded;
 }
@@ -3944,10 +3957,14 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     UIWindow *window = self.viewIfLoaded.window;
     if ([window respondsToSelector:@selector(_isApplicationKeyWindow)] &&
         ![window _isApplicationKeyWindow]) return;
-    if (_keyboardProxy.isFirstResponder || _appSearchField.isFirstResponder) {
+    if (_appSearchField.isFirstResponder) {
         [_metalView releaseHardwareKeyboardState];
         return;
     }
+    // A real hardware modifier/navigation event still belongs to the macOS
+    // window while the hidden UITextField keeps iOS IME composition alive.
+    // Releasing ownership here erased Control/Command immediately before the
+    // matching shortcut key arrived at the UIWindow boundary.
     [_metalView observeHardwareModifiersForEvent:event];
 }
 
@@ -4103,6 +4120,15 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     _metalView.softwareKeyboardActive = YES;
     _softwareKeyBar.hidden = NO;
     _softwareKeyBarHeightConstraint.constant = 52;
+    // The control-center dismiss layer and panel are intentionally installed
+    // after the workspace during view construction. Once the keyboard row
+    // becomes interactive it must be above both; otherwise the transparent
+    // dismiss layer wins hit-testing instead of delivering the key action.
+    [self.view bringSubviewToFront:_softwareKeyBar];
+    BOOL activated = [self activateCurrentMacWindow];
+    MacWSDiagnosticLog(@"software-keyboard-focus target=%d window=%u "
+        "activated=%@", _windowOwnerPID, _windowID,
+        activated ? @"YES" : @"NO");
     [UIView animateWithDuration:0.20 animations:^{
         [self.view layoutIfNeeded];
     }];
@@ -4137,9 +4163,20 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     configuration.cornerStyle = UIButtonConfigurationCornerStyleSmall;
     configuration.contentInsets = NSDirectionalEdgeInsetsMake(7, 10, 7, 10);
     sender.configuration = configuration;
+    BOOL activated = [self activateCurrentMacWindow];
+    MacWSDiagnosticLog(@"software-toolbar-modifier mask=%#x selected=%@ "
+        "modifiers=%#x target=%d window=%u activated=%@",
+        mask, sender.selected ? @"YES" : @"NO", _softModifiers,
+        _windowOwnerPID, _windowID, activated ? @"YES" : @"NO");
 }
 
 - (void)softKeyTapped:(UIButton *)sender {
+    BOOL activated = [self activateCurrentMacWindow];
+    MacWSDiagnosticLog(@"software-toolbar-key keysym=%#lx modifiers=%#x "
+        "target=%d window=%u activated=%@ input-enabled=%@",
+        (long)sender.tag, _softModifiers, _windowOwnerPID, _windowID,
+        activated ? @"YES" : @"NO",
+        _metalView.isMacWSInputEnabled ? @"YES" : @"NO");
     [_metalView emitSoftwareKeySym:(uint32_t)sender.tag
                          modifiers:_softModifiers];
 }
@@ -6320,6 +6357,31 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         [self setFullscreenWorkspaceEnabled:NO];
     } else if ([action isEqualToString:@"close-window"]) {
         [self closeCurrentWindow];
+    } else if ([action isEqualToString:@"test-software-toolbar-hit"]) {
+        if (!_keyboardProxy.isFirstResponder) [self keyboardAction];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     300 * NSEC_PER_MSEC),
+                       dispatch_get_main_queue(), ^{
+            [self.view layoutIfNeeded];
+            UIButton *control = (UIButton *)[self->_softwareKeyBar
+                viewWithTag:(1u << 18)];
+            CGPoint point = control
+                ? [control convertPoint:CGPointMake(
+                    CGRectGetMidX(control.bounds),
+                    CGRectGetMidY(control.bounds)) toView:self.view]
+                : CGPointZero;
+            UIView *hit = control
+                ? [self.view hitTest:point withEvent:nil] : nil;
+            BOOL controlOwnsHit = hit == control ||
+                (hit && [hit isDescendantOfView:control]);
+            MacWSLog(@"software-toolbar-hit control=%@ hidden=%@ enabled=%@ "
+                "point=(%.1f,%.1f) hit=%@ exact=%@ bar-front=%@",
+                control, control.hidden ? @"YES" : @"NO",
+                control.enabled ? @"YES" : @"NO", point.x, point.y, hit,
+                controlOwnsHit ? @"YES" : @"NO",
+                self.view.subviews.lastObject == self->_softwareKeyBar
+                    ? @"YES" : @"NO");
+        });
     } else if ([action isEqualToString:@"screenshot-ui"]) {
         [self writeHostUISnapshot];
     } else if ([action isEqualToString:@"screenshot-automation"]) {
@@ -8806,7 +8868,8 @@ static void MacWSDeduplicateWindowScenes(void) {
                @"test-open-file", @"test-quit", @"test-pasteboard-write",
                @"test-pasteboard-abstract-text",
                @"test-pasteboard-read", @"test-drag-snapshot",
-               @"test-drop-file", @"test-drop-data", @"fullscreen",
+               @"test-drop-file", @"test-drop-data",
+               @"test-software-toolbar-hit", @"fullscreen",
                @"enter-workspace", @"exit-workspace",
                @"close-window",
                @"screenshot-ui", @"screenshot-automation",
