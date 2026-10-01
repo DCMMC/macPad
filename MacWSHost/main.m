@@ -7499,6 +7499,8 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
             _targetWindowMissingCheckPending = NO;
             _targetWindowMissingSerial++;
             uint32_t resolvedID = resolvedWindow.descriptor.windowID;
+            int32_t previousOwnerPID = _windowOwnerPID;
+            uint32_t previousGroupID = _windowGroupID;
             _windowOwnerPID = resolvedWindow.descriptor.ownerPID;
             _windowGroupID = resolvedWindow.descriptor.logicalGroupID;
             _windowMinimumSize = CGSizeMake(
@@ -7594,7 +7596,22 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
             }
             if (resolvedID != _windowID) {
                 uint32_t oldID = _windowID;
-                [_metalView suspendStream];
+                // Runtime-confirmed in MacWSHost.log on iPad13,6/20D67:
+                // Terminal tab selection replaces the focused CGWindow ID
+                // inside the same logical group (819 <-> 820), and the next
+                // IOSurface arrives 45-80 ms later. suspendStream used to
+                // discard the still-valid group predecessor immediately,
+                // exposing a clear drawable during that bounded handoff.
+                // MacWSStreamClient rejects old-window frames after changing
+                // its subscription, while receivedFrame retires the retained
+                // predecessor behind the Metal completion fence. Preserve
+                // only this exact same-owner, same-group identity handoff;
+                // lifecycle/mode/cross-window transitions still suspend.
+                BOOL preserveGroupPredecessor =
+                    previousOwnerPID > 1 && previousGroupID != 0 &&
+                    resolvedWindow.descriptor.ownerPID == previousOwnerPID &&
+                    resolvedWindow.descriptor.logicalGroupID == previousGroupID;
+                if (!preserveGroupPredecessor) [_metalView suspendStream];
                 _windowID = resolvedID;
                 _metalView.targetPID = _windowOwnerPID;
                 [_metalView configureStreamMode:MacWSStreamModeWindow
@@ -7602,8 +7619,9 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
                 self.view.window.windowScene.title = resolvedWindow.title.length
                     ? resolvedWindow.title
                     : [NSString stringWithFormat:@"MacWS Window %u", _windowID];
-                MacWSLog(@"window-identity-follow owner=%d group=%u old=%u new=%u",
-                         _windowOwnerPID, _windowGroupID, oldID, _windowID);
+                MacWSLog(@"window-identity-follow owner=%d group=%u old=%u new=%u frame-preserved=%@",
+                         _windowOwnerPID, _windowGroupID, oldID, _windowID,
+                         preserveGroupPredecessor ? @"YES" : @"NO");
                 MacWSRememberSceneBinding(self.view.window.windowScene.session,
                                           [self streamRestorationActivity]);
             }

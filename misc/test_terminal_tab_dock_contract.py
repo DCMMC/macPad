@@ -1,0 +1,123 @@
+"""Source-contract regressions for tab handoff and floating-Dock geometry.
+
+These checks establish implementation invariants only. Visual acceptance is
+performed on the target iPad with the full iPadOS composite capture helper.
+"""
+from pathlib import Path
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+HOST = (ROOT / "MacWSHost/main.m").read_text()
+WINDOWING = (ROOT / "MacWSWindowing/Tweak.x").read_text()
+
+
+def body(source, signature):
+    start = source.index(signature)
+    opening = source.index("{", start)
+    depth, cursor = 1, opening + 1
+    while depth:
+        depth += (source[cursor] == "{") - (source[cursor] == "}")
+        cursor += 1
+    return source[opening + 1:cursor - 1]
+
+
+class TerminalTabHandoffContract(unittest.TestCase):
+    def test_same_owner_same_group_handoff_preserves_predecessor(self):
+        catalog = body(
+            HOST,
+            "- (void)metalView:(MacWSMetalView *)view\n  receivedWindows:",
+        )
+        handoff = catalog[catalog.index("if (resolvedID != _windowID)") :]
+        handoff = handoff[:handoff.index("} else if (")]
+        self.assertIn("resolvedWindow.descriptor.ownerPID == previousOwnerPID", handoff)
+        self.assertIn("resolvedWindow.descriptor.logicalGroupID == previousGroupID", handoff)
+        self.assertIn("if (!preserveGroupPredecessor) [_metalView suspendStream]", handoff)
+        self.assertLess(handoff.index("preserveGroupPredecessor"),
+                        handoff.index("configureStreamMode:MacWSStreamModeWindow"))
+        self.assertIn("frame-preserved=%@", handoff)
+
+    def test_cross_window_lifecycle_still_has_real_suspend_paths(self):
+        self.assertGreaterEqual(HOST.count("[_metalView suspendStream]"), 5)
+
+
+class FloatingDockGeometryContract(unittest.TestCase):
+    def test_helper_keeps_final_frame_inside_live_dock_exclusion(self):
+        helper = body(WINDOWING, "static CGRect MacWSHostFrameAvoidingFloatingDock(")
+        self.assertIn("CGRectGetMaxY(containerBounds) - floatingDockHeight", helper)
+        self.assertIn("safeBottom = dockTop - padding", helper)
+        self.assertIn("translatedY = dockTop - padding - frame.size.height", helper)
+        self.assertIn("frame.origin.y = translatedY", helper)
+        self.assertNotIn("frame.size.height =", helper)
+        self.assertNotIn("prefersDockHidden", helper)
+        self.assertNotIn("return CGRectIntegral(frame)", helper)
+        self.assertIn("translatedY >= topBoundary", helper)
+        self.assertIn("MacWSRequestFloatingDockYield(sceneIdentifier, frame)", helper)
+
+    def test_only_exact_host_item_is_adjusted_after_stock_calculation(self):
+        item = body(WINDOWING, "- (CGRect)_frameForLayoutRole:")
+        original = item.index("frame = %orig(")
+        host_guard = item.index("if (host) {", original)
+        adjust = item.index("MacWSHostFrameAvoidingFloatingDock(", host_guard)
+        self.assertLess(original, host_guard)
+        self.assertLess(host_guard, adjust)
+
+    def test_dock_avoidance_never_mutates_authoritative_size_policy(self):
+        self.assertNotIn("MacWSDockMaximumHeightByScene", WINDOWING)
+        self.assertNotIn("MacWSDockSafeCenteredModelHeight", WINDOWING)
+        self.assertNotIn("resize-response dock-constrained", WINDOWING)
+
+    def test_native_dock_controller_yields_when_translation_cannot_fit(self):
+        resolver = body(WINDOWING, "static id MacWSResolveFloatingDockController(")
+        self.assertIn('@"SBFloatingDockWindow"', resolver)
+        self.assertIn('@"floatingDockRootViewController"', resolver)
+        request = body(WINDOWING, "static BOOL MacWSRequestFloatingDockYield(")
+        self.assertIn('@"isFloatingDockPresented"', request)
+        self.assertIn('@"SBFloatingDockBehaviorAssertion"', request)
+        self.assertIn(
+            '@"initWithFloatingDockController:visibleProgress:animated:gesturePossible:atLevel:reason:withCompletion:"',
+            request,
+        )
+        self.assertIn("activeLevel + 1", request)
+        self.assertIn("route=native-behavior-assertion", request)
+        # Runtime proved one-shot dismissal is immediately superseded by the
+        # homescreen assertion. It remains only as a compatibility fallback.
+        self.assertIn('@"dismissFloatingDockIfPresentedAnimated:completionHandler:"', request)
+        self.assertIn("route=native-dismiss", request)
+
+    def test_native_dock_assertion_has_balanced_lifecycle(self):
+        release = body(WINDOWING, "static void MacWSReleaseFloatingDockYield(")
+        self.assertIn("removeObjectForKey:sceneIdentifier", release)
+        self.assertIn('@"invalidateWithCompletion:"', release)
+        self.assertIn('@"invalidate"', release)
+        helper = body(WINDOWING, "static CGRect MacWSHostFrameAvoidingFloatingDock(")
+        self.assertIn("hasYieldAssertion", helper)
+        self.assertIn("MacWSDockYieldGeometryByScene", helper)
+        self.assertIn('@"window-fits-dock-safe-region"', helper)
+        self.assertIn('@"container-geometry-changed"', helper)
+        current_stage = body(
+            WINDOWING, "static void MacWSReleaseDockYieldsOutsideCurrentStage(",
+        )
+        self.assertIn('@"_currentMainAppLayout"', current_stage)
+        self.assertIn('@"scene-left-current-stage"', current_stage)
+
+    def test_fullscreen_workspace_releases_dock_assertion(self):
+        self.assertIn(
+            'MacWSReleaseFloatingDockYield(\n'
+            '                requestedIdentifier, @"entered-fullscreen-workspace")',
+            WINDOWING,
+        )
+        self.assertIn(
+            'MacWSReleaseFloatingDockYield(\n'
+            '            requestedIdentifier, @"entering-fullscreen-workspace")',
+            WINDOWING,
+        )
+
+    def test_translation_preserves_native_padding_above_visible_dock(self):
+        helper = body(WINDOWING, "static CGRect MacWSHostFrameAvoidingFloatingDock(")
+        self.assertIn("dockTop - padding - frame.size.height", helper)
+        self.assertIn("topBoundary", helper)
+
+
+if __name__ == "__main__":
+    unittest.main()

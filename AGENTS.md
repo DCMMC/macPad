@@ -443,6 +443,164 @@ After every run, verify the cleanup command succeeded and inspect the process
 list. A forgotten benchmark or recursive log scan can materially heat the
 device and invalidate the next result.
 
+## Imported Project-Memory Ledger (complete audit: 2026-10-01)
+
+The former per-agent project memory directory contained one index and four
+topic files: macOS build SDK setup, Claude Code in the iOS chroot, the chroot
+SOCKS proxy, and autosignd on-demand signing. This section carries every
+durable fact from those files into the repository. It is intentionally
+self-contained: do not depend on a private agent memory store or resurrect
+the old cross-references. Where a 2026-06 observation is historical, that is
+stated explicitly; current source and current build outputs take precedence.
+
+### autosignd on-demand signing (introduced 2026-06-11)
+
+AMFI checks each `exec` in the kernel and kills a Mach-O whose CDHash is not
+admitted. Trustcache mutation must run in an iOS-platform process. A macOS
+process inside the chroot cannot call the jailbreak trust API directly because
+macOS dyld rejects the iOS `libjailbreak.dylib` with `incompatible platform:
+have 'iOS', need 'macOS'`. That is why signing is split across the chroot and
+an iOS-native daemon rather than implemented wholly in `libmachook`.
+
+- `autosignd/main.c` is an iOS/arm64 daemon. It listens at the host path
+  `/var/mnt/rootfs/tmp/autosignd.sock`, which is `/tmp/autosignd.sock` inside
+  the chroot. For each requested chroot path it prepends `/var/mnt/rootfs`,
+  runs `ldid -S<entitlements> -M`, extracts every present architecture's
+  CDHash, and admits each hash with `jbctl trustcache add`. An in-memory seen
+  set avoids repeated work. `postinst.sh` starts/restarts it and its historical
+  log location is `/var/mnt/rootfs/tmp/autosignd.log`.
+- `libmachook/exec_hooks.c` interposes `posix_spawn`, `posix_spawnp`,
+  `execve`, `execv`, and `execvp`. A bare executable is first resolved through
+  `PATH`; the hook sends its chroot path to autosignd, waits up to five seconds
+  for `OK`, then executes. The signing request is fail-open so an unavailable
+  daemon does not replace the real `exec` error. Each process keeps a
+  mutex-protected path cache. The `execl*` varargs forms normally enter the
+  covered array forms in libsystem.
+- Do not obtain an interposed original with `dlsym(RTLD_NEXT, ...)` here. That
+  returned NULL and caused a segfault. Under `DYLD_INTERPOSE`, call the symbol
+  directly (for example `execve(...)`); dyld does not re-interpose the
+  interposing image's own call. `os_log_hooks.m` uses the same contract.
+- Always ad-hoc re-sign with the project entitlements before adding the
+  CDHash. Trustcaching the existing Apple signature alone was runtime-tested
+  and still produced an AMFI SIGKILL because platform/library-validation state
+  remained incompatible. Re-sign plus trustcache ran successfully.
+
+The original end-to-end witness was a previously untrusted chroot binary that
+became signed and executable on first launch; autosignd also logged live child
+signing for tools such as `ps`, `bash`, `ioreg`, and `grep`. Keep this as the
+semantic contract, but revalidate current paths and hashes on a new build.
+
+### Chroot DNS and the self-contained proxy
+
+The chroot can have working IP connectivity while its macOS resolver and
+Security/Keychain services are unreachable, producing `Could not resolve
+host`. Proxy environment variables are useful only if an actual listener is
+running. A historical self-contained setup made the iOS device SSH to its own
+sshd and exposed a dynamic forward on loopback:
+
+```bash
+# One-time on the device: create a device-local key and authorize only that key.
+[ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
+cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+
+# Example only: use the device's actual local sshd port.
+ssh -f -N -D 127.0.0.1:1082 -o BatchMode=yes \
+  -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 -p <LOCAL_SSH_PORT> root@127.0.0.1
+```
+
+Use `ALL_PROXY=socks5h://127.0.0.1:1082` for tools that support SOCKS. The
+`h` is load-bearing: DNS is resolved by the proxy/iOS side; `socks5://` leaves
+DNS in the broken chroot. Verify the listener with a bounded `curl` through
+`socks5h`, not with iOS `netstat`, which was unreliable in this environment.
+Starting `ssh -f` from inside another SSH session can keep the parent waiting
+because inherited descriptors remain open even though the dynamic forward is
+already bound.
+
+Claude Code's undici client does not use a SOCKS proxy for its own API egress.
+It needs an `http://`/`https://` proxy whose upstream resolves DNS, such as a
+mixed HTTP-and-SOCKS `pproxy` listener. Claude's separate
+`CLAUDE_CODE_HOST_SOCKS_PROXY_PORT` is for sandboxed children and does not
+provide the parent client's egress.
+
+### Claude Code inside the macOS chroot (historical verified recipe)
+
+The native bun/JSC Claude Code binary was verified in this environment on
+2026-06-11 with version 2.1.170, then a roughly 222-MB single-architecture
+`darwin-arm64` Mach-O. That size/version is a historical witness, not a claim
+about the current release format.
+
+- The official installer rejected the chroot because `uname -m` reported the
+  iPad model identifier rather than `arm64`. The working installation path was
+  to read the release version endpoint and `manifest.json`, select the
+  `darwin-arm64` artifact and its SHA-256, download it directly, verify the
+  hash, install it at `/usr/local/bin/claude`, and mark it executable.
+  Python 3.13 was used for JSON and hashing because chroot `jq`/`shasum`
+  wrappers could hit the AMFI shebang constraint.
+- Sign and trustcache the binary and every native helper it spawns. The
+  historical manual command was `ldid -S<project-entitlements> -M <binary>`
+  followed by admission of each slice's CDHash; autosignd now owns the normal
+  first-exec path.
+- JSC initially attempted a 64-GiB gigacage virtual-address reservation and
+  aborted. Export `GIGACAGE_ENABLED=0`; increased-memory/extended-VA
+  entitlements did not solve it. Do **not** set `BUN_JSC_useGigacage`: bun
+  rejected that as an invalid JSC environment variable.
+- `claude -p` initially failed `posix_spawn('/usr/bin/security')` with
+  `EBADEXEC`/errno `-85`. Re-signing and trustcaching the fat arm64e+x86_64
+  `/usr/bin/security` allowed Claude to fall back to file credentials.
+  `postinst.sh` historically covered both `claude` and `security`, while the
+  chroot `.bashrc`/`.bash_profile` exported the TUI environment. Confirm those
+  source paths before assuming a fresh rootfs still has the block.
+- Its API client accepts HTTP(S), not SOCKS, proxy URLs. The chroot still has
+  no resolver, so the HTTP proxy must resolve on the upstream side. The
+  historical test found `SSL_CERT_FILE` did not affect Claude's own request,
+  but the standard chroot environment retains `/etc/ssl/cert.pem` because
+  other tools do require it.
+- Authentication can be supplied without `settings.json`:
+  `ANTHROPIC_API_KEY` selects `x-api-key`; `ANTHROPIC_AUTH_TOKEN` together
+  with `ANTHROPIC_BASE_URL` selects bearer authentication for a relay. An
+  internal gateway must not be sent through an unrelated external proxy: add
+  a fixed host mapping plus `NO_PROXY`, use a proxy with internal egress, or
+  choose the correct base URL. The historical dummy-key checks distinguished
+  `Not logged in` from `Invalid API key`, proving the variables were read.
+
+`claude --version` and `--help` are installation checks only. A real prompt
+still requires an API credential or interactive `/login` and working browser/
+network routing. The minimal run environment includes the explicit chroot
+`PATH`, `HOME=/Users/root`, `SSL_CERT_FILE=/etc/ssl/cert.pem`,
+`GIGACAGE_ENABLED=0`, and the appropriate proxy variables.
+
+### macOS cross-build SDK setup (2026-06 history plus current rule)
+
+The host build already used `gmake`, `ldid`, Python, codesign, SSH/SCP and a
+Theos checkout. Installing Homebrew `dpkg` or `fakeroot` was unnecessary:
+Theos's `bin/dm.pl`, `bin/fakeroot.sh`, and `GO_EASY_ON_ME=1` provide package
+creation.
+
+Two non-obvious SDK fixes were committed into the repository:
+
+1. The Theos iPhoneOS 16.5 SDK lacked `usr/include/xpc/`, although
+   `MTLSimDriverHost` and `libmachook` include `<xpc/xpc.h>`. The repository
+   vendors the needed headers under `vendor/ios-xpc/xpc/` and adds
+   `-isystem $(CURDIR)/../vendor/ios-xpc` to the affected subprojects.
+   `session.h` and `listener.h`, and their includes from `xpc.h`, were removed
+   because they require the newer `OS_OBJECT_DECL_SENDABLE_CLASS` macro from
+   iOS 17/macOS 14 rather than the target 16.5 SDK. See the vendored README.
+2. `launchservicesd` uses a macOS target, while Theos searches its platform SDK
+   directory and `$THEOS/sdks`, not the Command Line Tools SDK directory.
+   `misc/build.sh` locates the active CLT/Xcode SDK and version via `xcrun` and
+   symlinks it into `$THEOS/sdks` when no macOS SDK is available there. The
+   rejected alternative was compiling this boot-critical loader as iOS and
+   rewriting its platform tag afterward; keep the native macOS target.
+
+The obsolete `login` subproject was removed because it duplicated
+`launchdchrootexec`'s bash-spawn path and was never executed; its Makefile,
+postinstall trustcache entry, and directory were deleted. The memory recorded
+five root subprojects at that time and a hard-coded deploy target in the old
+`build.sh`. Both are historical implementation details. Always inspect the
+current root `SUBPROJECTS` and the current parameterized build/deploy scripts;
+never restore a user-specific destination or treat the old count as current.
+
 ## Historical AGX Bring-up Snapshot (not the current project goal)
 
 The following section records an early direct-AGX blocker investigation. It
