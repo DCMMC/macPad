@@ -6292,8 +6292,7 @@ static BOOL MacWSPostKeyRecord(MacWSInputRecord record, id application,
     BOOL controlModified = (modifiers & 0x40000u) != 0;
     BOOL exactSoftwareUnicode =
         record.source == MacWSInputSourceSoftwareKeyboard &&
-        MacWSKeySymIsEncodedUnicode(keySym) &&
-        !MacWSSoftwareKeyRequiresNativeProxy(keySym, (uint32_t)modifiers);
+        MacWSKeySymIsEncodedUnicode(keySym);
     BOOL canWrapCGEvent = keySym != 0xff1bu && !commandKeyEquivalent &&
         !exactSoftwareUnicode &&
         createKeyboardCGEvent && setCGEventFlags &&
@@ -9197,13 +9196,9 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         }
         if (!keyWindow) keyWindow = ((MacWSMsgID)objc_msgSend)(
             application, sel_registerName("mainWindow"));
-        BOOL exactSoftwareUnicode =
-            record.source == MacWSInputSourceSoftwareKeyboard &&
-            MacWSKeySymIsEncodedUnicode(record.contactID) &&
-            !MacWSSoftwareKeyRequiresNativeProxy(
-                record.contactID,
-                MacWSInputModifiersForScene(record.sceneID));
-        if (exactSoftwareUnicode && keyWindow) {
+        BOOL exactSoftwareKey =
+            record.source == MacWSInputSourceSoftwareKeyboard;
+        if (exactSoftwareKey && keyWindow) {
             id currentKeyWindow = ((MacWSMsgID)objc_msgSend)(
                 application, sel_registerName("keyWindow"));
             if (currentKeyWindow != keyWindow &&
@@ -9218,10 +9213,11 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
                     keyWindow, sel_registerName("firstResponder"));
                 fprintf(stderr,
                     "#### APP-INPUT TEXT-FOCUS pid=%d window=%u "
-                    "first-responder=%s keysym=%#x\n",
+                    "first-responder=%s keysym=%#x modifiers=%#x\n",
                     getpid(), requestedWindowNumber,
                     firstResponder ? object_getClassName(firstResponder) : "nil",
-                    record.contactID);
+                    record.contactID,
+                    MacWSInputModifiersForScene(record.sceneID));
                 fflush(stderr);
             }
         }

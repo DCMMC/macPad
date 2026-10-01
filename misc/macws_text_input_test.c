@@ -21,11 +21,6 @@ int main(void) {
     assert(MacWSKeySymIsEncodedUnicode(UINT32_C(0x0101f600))); // 😀
     assert(!MacWSKeySymIsEncodedUnicode(UINT32_C(0xff0d)));
     assert(!MacWSKeySymIsEncodedUnicode(UINT32_C(0x0100d800)));
-    assert(!MacWSSoftwareKeyRequiresNativeProxy(
-        UINT32_C(0x01004f60), 0));
-    assert(MacWSSoftwareKeyRequiresNativeProxy(UINT32_C(0xff0d), 0));
-    assert(MacWSSoftwareKeyRequiresNativeProxy('v', UINT32_C(0x00100000)));
-    assert(!MacWSSoftwareKeyRequiresNativeProxy('a', UINT32_C(0x00020000)));
 
     puts("text-input composition and exact Unicode routing PASS");
     return 0;

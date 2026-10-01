@@ -45,11 +45,13 @@ is the visible-output witness; process uptime alone was not used as success.
 - A Unicode commit resolves the requested NSWindow, makes it key if needed,
   preserves its existing `firstResponder`, and creates an NSEvent carrying
   that exact window number.
-- Control/Option/Command shortcuts and real function keys retain the native
-  keyboard proxy route.
+- Physical hardware keys retain the native keyboard proxy route. Software
+  toolbar keys, including Control/Option/Command chords and function keys,
+  retain the exact AppInput PID/window route.
 - The function row stays pinned to the root bottom. Its scroll viewport uses
-  a 72-point trailing exclusion lane when the system keyboard is compact or
-  floating; a docked, full-width software keyboard removes that exclusion.
+  a fixed dismiss button followed by a 144-point trailing exclusion lane when
+  the system keyboard is compact or floating; a docked, full-width software
+  keyboard removes that exclusion.
 
 ## Verification
 

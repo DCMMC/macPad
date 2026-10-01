@@ -27,7 +27,6 @@
 #include <objc/runtime.h>
 
 #include "macws_host_protocol.h"
-#include "macws_text_input.h"
 
 typedef uint32_t CGDirectDisplayID;
 typedef uint32_t CGEventType;
@@ -182,17 +181,15 @@ static bool IsSystemPointerKind(MacWSInputKind kind) {
     }
 }
 
-// Down and up must use the same session-vs-AppKit transport. In particular,
-// ordinary software text goes through AppInput on both edges; sending only
-// its up to the CG session would lose the original pair's destination.
+// Down and up must use the same session-vs-AppKit transport. Physical keys
+// keep the session proxy because its modifier snapshot models real held HID
+// state. Every software-toolbar key already carries an exact PID/window and
+// must remain on AppInput: sending arrows or Control/Command chords to the
+// global proxy discards the represented window and current AppKit responder.
 static bool IsNativeKeyboardProxyRecord(const MacWSInputRecord *record) {
     if (!record || (record->kind != MacWSInputKindKeyDown &&
                     record->kind != MacWSInputKindKeyUp)) return false;
-    uint32_t modifiers = MacWSInputModifiersForScene(record->sceneID);
-    return record->source == MacWSInputSourceHardwareKeyboard ||
-        (record->source == MacWSInputSourceSoftwareKeyboard &&
-         MacWSSoftwareKeyRequiresNativeProxy(
-             record->contactID, modifiers));
+    return record->source == MacWSInputSourceHardwareKeyboard;
 }
 
 static bool RecordIsValid(const MacWSInputRecord *record) {

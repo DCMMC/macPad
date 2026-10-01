@@ -42,7 +42,10 @@ class TextInputBridgeTests(unittest.TestCase):
         self.assertIn("Let UIKit mutate its real text-input client", host)
         self.assertIn("inputSafe.trailingAnchor", host)
         self.assertIn("systemKeyboardFrameDidChange:", host)
-        self.assertIn("fullWidthSoftwareKeyboard ? 0.0 : -72.0", host)
+        self.assertIn("fullWidthSoftwareKeyboard ? 0.0 : -144.0", host)
+        self.assertIn("@selector(dismissSoftwareKeyboardTapped:)", host)
+        self.assertIn("scroll.trailingAnchor constraintEqualToAnchor:dismiss.leadingAnchor", host)
+        self.assertIn("[self.view.window endEditing:YES]", host)
         self.assertIn(
             "_softwareKeyBar.bottomAnchor constraintEqualToAnchor:root.bottomAnchor",
             host,
@@ -51,7 +54,10 @@ class TextInputBridgeTests(unittest.TestCase):
     def test_unicode_commit_keeps_exact_appkit_window(self):
         broker = (ROOT / "macwsinputd" / "main.c").read_text()
         bridge = (ROOT / "libmachook" / "AppInputBridge.m").read_text()
-        self.assertIn("MacWSSoftwareKeyRequiresNativeProxy", broker)
+        self.assertIn(
+            "return record->source == MacWSInputSourceHardwareKeyboard;",
+            broker,
+        )
         self.assertIn("exactSoftwareUnicode", bridge)
         self.assertIn('sel_registerName("makeKeyWindow")', bridge)
         self.assertIn("APP-INPUT TEXT-FOCUS", bridge)

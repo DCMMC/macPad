@@ -1883,11 +1883,15 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
                                             modifier:NO];
     UIButton *dismiss = [self keyboardAccessoryButton:@"键盘↓" tag:0
                                               modifier:NO];
+    [dismiss removeTarget:self action:@selector(softKeyTapped:)
+          forControlEvents:UIControlEventTouchUpInside];
+    [dismiss addTarget:self action:@selector(dismissSoftwareKeyboardTapped:)
+        forControlEvents:UIControlEventTouchUpInside];
+    dismiss.translatesAutoresizingMaskIntoConstraints = NO;
     dismiss.accessibilityIdentifier = @"dismiss-keyboard";
     _softModifierButtons = @[control, option, command, shift];
     UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[
-        escape, control, option, command, shift, tab, left, up, down, right,
-        dismiss
+        escape, control, option, command, shift, tab, left, up, down, right
     ]];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     stack.axis = UILayoutConstraintAxisHorizontal;
@@ -1898,20 +1902,23 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     scroll.showsHorizontalScrollIndicator = NO;
     [scroll addSubview:stack];
     [input addSubview:scroll];
+    [input addSubview:dismiss];
     UILayoutGuide *inputSafe = input.safeAreaLayoutGuide;
     _softwareKeyBarTrailingConstraint =
-        [scroll.trailingAnchor constraintEqualToAnchor:inputSafe.trailingAnchor
-                                               constant:-72];
+        [dismiss.trailingAnchor constraintEqualToAnchor:inputSafe.trailingAnchor
+                                                constant:-144];
     [NSLayoutConstraint activateConstraints:@[
         [scroll.leadingAnchor constraintEqualToAnchor:inputSafe.leadingAnchor],
-        // iPadOS keeps its hardware-keyboard/input-method switcher in the
-        // bottom-trailing corner. That system-owned control does not always
-        // contribute a safe-area inset, so leave a bounded lane for it. The
-        // MacWS keys remain horizontally scrollable in narrow Stage Manager
-        // windows instead of becoming unreachable underneath the switcher.
+        // Keep the scrolling viewport wholly left of the fixed dismiss
+        // button. Its separate trailing constraint then reserves the entire
+        // iPadOS hardware-keyboard/input-method control cluster, so narrow
+        // Stage Manager windows cannot scroll a MacWS key under that overlay.
+        [scroll.trailingAnchor constraintEqualToAnchor:dismiss.leadingAnchor
+                                               constant:-6],
         _softwareKeyBarTrailingConstraint,
         [scroll.topAnchor constraintEqualToAnchor:input.topAnchor],
         [scroll.bottomAnchor constraintEqualToAnchor:input.bottomAnchor],
+        [dismiss.centerYAnchor constraintEqualToAnchor:input.centerYAnchor],
         [stack.leadingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.leadingAnchor constant:8],
         [stack.trailingAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.trailingAnchor constant:-8],
         [stack.topAnchor constraintEqualToAnchor:scroll.contentLayoutGuide.topAnchor],
@@ -4026,10 +4033,11 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     // A docked software keyboard already owns the complete lower edge. With
     // Magic Keyboard (or a floating keyboard), iPadOS instead leaves its
     // compact input-method control over the bottom-right of the app window.
-    // Reserve only that trailing lane; keeping the bar itself pinned to the
-    // root bottom avoids introducing a visible strip below macOS content.
+    // Reserve the complete 144-point control cluster, not merely the input
+    // button itself. Keeping the bar pinned to the root bottom avoids a strip
+    // below macOS content, while the fixed dismiss button stays tappable.
     _softwareKeyBarTrailingConstraint.constant =
-        fullWidthSoftwareKeyboard ? 0.0 : -72.0;
+        fullWidthSoftwareKeyboard ? 0.0 : -144.0;
 }
 
 - (void)keyboardProxyEditingChanged:(UITextField *)textField {
@@ -4061,9 +4069,19 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
             [_keyboardProxy unmarkText];
             [self keyboardProxyEditingChanged:_keyboardProxy];
         }
-        [_keyboardProxy resignFirstResponder];
-        [self setButton:_keyboardButton title:@"打开虚拟键盘"
-                   image:@"keyboard"];
+        BOOL resigned = [_keyboardProxy resignFirstResponder];
+        if (!resigned || _keyboardProxy.isFirstResponder) {
+            [self.view endEditing:YES];
+            [self.view.window endEditing:YES];
+        }
+        MacWSDiagnosticLog(@"software-keyboard-dismiss requested=YES "
+            "resigned=%@ first-responder=%@",
+            resigned ? @"YES" : @"NO",
+            _keyboardProxy.isFirstResponder ? @"YES" : @"NO");
+        if (!_keyboardProxy.isFirstResponder) {
+            [self setButton:_keyboardButton title:@"打开虚拟键盘"
+                       image:@"keyboard"];
+        }
     } else {
         [self resetKeyboardProxyBuffer];
         if ([_keyboardProxy becomeFirstResponder]) {
@@ -4122,12 +4140,13 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 }
 
 - (void)softKeyTapped:(UIButton *)sender {
-    if ([sender.accessibilityIdentifier isEqualToString:@"dismiss-keyboard"]) {
-        [self keyboardAction];
-        return;
-    }
     [_metalView emitSoftwareKeySym:(uint32_t)sender.tag
                          modifiers:_softModifiers];
+}
+
+- (void)dismissSoftwareKeyboardTapped:(UIButton *)sender {
+    (void)sender;
+    [self keyboardAction];
 }
 
 - (BOOL)textField:(UITextField *)textField

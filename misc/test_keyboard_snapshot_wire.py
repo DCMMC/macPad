@@ -49,8 +49,9 @@ int main(void) {
     r.magic=0;assert(!RecordIsValid(&r));
 
     // Both actual broker call sites use this one production predicate.
-    // Empty PID/geometry cannot swallow a native release, but ordinary
-    // software ASCII/Shift/Caps text must retain its AppInput pair.
+    // Empty PID/geometry cannot swallow a physical release. Every software
+    // toolbar key retains its exact AppInput pair, including special keys and
+    // Control/Option/Command chords.
     assert(!IsNativeKeyboardProxyRecord(NULL));
     const uint32_t modifiers[]={0,0x10000u,0x20000u,0x30000u,
         0x40000u,0x80000u,0x100000u,0x1e0000u};
@@ -61,9 +62,7 @@ int main(void) {
     for(unsigned k=0;k<sizeof(symbols)/sizeof(*symbols);k++) {
         r=(MacWSInputRecord){.kind=MacWSInputKindKeyDown,.source=source,
             .contactID=symbols[k],.sceneID=MacWSInputSceneForWindow(0,modifiers[m])};
-        bool expected=source==MacWSInputSourceHardwareKeyboard ||
-            (source==MacWSInputSourceSoftwareKeyboard &&
-             MacWSSoftwareKeyRequiresNativeProxy(symbols[k],modifiers[m]));
+        bool expected=source==MacWSInputSourceHardwareKeyboard;
         assert(IsNativeKeyboardProxyRecord(&r)==expected);
         r.kind=MacWSInputKindKeyUp;
         assert(IsNativeKeyboardProxyRecord(&r)==expected);
