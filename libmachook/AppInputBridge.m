@@ -9542,6 +9542,15 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         systemMenuWindowClass && ((MacWSMsgBoolID)objc_msgSend)(
             window, sel_registerName("isKindOfClass:"),
             (id)systemMenuWindowClass);
+    BOOL exactPointerStart = record.kind == MacWSInputKindTouchDown ||
+        record.kind == MacWSInputKindTap ||
+        record.kind == MacWSInputKindSecondaryTap;
+    BOOL processLocalPreciseScroll = record.kind == MacWSInputKindScroll &&
+        MacWSWindowPointUsesProcessLocalPreciseScroll(window, windowPoint);
+    BOOL beginsSystemScroll = record.kind == MacWSInputKindScroll &&
+        (record.flags & MacWSInputFlagScrollBegan) != 0 &&
+        !processLocalPreciseScroll &&
+        record.source != MacWSInputSourceVNC;
     // A title bar or other native frame region is intentionally outside the
     // content view. Process-local NSApplication.sendEvent: reaches neither
     // WindowServer's move/resize tracker nor its traffic-light tracking path;
@@ -9554,7 +9563,18 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
     Class nativeWindowClass = objc_getClass("NSWindow");
     SEL globalHitSelector = sel_registerName(
         "windowNumberAtPoint:belowWindowWithWindowNumber:");
-    if (nativeWindowClass && class_respondsToSelector(
+    // The synchronous AppKit global hit test crosses into WindowServer. It is
+    // an ownership proof for a new system pointer stream and for the first
+    // native CGPostScrollWheelEvent, but no consumer below reads it for an
+    // Electron/Catalyst precise scroll or for later phases of an already
+    // admitted native scroll. Runtime sample of VSCode pid 23141 on
+    // 2026-10-01 found 664/2087 main-thread samples blocked in
+    // SLSCopyWindowRoutingRecordsForScreenLocation while processing only 29
+    // coalesced scroll records; _latchViewForScrollEvent: and sendEvent: each
+    // accounted for one sample. Preserve the exact-window invariant at the
+    // transaction boundary without repeating that synchronous IPC at 120 Hz.
+    BOOL needsGlobalWindowHit = exactPointerStart || beginsSystemScroll;
+    if (needsGlobalWindowHit && nativeWindowClass && class_respondsToSelector(
             object_getClass(nativeWindowClass), globalHitSelector)) {
         globalWindowNumber = ((MacWSMsgIntegerPointInteger)objc_msgSend)(
             (id)nativeWindowClass, globalHitSelector, screenPoint, 0);
@@ -9565,9 +9585,6 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         MacWSClearDeferredRFBMoveEvents();
         return;
     }
-    BOOL exactPointerStart = record.kind == MacWSInputKindTouchDown ||
-        record.kind == MacWSInputKindTap ||
-        record.kind == MacWSInputKindSecondaryTap;
     BOOL catalystContentInput =
         MacWSCatalystWindowUsesProcessLocalInputAtPoint(window, windowPoint);
     id exactContentView = ((MacWSMsgID)objc_msgSend)(
@@ -9722,9 +9739,6 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         return;
     }
     if (record.kind == MacWSInputKindScroll) {
-        BOOL processLocalPreciseScroll =
-            MacWSWindowPointUsesProcessLocalPreciseScroll(
-                window, windowPoint);
         if (record.source == MacWSInputSourceFinger &&
             MacWSWindowUsesElectronPreciseScroll(window) &&
             (record.flags & MacWSInputFlagScrollChanged)) {
