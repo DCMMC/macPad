@@ -228,6 +228,14 @@ Display and windows:
 - Exact unbounded AppKit windows can grow beyond the virtual `NSScreen`; real
   application min/max/aspect/increment constraints still apply. Transient and
   genuinely bounded windows keep native AppKit constraints.
+- Floating-Dock avoidance must update the exact Host item's immutable
+  `SBDisplayItemLayoutAttributes.normalizedCenter` after stock whole-stage
+  auto layout, then clone the `SBAppLayout`. Modifying only
+  `_frameForLayoutRole:...` is non-authoritative: runtime logs returned `y=24`
+  while a full iPadOS capture still showed the centered window under the Dock.
+  Validate the new center with `centerInBounds:` and prove the size unchanged;
+  if the full size cannot coexist, retain the native floating-Dock behavior
+  assertion instead of adding a maximum-height constraint.
 
 Input and interoperability:
 

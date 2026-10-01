@@ -73,14 +73,17 @@ class ResizeStageContract(unittest.TestCase):
     def test_whole_stage_calculation_drops_programmatic_item_ownership(self):
         group = function_body(
             '- (id)_appLayoutByPerformingAutoLayoutIfNeededInAppLayout:')
+        original = group.index('laidOutAppLayout = %orig(')
         for cleared in ('MacWSActiveDenseGridPolicy = nil;',
                         'MacWSDenseGridScopeDepth = 0;',
                         'MacWSItemLayoutScopeDepth = 0;',
                         'MacWSInitialLayoutScopeDepth = 0;',
                         'MacWSActiveLayoutSceneIdentifier = nil;'):
-            self.assertLess(group.index(cleared), group.index('return %orig('))
+            self.assertLess(group.index(cleared), original)
         self.assertIn('MacWSActiveDenseGridPolicy = previousPolicy;', group)
         self.assertIn('MacWSDenseGridScopeDepth = previousDenseDepth;', group)
+        self.assertGreater(group.index('MacWSAppLayoutByAvoidingFloatingDock('),
+                           group.index('MacWSActiveDenseGridPolicy = previousPolicy;'))
 
     def test_nested_item_calculator_rebinds_each_sibling_exact_identity(self):
         item = function_body('- (CGRect)_frameForLayoutRole:')

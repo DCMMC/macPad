@@ -173,6 +173,20 @@ static CGSize MacWSMessageSize(id receiver, SEL selector) {
     return ((CGSize (*)(id, SEL))objc_msgSend)(receiver, selector);
 }
 
+static CGPoint MacWSMessagePoint(id receiver, SEL selector) {
+    if (!receiver || ![receiver respondsToSelector:selector])
+        return CGPointZero;
+    return ((CGPoint (*)(id, SEL))objc_msgSend)(receiver, selector);
+}
+
+static CGPoint MacWSMessagePointWithRect(id receiver, SEL selector,
+                                         CGRect rect) {
+    if (!receiver || ![receiver respondsToSelector:selector])
+        return CGPointZero;
+    return ((CGPoint (*)(id, SEL, CGRect))objc_msgSend)(
+        receiver, selector, rect);
+}
+
 static CGRect MacWSMessageRect(id receiver, SEL selector) {
     if (!receiver || ![receiver respondsToSelector:selector])
         return CGRectZero;
@@ -2086,14 +2100,13 @@ static NSArray<NSNumber *> *MacWSDenseCandidates(NSArray<NSNumber *> *source,
     return ordered.count ? ordered : source;
 }
 
-// A Host Scene may use a dense grid size that Apple's stock candidate table
-// never offered. The target SpringBoard still passes the live floating Dock
-// exclusion into its per-item frame calculator, but the returned frame can
-// retain that injected height and extend below the exclusion boundary.
-// Runtime-confirmed by the full iPadOS composite captured on iPad13,6/20D67:
-// the 1113-point Terminal Host Scene visibly continued underneath the Dock.
-// Correct the authoritative Scene frame here; adding a UIKit safe-area inset
-// would merely hide macOS pixels behind a blank strip inside the wrong frame.
+// Calculate the collision-free frame for one Host model without ever changing
+// its authoritative size. The result is consumed by
+// MacWSAppLayoutByAvoidingFloatingDock below to update the immutable
+// SBDisplayItemLayoutAttributes normalized center. Returning a different frame
+// only from _frameForLayoutRole: is insufficient: runtime logs at
+// 1790873129.927 showed that calculator returning y=24 while the full iPadOS
+// screenshot still showed SpringBoard presenting the original centered model.
 static CGRect MacWSHostFrameAvoidingFloatingDock(
         CGRect frame, CGRect containerBounds, CGFloat floatingDockHeight,
         CGFloat screenEdgePadding, CGFloat screenScale,
@@ -2188,6 +2201,161 @@ static CGRect MacWSHostFrameAvoidingFloatingDock(
     return frame;
 }
 
+// Runtime-confirmed on iPad13,6 / 20D67 at 1790873129.927:
+// normalizedCenter={0.5,0.5} resolves through -centerInBounds: to
+// {694.5,485} in {{0,0},{1389,970}}. Modifying only normalized y to
+// 0.44587628865979378 resolves through the same SpringBoard method to
+// {694.5,432.5}, the exact center of the desired unchanged 1171x817 frame at
+// y=24. Publish that center through Apple's immutable attributes/AppLayout
+// model; do not mutate a UIWindow, private ivar, or the user's size policy.
+static id MacWSAppLayoutByAvoidingFloatingDock(
+        id appLayout, CGRect containerBounds, id chamoisLayoutAttributes,
+        CGFloat floatingDockHeight, CGFloat screenScale) {
+    if (!appLayout || CGRectIsEmpty(containerBounds) ||
+        containerBounds.size.width <= 0.0 ||
+        containerBounds.size.height <= 0.0)
+        return appLayout;
+
+    NSArray *items = MacWSMessageObject(
+        appLayout, NSSelectorFromString(@"allItems"));
+    SEL attributesSelector =
+        NSSelectorFromString(@"layoutAttributesForItem:");
+    SEL normalizedSelector = NSSelectorFromString(@"normalizedCenter");
+    SEL centerSelector = NSSelectorFromString(@"centerInBounds:");
+    SEL modifyCenterSelector = NSSelectorFromString(
+        @"attributesByModifyingNormalizedCenter:");
+    SEL modifyLayoutSelector = NSSelectorFromString(
+        @"appLayoutByModifyingLayoutAttributes:forItem:");
+    CGSize defaultSize = MacWSMessageSize(
+        chamoisLayoutAttributes,
+        NSSelectorFromString(@"defaultWindowSize"));
+    CGFloat screenEdgePadding = MacWSMessageFloat(
+        chamoisLayoutAttributes,
+        NSSelectorFromString(@"screenEdgePadding"));
+    if (![items isKindOfClass:NSArray.class] ||
+        ![appLayout respondsToSelector:attributesSelector] ||
+        ![appLayout respondsToSelector:modifyLayoutSelector] ||
+        CGSizeEqualToSize(defaultSize, CGSizeZero))
+        return appLayout;
+
+    id adjustedLayout = appLayout;
+    for (id item in items) {
+        NSString *bundle = MacWSMessageObject(
+            item, NSSelectorFromString(@"bundleIdentifier"));
+        NSString *scene = MacWSMessageObject(
+            item, NSSelectorFromString(@"uniqueIdentifier"));
+        if (![bundle isEqualToString:@"com.macwsguide.host"] ||
+            scene.length == 0 || MacWSWorkspaceSinceByScene[scene])
+            continue;
+
+        id attributes = ((id (*)(id, SEL, id))objc_msgSend)(
+            adjustedLayout, attributesSelector, item);
+        if (![attributes respondsToSelector:normalizedSelector] ||
+            ![attributes respondsToSelector:centerSelector] ||
+            ![attributes respondsToSelector:modifyCenterSelector])
+            continue;
+
+        CGSize size = CGSizeZero;
+        if (!MacWSResolvedLayoutAttributesSize(
+                attributes, containerBounds, defaultSize,
+                screenEdgePadding, &size))
+            continue;
+        CGPoint center = MacWSMessagePointWithRect(
+            attributes, centerSelector, containerBounds);
+        if (!isfinite(center.x) || !isfinite(center.y)) continue;
+        CGRect originalFrame = CGRectMake(
+            center.x - size.width * 0.5,
+            center.y - size.height * 0.5,
+            size.width, size.height);
+        CGRect targetFrame = MacWSHostFrameAvoidingFloatingDock(
+            originalFrame, containerBounds, floatingDockHeight,
+            screenEdgePadding, screenScale, scene);
+        if (fabs(targetFrame.origin.x - originalFrame.origin.x) <= 0.25 &&
+            fabs(targetFrame.origin.y - originalFrame.origin.y) <= 0.25)
+            continue;
+
+        CGPoint normalizedCenter = MacWSMessagePoint(
+            attributes, normalizedSelector);
+        CGPoint targetCenter = CGPointMake(
+            CGRectGetMidX(targetFrame), CGRectGetMidY(targetFrame));
+        CGPoint targetNormalizedCenter = CGPointMake(
+            normalizedCenter.x +
+                (targetCenter.x - center.x) / containerBounds.size.width,
+            normalizedCenter.y +
+                (targetCenter.y - center.y) / containerBounds.size.height);
+        if (!isfinite(targetNormalizedCenter.x) ||
+            !isfinite(targetNormalizedCenter.y))
+            continue;
+
+        id adjustedAttributes =
+            ((id (*)(id, SEL, CGPoint))objc_msgSend)(
+                attributes, modifyCenterSelector, targetNormalizedCenter);
+        CGPoint resolvedTargetCenter = MacWSMessagePointWithRect(
+            adjustedAttributes, centerSelector, containerBounds);
+        CGSize resolvedTargetSize = CGSizeZero;
+        BOOL sizePreserved = MacWSResolvedLayoutAttributesSize(
+            adjustedAttributes, containerBounds, defaultSize,
+            screenEdgePadding, &resolvedTargetSize) &&
+            fabs(resolvedTargetSize.width - size.width) <= 0.25 &&
+            fabs(resolvedTargetSize.height - size.height) <= 0.25;
+        BOOL centerResolved =
+            fabs(resolvedTargetCenter.x - targetCenter.x) <= 0.25 &&
+            fabs(resolvedTargetCenter.y - targetCenter.y) <= 0.25;
+        if (!adjustedAttributes || !sizePreserved || !centerResolved) {
+            if (MacWSWindowingDiagnosticsEnabled()) {
+                static NSMutableDictionary<NSString *, NSString *> *lastRejected;
+                if (!lastRejected)
+                    lastRejected = [NSMutableDictionary dictionary];
+                NSString *signature = [NSString stringWithFormat:
+                    @"%@/%@/%@/%@/%@", NSStringFromCGRect(originalFrame),
+                    NSStringFromCGRect(targetFrame),
+                    NSStringFromCGPoint(resolvedTargetCenter),
+                    NSStringFromCGSize(resolvedTargetSize),
+                    centerResolved ? @"center" : @"no-center"];
+                if (![lastRejected[scene] isEqualToString:signature]) {
+                    lastRejected[scene] = signature;
+                    MacWSWindowingLogLine([NSString stringWithFormat:
+                        @"dock-center-rejected scene=%@ original=%@ target=%@ normalized=%@ resolved-center=%@ resolved-size=%@ size-preserved=%@ center-resolved=%@",
+                        scene, NSStringFromCGRect(originalFrame),
+                        NSStringFromCGRect(targetFrame),
+                        NSStringFromCGPoint(targetNormalizedCenter),
+                        NSStringFromCGPoint(resolvedTargetCenter),
+                        NSStringFromCGSize(resolvedTargetSize),
+                        sizePreserved ? @"YES" : @"NO",
+                        centerResolved ? @"YES" : @"NO"]);
+                }
+            }
+            continue;
+        }
+
+        id candidateLayout = ((id (*)(id, SEL, id, id))objc_msgSend)(
+            adjustedLayout, modifyLayoutSelector, adjustedAttributes, item);
+        if (!candidateLayout) continue;
+        adjustedLayout = candidateLayout;
+        if (MacWSWindowingDiagnosticsEnabled()) {
+            static NSMutableDictionary<NSString *, NSString *> *lastAdjusted;
+            if (!lastAdjusted)
+                lastAdjusted = [NSMutableDictionary dictionary];
+            NSString *signature = [NSString stringWithFormat:
+                @"%@/%@/%@", NSStringFromCGRect(containerBounds),
+                NSStringFromCGRect(originalFrame),
+                NSStringFromCGRect(targetFrame)];
+            if (![lastAdjusted[scene] isEqualToString:signature]) {
+                lastAdjusted[scene] = signature;
+                MacWSWindowingLogLine([NSString stringWithFormat:
+                    @"dock-center-adjusted scene=%@ dock-height=%.1f container=%@ original=%@ target=%@ normalized=%@ resolved-center=%@ size-preserved=YES route=immutable-app-layout",
+                    scene, floatingDockHeight,
+                    NSStringFromCGRect(containerBounds),
+                    NSStringFromCGRect(originalFrame),
+                    NSStringFromCGRect(targetFrame),
+                    NSStringFromCGPoint(targetNormalizedCenter),
+                    NSStringFromCGPoint(resolvedTargetCenter)]);
+            }
+        }
+    }
+    return adjustedLayout;
+}
+
 %hook SBHomeGestureToSwitcherSwitcherModifier
 - (id)adjustedAppLayoutsForAppLayouts:(id)layouts {
     NSArray *adjusted = %orig(layouts);
@@ -2260,11 +2428,13 @@ overlappingModelBeforeDragging:(id)overlappingModelBeforeDragging
     MacWSActiveLayoutSceneIdentifier = nil;
     MacWSInitialGridObserved = NO;
     MacWSGroupLayoutScopeDepth++;
+    id laidOutAppLayout = nil;
     @try {
-        return %orig(appLayout, containerOrientation, chamoisLayoutAttributes,
-                     floatingDockHeight, screenScale, draggingItem,
-                     overlappingModelBeforeDragging, bounds,
-                     prefersStripHidden, prefersDockHidden);
+        laidOutAppLayout = %orig(
+            appLayout, containerOrientation, chamoisLayoutAttributes,
+            floatingDockHeight, screenScale, draggingItem,
+            overlappingModelBeforeDragging, bounds,
+            prefersStripHidden, prefersDockHidden);
     } @finally {
         MacWSGroupLayoutScopeDepth--;
         MacWSInitialGridObserved = previousInitialGridObserved;
@@ -2277,6 +2447,9 @@ overlappingModelBeforeDragging:(id)overlappingModelBeforeDragging
         MacWSActiveResizeGestureModifier = previousModifier;
         MacWSGroupResizeGestureModifier = previousGroupModifier;
     }
+    return MacWSAppLayoutByAvoidingFloatingDock(
+        laidOutAppLayout, bounds, chamoisLayoutAttributes,
+        floatingDockHeight, screenScale);
 }
 
 - (CGRect)_frameForLayoutRole:(NSInteger)layoutRole
@@ -2403,23 +2576,6 @@ overlappingModelBeforeDragging:(id)overlappingModelBeforeDragging
                       containerOrientation, chamoisLayoutAttributes,
                       floatingDockHeight, screenScale, isChamoisWindowingUIEnabled,
                       prefersStripHidden, prefersDockHidden, skipAutoLayout);
-        if (host) {
-            CGRect originalFrame = frame;
-            CGFloat screenEdgePadding = MacWSMessageFloat(
-                chamoisLayoutAttributes,
-                NSSelectorFromString(@"screenEdgePadding"));
-            frame = MacWSHostFrameAvoidingFloatingDock(
-                frame, containerBounds, floatingDockHeight,
-                screenEdgePadding, screenScale, scene);
-            if (!CGRectEqualToRect(originalFrame, frame)) {
-                MacWSWindowingLogLine([NSString stringWithFormat:
-                    @"item-layout-dock-avoidance scene=%@ dock-height=%.1f container=%@ original=%@ result=%@",
-                    scene, floatingDockHeight,
-                    NSStringFromCGRect(containerBounds),
-                    NSStringFromCGRect(originalFrame),
-                    NSStringFromCGRect(frame)]);
-            }
-        }
         initialGridObserved = MacWSInitialGridObserved;
     } @finally {
         MacWSInitialGridObserved = previousInitialGridObserved;

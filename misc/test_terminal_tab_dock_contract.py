@@ -55,13 +55,46 @@ class FloatingDockGeometryContract(unittest.TestCase):
         self.assertIn("canFitWithDock", helper)
         self.assertIn("MacWSRequestFloatingDockYield(sceneIdentifier, frame)", helper)
 
-    def test_only_exact_host_item_is_adjusted_after_stock_calculation(self):
+    def test_authoritative_immutable_model_is_adjusted_after_stock_layout(self):
+        group = body(
+            WINDOWING,
+            "- (id)_appLayoutByPerformingAutoLayoutIfNeededInAppLayout:",
+        )
+        original = group.index("laidOutAppLayout = %orig(")
+        adjust = group.index("MacWSAppLayoutByAvoidingFloatingDock(", original)
+        self.assertLess(original, adjust)
+
+        model = body(
+            WINDOWING, "static id MacWSAppLayoutByAvoidingFloatingDock(",
+        )
+        self.assertIn('@"com.macwsguide.host"', model)
+        self.assertIn("MacWSWorkspaceSinceByScene[scene]", model)
+        self.assertIn('@"centerInBounds:"', model)
+        self.assertIn('@"attributesByModifyingNormalizedCenter:"', model)
+        self.assertIn(
+            '@"appLayoutByModifyingLayoutAttributes:forItem:"', model,
+        )
+        self.assertIn("sizePreserved", model)
+        self.assertIn("centerResolved", model)
+        self.assertIn(
+            "(targetCenter.y - center.y) / containerBounds.size.height",
+            model,
+        )
+        self.assertIn("route=immutable-app-layout", model)
+
+    def test_repeated_internal_layout_witnesses_are_deduplicated(self):
+        model = body(
+            WINDOWING, "static id MacWSAppLayoutByAvoidingFloatingDock(",
+        )
+        self.assertIn("lastAdjusted[scene]", model)
+        self.assertIn("lastRejected[scene]", model)
+        self.assertIn("MacWSWindowingDiagnosticsEnabled()", model)
+
+    def test_non_authoritative_item_frame_is_not_mutated(self):
         item = body(WINDOWING, "- (CGRect)_frameForLayoutRole:")
-        original = item.index("frame = %orig(")
-        host_guard = item.index("if (host) {", original)
-        adjust = item.index("MacWSHostFrameAvoidingFloatingDock(", host_guard)
-        self.assertLess(original, host_guard)
-        self.assertLess(host_guard, adjust)
+        self.assertIn("frame = %orig(", item)
+        self.assertNotIn("MacWSHostFrameAvoidingFloatingDock(", item)
+        self.assertNotIn("frame.origin", item)
 
     def test_dock_avoidance_never_mutates_authoritative_size_policy(self):
         self.assertNotIn("MacWSDockMaximumHeightByScene", WINDOWING)
