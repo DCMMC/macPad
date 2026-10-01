@@ -7898,6 +7898,38 @@ static NSUserActivity *MacWSLiveRestorationActivity(UIScene *scene) {
     return scene.session.stateRestorationActivity;
 }
 
+static MacWSViewController *MacWSPerformanceControllerForTargetPID(
+        int32_t targetPID, MacWSViewController *fallback) {
+    if (targetPID <= 1) return fallback;
+    MacWSViewController *fullscreenCandidate = nil;
+    for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class] ||
+            scene.activationState == UISceneActivationStateBackground ||
+            scene.activationState == UISceneActivationStateUnattached)
+            continue;
+        MacWSViewController *controller = nil;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if ([window.rootViewController
+                    isKindOfClass:MacWSViewController.class]) {
+                controller = (MacWSViewController *)window.rootViewController;
+                break;
+            }
+        }
+        if (!controller) continue;
+        NSDictionary *binding = controller.streamRestorationActivity.userInfo;
+        if ([binding[@"owner_pid"] intValue] == targetPID)
+            return controller;
+        if ([binding[@"mode"] unsignedIntValue] ==
+                MacWSStreamModeFullscreen && !fullscreenCandidate)
+            fullscreenCandidate = controller;
+    }
+    // A fullscreen workspace can profile any focused child process and does
+    // not have a fixed owner_pid binding. Prefer that visible controller when
+    // no exact per-window Scene exists; otherwise preserve the URL receiver's
+    // historical behavior.
+    return fullscreenCandidate ?: fallback;
+}
+
 static void MacWSPruneDeadWindowSceneSessions(void) {
     UIApplication *application = UIApplication.sharedApplication;
     if (!MacWSSceneSessionsPreservingMacWindow)
@@ -8287,8 +8319,31 @@ static void MacWSDeduplicateWindowScenes(void) {
 }
 
 - (void)sceneDidDisconnect:(UIScene *)scene {
+    MacWSViewController *controller =
+        [self.window.rootViewController
+            isKindOfClass:MacWSViewController.class]
+        ? (MacWSViewController *)self.window.rootViewController : nil;
+    uint32_t disconnectedWindowID =
+        [controller.streamRestorationActivity.userInfo[@"window_id"]
+            unsignedIntValue];
+    // A disconnected Scene has no presentation authority even when its
+    // AppKit window is deliberately preserved for a replacement Scene.
+    // Stop it synchronously: the Catalyst drawable receiver is process-global
+    // and each delivery carries one transferable IOSurface use count, so a
+    // retained controller with an admitted stream can otherwise claim every
+    // frame before the visible replacement window. Runtime-confirmed on
+    // 2026-10-01: after the fullscreen Scene disconnected, displayd kept
+    // validating owner 63374/layer 497 as mode=fullscreen-layer while the
+    // visible mode=2/window=497 profile received zero direct frames.
+    [controller suspendSceneStream];
+    MacWSLog(@"runtime-confirmed scene-disconnect stream-suspended id=%@ window=%u",
+             scene.session.persistentIdentifier,
+             disconnectedWindowID);
     // Disconnect alone can be ordinary resource reclamation. Close only after
     // UIKit has actually removed the persistent session from openSessions.
+    // Stream ownership and AppKit-window lifetime are separate invariants:
+    // suspending above releases presentation resources but does not close the
+    // preserved macOS window.
     UISceneSession *session = scene.session;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 600 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
@@ -8587,9 +8642,33 @@ static void MacWSDeduplicateWindowScenes(void) {
                     break;
                 }
             }
+            MacWSViewController *fallback =
+                [self.window.rootViewController
+                    isKindOfClass:MacWSViewController.class]
+                ? (MacWSViewController *)self.window.rootViewController : nil;
             MacWSViewController *controller =
-                (MacWSViewController *)self.window.rootViewController;
+                MacWSPerformanceControllerForTargetPID(targetPID, fallback);
             [controller resetPerformanceMeasurementForTargetPID:targetPID];
+            break;
+        }
+        if ([host isEqualToString:@"performance-snapshot"]) {
+            int32_t targetPID = 0;
+            NSURLComponents *components = [NSURLComponents
+                componentsWithURL:context.URL resolvingAgainstBaseURL:NO];
+            for (NSURLQueryItem *item in components.queryItems) {
+                if ([item.name isEqualToString:@"pid"] &&
+                    item.value.intValue > 1) {
+                    targetPID = item.value.intValue;
+                    break;
+                }
+            }
+            MacWSViewController *fallback =
+                [self.window.rootViewController
+                    isKindOfClass:MacWSViewController.class]
+                ? (MacWSViewController *)self.window.rootViewController : nil;
+            MacWSViewController *controller =
+                MacWSPerformanceControllerForTargetPID(targetPID, fallback);
+            [controller performURLAction:@"performance-snapshot"];
             break;
         }
         if ([@[@"status", @"start", @"start-experimental", @"stop",

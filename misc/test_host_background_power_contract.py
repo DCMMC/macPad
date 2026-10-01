@@ -30,6 +30,18 @@ def test_scene_background_stops_status_timer_and_stream() -> None:
     assert "[_metalView suspendStream]" in section
 
 
+def test_disconnected_scene_relinquishes_process_global_drawable_delivery() -> None:
+    section = body(
+        HOST,
+        "- (void)sceneDidDisconnect:",
+        "- (void)scene:(UIScene *)scene openURLContexts:",
+    )
+    assert "[controller suspendSceneStream]" in section
+    assert section.index("[controller suspendSceneStream]") < section.index(
+        "dispatch_after")
+    assert "MacWSCloseMacWindowForSceneSession" in section
+
+
 def test_scene_resume_restarts_status_timer_once() -> None:
     section = body(
         HOST,

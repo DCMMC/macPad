@@ -380,9 +380,12 @@ def profile_marker(remote: Remote) -> str:
         check=False).strip()
 
 
-def fresh_host_profile(remote: Remote, previous: str,
+def fresh_host_profile(remote: Remote, previous: str, target_pid: int = 0,
                        timeout: float = 10.0) -> dict:
-    remote.run("uiopen --url macwshost://performance-snapshot", timeout=10)
+    snapshot_url = "macwshost://performance-snapshot"
+    if target_pid > 1:
+        snapshot_url += f"?pid={target_pid}"
+    remote.run("uiopen --url " + shlex.quote(snapshot_url), timeout=10)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         marker = profile_marker(remote)
@@ -797,7 +800,8 @@ def main():
         except json.JSONDecodeError:
             pass
     power_samples = parse_powermetrics(power_stdout)
-    host_profile = fresh_host_profile(remote, previous_profile)
+    host_profile = fresh_host_profile(
+        remote, previous_profile, args.target_pid)
     process_after = process_snapshot(
         remote, not args.skip_footprint, args.target_pid)
     thermal_after = thermal_snapshot(remote)

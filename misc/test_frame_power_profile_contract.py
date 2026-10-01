@@ -19,6 +19,40 @@ COMPARE_SPEC.loader.exec_module(COMPARE)
 
 
 class FramePowerProfileContract(unittest.TestCase):
+    def test_snapshot_url_routes_to_the_same_target_process_as_reset(self):
+        class RemoteFixture:
+            def __init__(self):
+                self.commands = []
+
+            def run(self, command, **_kwargs):
+                self.commands.append(command)
+                if command.startswith("stat "):
+                    return "fresh-marker"
+                if command.startswith("cat "):
+                    return "{}"
+                return ""
+
+        remote = RemoteFixture()
+        self.assertEqual(
+            PROFILE.fresh_host_profile(
+                remote, "old-marker", target_pid=42, timeout=0.1), {})
+        self.assertIn(
+            "uiopen --url 'macwshost://performance-snapshot?pid=42'",
+            remote.commands)
+
+    def test_host_routes_profile_urls_to_the_visible_owner_scene(self):
+        source = (ROOT / "MacWSHost" / "main.m").read_text()
+        self.assertIn("MacWSPerformanceControllerForTargetPID", source)
+        reset_start = source.index(
+            'if ([host isEqualToString:@"performance-reset"])')
+        snapshot_start = source.index(
+            'if ([host isEqualToString:@"performance-snapshot"])',
+            reset_start)
+        reset = source[reset_start:snapshot_start]
+        self.assertIn("MacWSPerformanceControllerForTargetPID", reset)
+        snapshot = source[snapshot_start:source.index("if ([@[", snapshot_start)]
+        self.assertIn("MacWSPerformanceControllerForTargetPID", snapshot)
+
     def test_cleanup_command_is_argv_only_and_reports_failure(self):
         success = PROFILE.run_cleanup_command(
             f"{shlex.quote(sys.executable)} -c " +
