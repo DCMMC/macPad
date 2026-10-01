@@ -408,10 +408,10 @@ enum {
     // makes AppKit constrain popovers against the same screen edge that bounds
     // the Scene capture instead of an arbitrary restored desktop position.
     MacWSInputFlagConfigureAnchorTopLeft = 1u << 13,
-    // Keep the captured window's upper-right corner on the real NSScreen edge.
-    // AppKit constrains popup-menu windows to NSScreen, not to their owner's
-    // frame; right anchoring therefore keeps a right-edge popup inside the
-    // exact-window DisplayStream instead of clipping it past the Scene edge.
+    // Keep an ordinary captured window's upper-right corner on the real
+    // NSScreen edge. If an application has no real maximum and its Scene grows
+    // wider than NSScreen, AppInput instead keeps the leading title-bar edge
+    // reachable; exact-window capture still represents the complete surface.
     MacWSInputFlagConfigureAnchorTopRight = 1u << 14,
     // Bounded lab probes may request latency aggregation at the receiving
     // AppInput endpoint. Production UIKit/VNC producers leave this clear.

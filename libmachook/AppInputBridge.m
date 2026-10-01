@@ -34,6 +34,7 @@
 #import "macws_power_lifecycle.h"
 #import "macws_menu_protocol.h"
 #import "macws_stream_protocol.h"
+#import "macws_window_configuration.h"
 #import "MacWSCatalystInputPolicy.h"
 #import "MacWSInputLatency.h"
 
@@ -159,6 +160,22 @@ static id MacWSRootPresentingWindow(id window, id application);
 static BOOL MacWSRuntimeDiagnosticsEnabled(void);
 static int MacWSWorkspaceWillSleepToken = -1;
 static int MacWSWorkspaceDidWakeToken = -1;
+
+// Main-thread-only dynamic scope around one Host ConfigureWindow setter. The
+// application maximum, aspect, increments and windowWillResize: response have
+// already been applied before this scope begins. It lets the existing
+// constrainFrameRect: hook distinguish AppKit's virtual-screen placement cap
+// from an application-authored size cap without changing global AppKit policy.
+typedef struct {
+    id window;
+    CGRect applicationConstrainedFrame;
+    CGSize screenExtent;
+    BOOL unboundedWidth;
+    BOOL unboundedHeight;
+} MacWSHostConfigureFrameContext;
+static __thread MacWSHostConfigureFrameContext
+    MacWSCurrentHostConfigureFrameContext;
+static __thread BOOL MacWSLoggedHostConfigureScreenConstraint;
 
 static void MacWSPostWorkspacePowerNotification(BOOL sleeping) {
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -474,6 +491,60 @@ static CGRect MacWSAppInputConstrainFrameRect(id self, SEL selector,
     CGRect constrained = MacWSOriginalConstrainFrameRect
         ? MacWSOriginalConstrainFrameRect(self, selector, requested, screen)
         : requested;
+    MacWSHostConfigureFrameContext context =
+        MacWSCurrentHostConfigureFrameContext;
+    if (context.window == self) {
+        CGRect screenConstrained = constrained;
+        BOOL restoreWidth = MacWSWindowAxisScreenConstraintShouldBeRestored(
+            context.applicationConstrainedFrame.size.width,
+            constrained.size.width, context.screenExtent.width,
+            context.unboundedWidth);
+        BOOL restoreHeight = MacWSWindowAxisScreenConstraintShouldBeRestored(
+            context.applicationConstrainedFrame.size.height,
+            constrained.size.height, context.screenExtent.height,
+            context.unboundedHeight);
+        constrained.origin.x = MacWSWindowAxisValueAfterScreenConstraint(
+            context.applicationConstrainedFrame.origin.x,
+            constrained.origin.x, restoreWidth);
+        constrained.size.width = MacWSWindowAxisValueAfterScreenConstraint(
+            context.applicationConstrainedFrame.size.width,
+            constrained.size.width, restoreWidth);
+        constrained.origin.y = MacWSWindowAxisValueAfterScreenConstraint(
+            context.applicationConstrainedFrame.origin.y,
+            constrained.origin.y, restoreHeight);
+        constrained.size.height = MacWSWindowAxisValueAfterScreenConstraint(
+            context.applicationConstrainedFrame.size.height,
+            constrained.size.height, restoreHeight);
+        BOOL restoredScreenConstraint =
+            fabs(screenConstrained.origin.x - constrained.origin.x) > 0.25 ||
+            fabs(screenConstrained.origin.y - constrained.origin.y) > 0.25 ||
+            fabs(screenConstrained.size.width - constrained.size.width) > 0.25 ||
+            fabs(screenConstrained.size.height - constrained.size.height) > 0.25;
+        if (restoredScreenConstraint &&
+            (!MacWSLoggedHostConfigureScreenConstraint ||
+             MacWSRuntimeDiagnosticsEnabled())) {
+            fprintf(stderr,
+                "#### APP-INPUT CONFIGURE-SCREEN-CONSTRAINT pid=%d "
+                "window=%ld requested=(%.1f,%.1f %.1fx%.1f) "
+                "screen=(%.1f,%.1f %.1fx%.1f) "
+                "restored=(%.1f,%.1f %.1fx%.1f) unbounded=%s x %s\n",
+                getpid(),
+                (long)((MacWSMsgInteger)objc_msgSend)(
+                    self, sel_registerName("windowNumber")),
+                context.applicationConstrainedFrame.origin.x,
+                context.applicationConstrainedFrame.origin.y,
+                context.applicationConstrainedFrame.size.width,
+                context.applicationConstrainedFrame.size.height,
+                screenConstrained.origin.x, screenConstrained.origin.y,
+                screenConstrained.size.width, screenConstrained.size.height,
+                constrained.origin.x, constrained.origin.y,
+                constrained.size.width, constrained.size.height,
+                context.unboundedWidth ? "YES" : "NO",
+                context.unboundedHeight ? "YES" : "NO");
+            fflush(stderr);
+            MacWSLoggedHostConfigureScreenConstraint = YES;
+        }
+    }
     Class applicationClass = objc_getClass("NSApplication");
     id application = applicationClass &&
         class_respondsToSelector(object_getClass(applicationClass),
@@ -8835,8 +8906,13 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         CGRect oldFrame = ((MacWSMsgRect)objc_msgSend)(
             window, sel_registerName("frame"));
         BOOL resizable = NO;
+        CGSize applicationMaximum = CGSizeZero;
         CGSize minimum = MacWSEffectiveMinimumFrameSize(
-            window, oldFrame, &resizable, NULL);
+            window, oldFrame, &resizable, &applicationMaximum);
+        BOOL unboundedWidth = MacWSWindowAxisMaximumIsUnbounded(
+            applicationMaximum.width, MACWS_STREAM_MAX_DIMENSION);
+        BOOL unboundedHeight = MacWSWindowAxisMaximumIsUnbounded(
+            applicationMaximum.height, MACWS_STREAM_MAX_DIMENSION);
         BOOL anchorTopLeft =
             (record.flags & MacWSInputFlagConfigureAnchorTopLeft) != 0;
         BOOL anchorTopRight =
@@ -8851,15 +8927,15 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         if ((anchorTopLeft || anchorTopRight) &&
             targetScreen.size.width > 0.0 && targetScreen.size.height > 0.0) {
             // An iPad Scene can be wider than the virtual macOS display (Stage
-            // Manager is one concrete case). Anchoring such a frame produced a
-            // 1242-pt VSCode window on a 1194-pt screen, permanently clipping a
-            // title-bar strip and constraining native dragging. Host-owned
-            // anchored windows must remain representable by the desktop; manual
-            // macOS resizes and native zoom retain AppKit's normal policy.
-            hostRequested.width = fmin(hostRequested.width,
-                                       targetScreen.size.width);
-            hostRequested.height = fmin(hostRequested.height,
-                                        targetScreen.size.height);
+            // Manager is one concrete case). Preserve an application's real
+            // maximum, but do not mistake NSScreen for that maximum when the
+            // application published the transport's unbounded sentinel.
+            hostRequested.width = MacWSWindowAxisRequestRespectingScreen(
+                hostRequested.width, targetScreen.size.width,
+                applicationMaximum.width, MACWS_STREAM_MAX_DIMENSION);
+            hostRequested.height = MacWSWindowAxisRequestRespectingScreen(
+                hostRequested.height, targetScreen.size.height,
+                applicationMaximum.height, MACWS_STREAM_MAX_DIMENSION);
         }
         CGSize maximum = oldFrame.size;
         CGSize aspect = CGSizeZero;
@@ -8873,8 +8949,9 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         newFrame.size = requested;
         if (anchorTopLeft || anchorTopRight) {
             newFrame.origin.x = anchorTopRight
-                ? targetScreen.origin.x + targetScreen.size.width -
-                    requested.width
+                ? MacWSWindowTrailingAnchorOrigin(
+                    targetScreen.origin.x, targetScreen.size.width,
+                    requested.width, unboundedWidth)
                 : targetScreen.origin.x;
             newFrame.origin.y = targetScreen.origin.y +
                 targetScreen.size.height - requested.height;
@@ -8884,8 +8961,21 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         SEL setter = sel_registerName("setFrame:display:animate:");
         if (!((MacWSMsgBoolSEL)objc_msgSend)(window,
                 sel_registerName("respondsToSelector:"), setter)) return;
+        MacWSHostConfigureFrameContext previousConfigureContext =
+            MacWSCurrentHostConfigureFrameContext;
+        MacWSCurrentHostConfigureFrameContext =
+            (MacWSHostConfigureFrameContext){
+                .window = window,
+                .applicationConstrainedFrame = newFrame,
+                .screenExtent = targetScreen.size,
+                .unboundedWidth = (anchorTopLeft || anchorTopRight) &&
+                    unboundedWidth,
+                .unboundedHeight = (anchorTopLeft || anchorTopRight) &&
+                    unboundedHeight,
+            };
         ((MacWSMsgVoidRectBoolBool)objc_msgSend)(
             window, setter, newFrame, YES, NO);
+        MacWSCurrentHostConfigureFrameContext = previousConfigureContext;
         // Complete AppKit's pending layout before recording accepted geometry.
         // RE-confirmed layoutIfNeeded at 0x184112454: updateConstraintsIfNeeded,
         // performPendingChangeNotifications, _changeWindowFrameFromConstraints
@@ -8911,8 +9001,9 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
             // it were 400 points wide, placing 45 points beyond the desktop.
             CGRect correctedFrame = appliedFrame;
             correctedFrame.origin.x = anchorTopRight
-                ? targetScreen.origin.x + targetScreen.size.width -
-                    appliedFrame.size.width
+                ? MacWSWindowTrailingAnchorOrigin(
+                    targetScreen.origin.x, targetScreen.size.width,
+                    appliedFrame.size.width, unboundedWidth)
                 : targetScreen.origin.x;
             correctedFrame.origin.y = targetScreen.origin.y +
                 targetScreen.size.height - appliedFrame.size.height;

@@ -65,6 +65,65 @@ static inline double MacWSWindowSceneExtentAtLeastMinimum(
     return fmax(round(preferred), ceil(minimum));
 }
 
+// AppInput caps all published maxima at the versioned transport ceiling. An
+// axis which reaches that ceiling therefore has no application-authored upper
+// bound that an iPad Scene can encounter. Do not confuse NSScreen's current
+// virtual desktop extent with an application maximum on that axis.
+static inline bool MacWSWindowAxisMaximumIsUnbounded(
+        double applicationMaximum, double transportMaximum) {
+    return isfinite(applicationMaximum) &&
+        isfinite(transportMaximum) && transportMaximum > 0.0 &&
+        applicationMaximum >= transportMaximum - 0.75;
+}
+
+static inline double MacWSWindowAxisRequestRespectingScreen(
+        double requested, double screenExtent, double applicationMaximum,
+        double transportMaximum) {
+    if (!isfinite(requested) || requested <= 0.0 ||
+        !isfinite(screenExtent) || screenExtent <= 0.0) return requested;
+    return MacWSWindowAxisMaximumIsUnbounded(
+        applicationMaximum, transportMaximum)
+        ? requested : fmin(requested, screenExtent);
+}
+
+// Keeping an oversized top-right-anchored window's trailing edge on NSScreen
+// would move its title-bar origin to a negative x coordinate. Exact-window
+// capture can represent the complete surface, but native popup and drag
+// ownership still require the leading title-bar edge to remain on-screen.
+static inline double MacWSWindowTrailingAnchorOrigin(
+        double screenOrigin, double screenExtent, double windowExtent,
+        bool keepLeadingEdgeForOversizedWindow) {
+    if (!isfinite(screenOrigin) || !isfinite(screenExtent) ||
+        !isfinite(windowExtent) || screenExtent <= 0.0 ||
+        windowExtent <= 0.0) return screenOrigin;
+    if (keepLeadingEdgeForOversizedWindow &&
+        windowExtent > screenExtent + 0.25) return screenOrigin;
+    return screenOrigin + screenExtent - windowExtent;
+}
+
+// AppKit's screen constraint is a placement policy, not an application size
+// limit. During one explicitly scoped Host configure transaction, restore the
+// already application-constrained value only on an axis whose published
+// maximum is the transport's unbounded sentinel.
+static inline double MacWSWindowAxisValueAfterScreenConstraint(
+        double applicationConstrainedValue, double screenConstrainedValue,
+        bool restoreApplicationConstrainedValue) {
+    return restoreApplicationConstrainedValue &&
+        isfinite(applicationConstrainedValue)
+        ? applicationConstrainedValue : screenConstrainedValue;
+}
+
+static inline bool MacWSWindowAxisScreenConstraintShouldBeRestored(
+        double requestedExtent, double screenConstrainedExtent,
+        double screenExtent, bool applicationAxisIsUnbounded) {
+    return applicationAxisIsUnbounded &&
+        isfinite(requestedExtent) && requestedExtent > 0.0 &&
+        isfinite(screenConstrainedExtent) &&
+        isfinite(screenExtent) && screenExtent > 0.0 &&
+        (screenConstrainedExtent < requestedExtent - 0.25 ||
+         requestedExtent > screenExtent + 0.25);
+}
+
 // A catalog snapshot is not a configure response. Only the timestamp and
 // sequence echoed after the owning NSWindow's completed layout can bind
 // accepted/constrained dimensions to an issued request. A newer queued Scene

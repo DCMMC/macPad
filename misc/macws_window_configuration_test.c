@@ -9,6 +9,44 @@ int main(void) {
     assert(MacWSWindowSceneExtentAtLeastMinimum(634.25, 634.25) == 635);
     assert(MacWSWindowSceneExtentAtLeastMinimum(500, 331.25) == 500);
     assert(isnan(MacWSWindowSceneExtentAtLeastMinimum(500, NAN)));
+
+    // Runtime witness: Terminal published 16384x16384 yet its 1341-point
+    // request was clipped to Retina Standard's 1194-point NSScreen. Reaching
+    // the transport ceiling means the application did not author a reachable
+    // maximum, so the iPad Scene—not NSScreen—owns the final upper bound.
+    assert(MacWSWindowAxisMaximumIsUnbounded(16384, 16384));
+    assert(MacWSWindowAxisMaximumIsUnbounded(16383.5, 16384));
+    assert(!MacWSWindowAxisMaximumIsUnbounded(1400, 16384));
+    assert(!MacWSWindowAxisMaximumIsUnbounded(NAN, 16384));
+    assert(MacWSWindowAxisRequestRespectingScreen(
+        1341, 1194, 16384, 16384) == 1341);
+    // A real application maximum remains authoritative. The existing screen
+    // guard also remains for these bounded windows so native popup placement
+    // cannot make their title bars unreachable.
+    assert(MacWSWindowAxisRequestRespectingScreen(
+        1341, 1194, 1400, 16384) == 1194);
+    assert(MacWSWindowAxisRequestRespectingScreen(
+        1100, 1194, 1400, 16384) == 1100);
+    assert(MacWSWindowTrailingAnchorOrigin(0, 1194, 1341, true) == 0);
+    assert(MacWSWindowTrailingAnchorOrigin(0, 1194, 1000, true) == 194);
+    assert(MacWSWindowTrailingAnchorOrigin(0, 1194, 1341, false) == -147);
+    assert(MacWSWindowAxisValueAfterScreenConstraint(
+        1341, 1194, true) == 1341);
+    assert(MacWSWindowAxisValueAfterScreenConstraint(
+        1341, 1194, false) == 1194);
+    assert(MacWSWindowAxisValueAfterScreenConstraint(
+        NAN, 1194, true) == 1194);
+    // AppKit may move an ordinary in-bounds frame without reducing it. That
+    // placement remains native; restoration begins only when the requested
+    // extent is beyond the screen or AppKit actually reduced that extent.
+    assert(!MacWSWindowAxisScreenConstraintShouldBeRestored(
+        613, 613, 834, true));
+    assert(MacWSWindowAxisScreenConstraintShouldBeRestored(
+        1341, 1341, 1194, true));
+    assert(MacWSWindowAxisScreenConstraintShouldBeRestored(
+        815.5, 728, 834, true));
+    assert(!MacWSWindowAxisScreenConstraintShouldBeRestored(
+        1341, 1194, 1194, false));
     // Get Info: fixed-axis policy already says 410, but the visible content
     // is still 676 points tall (541 logical). This is NOT a landed resize.
     assert(!MacWSWindowSceneContentMatchesTarget(500, 676, 1.25, 400, 410));
