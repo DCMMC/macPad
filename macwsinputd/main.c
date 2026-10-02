@@ -110,6 +110,43 @@ static bool RuntimeDiagnosticsEnabled(void) {
     return cached != 0;
 }
 
+static bool KeyboardLatencyDiagnosticsEnabled(void) {
+    return access("/tmp/macws_keyboard_latency_diagnostics", F_OK) == 0;
+}
+
+static double InputUptimeSeconds(void) {
+#ifdef CLOCK_UPTIME_RAW
+    struct timespec now = {0};
+    if (clock_gettime(CLOCK_UPTIME_RAW, &now) == 0)
+        return (double)now.tv_sec + (double)now.tv_nsec / 1.0e9;
+#endif
+    // Diagnostic-only fallback.  Do not import Foundation here: this target
+    // deliberately uses local CoreGraphics declarations because Theos's
+    // legacy vendor IOKit headers conflict with the modern macOS SDK modules.
+    return -1.0;
+}
+
+static void LogKeyboardBrokerLatency(const MacWSInputRecord *record,
+                                     double receivedAt,
+                                     double routeFinishedAt,
+                                     bool sent,
+                                     int routeError,
+                                     const char *route) {
+    if (!record || receivedAt <= 0.0 || routeFinishedAt < receivedAt) return;
+    double producerToBroker = record->timestamp > 0.0 &&
+        receivedAt >= record->timestamp
+        ? (receivedAt - record->timestamp) * 1000.0 : -1.0;
+    fprintf(stderr,
+        "MACWS-INPUT KEYBOARD-LATENCY stage=broker sample=%u kind=%u "
+        "keycode=%u producer-to-broker=%.3fms broker-route=%.3fms "
+        "sent=%s errno=%d route=%s\n",
+        record->sampleSequence, record->kind,
+        (unsigned)llround(record->pressure), producerToBroker,
+        (routeFinishedAt - receivedAt) * 1000.0,
+        sent ? "YES" : "NO", routeError, route ?: "unknown");
+    fflush(stderr);
+}
+
 typedef struct {
     pid_t pid;
     int32_t windowID;
@@ -181,15 +218,20 @@ static bool IsSystemPointerKind(MacWSInputKind kind) {
     }
 }
 
-// Down and up must use the same session-vs-AppKit transport. Physical keys
-// keep the session proxy because its modifier snapshot models real held HID
-// state. Every software-toolbar key already carries an exact PID/window and
-// must remain on AppInput: sending arrows or Control/Command chords to the
-// global proxy discards the represented window and current AppKit responder.
+// Down and up must use the same session-vs-AppKit transport.  A windowed Host
+// key already carries the exact live PID/window.  Runtime on iPad14,5 / 7DTD
+// pid 7996 (2026-10-02) measured producer->session-proxy below 0.5 ms and
+// CGEventPost below 0.6 ms, yet the target's -[NSApplication sendEvent:] saw
+// none of those records.  The same record sent to its exact AppInput endpoint
+// did arrive.  Keep the WindowServer-session proxy only for truly global
+// (window 0) hardware input; exact window input belongs to AppInput just like
+// the software toolbar, so focus cannot be lost in the foreign CGS session.
 static bool IsNativeKeyboardProxyRecord(const MacWSInputRecord *record) {
     if (!record || (record->kind != MacWSInputKindKeyDown &&
                     record->kind != MacWSInputKindKeyUp)) return false;
-    return record->source == MacWSInputSourceHardwareKeyboard;
+    return record->source == MacWSInputSourceHardwareKeyboard &&
+        (record->targetPID <= 1 ||
+         MacWSInputWindowIDForScene(record->sceneID) == 0);
 }
 
 static bool RecordIsValid(const MacWSInputRecord *record) {
@@ -1442,6 +1484,11 @@ int main(void) {
         // all legacy kinds have the same 84-byte layout and are deliberately
         // emitted as v5 so a new broker can talk to either endpoint revision.
         record.version = MacWSInputWireVersionForKind(record.kind);
+        double keyboardBrokerReceipt = 0.0;
+        if (KeyboardLatencyDiagnosticsEnabled() &&
+            (record.kind == MacWSInputKindKeyDown ||
+             record.kind == MacWSInputKindKeyUp))
+            keyboardBrokerReceipt = InputUptimeSeconds();
 
         // State release must not depend on an app, a focused window or a live
         // framebuffer. UIKit can retire all three before delivering key-up.
@@ -1454,7 +1501,13 @@ int main(void) {
         if (record.kind == MacWSInputKindKeyUp &&
             IsNativeKeyboardProxyRecord(&record)) {
             int proxyError = 0;
-            if (SendToVNCPointerProxy(socketFD, &record, &proxyError)) continue;
+            bool proxySent = SendToVNCPointerProxy(
+                socketFD, &record, &proxyError);
+            if (keyboardBrokerReceipt > 0.0)
+                LogKeyboardBrokerLatency(&record, keyboardBrokerReceipt,
+                    InputUptimeSeconds(), proxySent, proxyError,
+                    "keyup-fast-proxy");
+            if (proxySent) continue;
         }
 
         NoteUserInteraction();
@@ -1594,6 +1647,10 @@ int main(void) {
             int proxyError = 0;
             bool proxySent = SendToVNCPointerProxy(
                 socketFD, &record, &proxyError);
+            if (keyboardBrokerReceipt > 0.0)
+                LogKeyboardBrokerLatency(&record, keyboardBrokerReceipt,
+                    InputUptimeSeconds(), proxySent, proxyError,
+                    "osxvnc-proxy");
             if (proxySent) {
                 sequence++;
                 if (RuntimeDiagnosticsEnabled()) {

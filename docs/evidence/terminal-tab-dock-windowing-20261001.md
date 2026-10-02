@@ -177,6 +177,191 @@ deduplicated by exact Scene/original/target geometry; production behavior does
 not depend on logging. A final full-iPad visual acceptance remains separate
 from these runtime/model witnesses.
 
+## Follow-up: whole-stage return was still transient
+
+The user reproduced the overlap again with the deployed immutable whole-stage
+clone. Diagnostics were enabled in the live SpringBoard process by changing
+only the plugin's cached diagnostic byte, without restarting SpringBoard or
+changing the Scene. The current exact Scene then produced:
+
+```text
+1790877358.160 dense-grid-result grid=0x283955c80 proposed=1179.0x814.0 constrained=1179.0x814.0 result=1179.0x814.0 candidates=128x83 stock=8x4 policy=sceneID:com.macwsguide.host-0639659E-23D5-4BB2-9F4F-CC1FE38DC61D
+1790877358.160 dock-center-adjusted scene=sceneID:com.macwsguide.host-0639659E-23D5-4BB2-9F4F-CC1FE38DC61D dock-height=114.5 container={{0, 0}, {1389, 970}} original={{105, 78}, {1179, 814}} target={{105, 24}, {1179, 814}} normalized={0.5, 0.44432989690721647} resolved-center={694.5, 431} size-preserved=YES route=immutable-app-layout
+```
+
+The current visible model had therefore retained center `y=485` (`frame y=78`)
+despite the later calculator returning a validated clone centered at `y=431`
+(`frame y=24`). The user's simultaneous visual report plus this exact-Scene
+runtime witness disproved the assumption that returning the clone from
+`_appLayoutByPerformingAutoLayoutIfNeededInAppLayout:...` commits it to the
+persistent switcher model.
+
+This is consistent with the actual 20D67 transaction constructor already
+RE-confirmed at `0x1c79cfaf4`: native resizing receives both `size` and
+`center`, creates immutable display-item attributes, clones the AppLayout and
+builds the transition request there. The correction must therefore enter at
+that transaction boundary. Native gestures now pass a Dock-safe center into
+the original response constructor. Programmatic AppKit-driven resizing writes
+the equivalent validated normalized center into the same immutable attributes
+object that carries its size before cloning the transition AppLayout. The
+whole-stage clone remains a transient layout fallback, not the persistence
+mechanism. When an oversized window shrinks enough to release a retained Dock
+assertion, that same transaction also carries the translated center instead
+of waiting for another non-persistent layout pass.
+
+This change still needs fresh full-iPad visual acceptance after deployment;
+the evidence above proves the previous implementation was incomplete, not
+that the new transaction-boundary implementation is visually accepted.
+
+## Follow-up: authoritative native resize transaction
+
+The transaction-boundary implementation was then deployed on the same
+iPad13,6 / 20D67 target. A real native resize gesture produced successive
+unchanged-size transactions whose center moved upward as the window grew. The
+last coexistence-sized samples were:
+
+```text
+1790879378.703 dock-center-transaction scene=sceneID:com.macwsguide.host-10616729-7356-433C-818B-41098E9D7C42 source={695, 485.5} target={695, 453.5} size={1178, 756} route=native-resize-response
+1790879378.717 dock-center-transaction scene=sceneID:com.macwsguide.host-10616729-7356-433C-818B-41098E9D7C42 source={695, 485.5} target={695, 452.5} size={1180, 758} route=native-resize-response
+1790879378.733 dock-center-transaction scene=sceneID:com.macwsguide.host-10616729-7356-433C-818B-41098E9D7C42 source={695, 485.5} target={695, 452.5} size={1182, 758} route=native-resize-response
+1790879378.876 dock-center-transaction scene=sceneID:com.macwsguide.host-10616729-7356-433C-818B-41098E9D7C42 source={695, 485.5} target={695, 451.5} size={1182, 760} route=native-resize-response
+```
+
+This is the first runtime witness from the actual native response constructor,
+not the previously disproved late frame/whole-stage paths. The full requested
+size is preserved while the center is incorporated into the same immutable
+SpringBoard resize transaction. A fresh full-iPad visual capture or user
+acceptance is still required before claiming that every Dock presentation
+transition is visually accepted.
+
+## Follow-up: asynchronous assertion-release race
+
+The next user reproduction exposed a second, independent lifecycle problem.
+During one native resize gesture, transient models crossed above and below the
+Dock-coexistence threshold. The same Scene created a yield assertion, reached
+its hidden-Dock completion, and then created another assertion shortly after:
+
+```text
+1790879379.516 dock-yield-request scene=sceneID:com.macwsguide.host-10616729-7356-433C-818B-41098E9D7C42 frame={{120.5, 24}, {1149, 835.5}} controller=SBFloatingDockController route=native-behavior-assertion level=10
+1790879380.212 dock-yield-assertion-ready scene=sceneID:com.macwsguide.host-10616729-7356-433C-818B-41098E9D7C42 level=10 presented=NO
+1790879381.080 dock-yield-request scene=sceneID:com.macwsguide.host-10616729-7356-433C-818B-41098E9D7C42 frame={{105.5, 24}, {1179, 833}} controller=SBFloatingDockController route=native-behavior-assertion level=10
+1790879381.771 dock-yield-assertion-ready scene=sceneID:com.macwsguide.host-10616729-7356-433C-818B-41098E9D7C42 level=10 presented=NO
+1790879384.042 dock-center-adjusted scene=sceneID:com.macwsguide.host-10616729-7356-433C-818B-41098E9D7C42 dock-height=114.5 container={{0, 0}, {1389, 970}} original={{93.25, 76}, {1202.5, 818}} target={{93.25, 24}, {1202.5, 818}} normalized={0.5, 0.44639175257731961} resolved-center={694.5, 433} size-preserved=YES route=immutable-app-layout
+```
+
+There was no `dock-yield-released` completion for the final assertion before
+the next SpringBoard generation. The old implementation removed its only
+retained dictionary entry before calling asynchronous
+`invalidateWithCompletion:`. The candidate correction keeps that exact
+assertion strongly retained until completion, suppresses duplicate release
+requests, and records a newer oversized geometry decision so completion can
+reassert native yield when needed. It still never changes the authoritative
+window size. This correction is deployed, but a fresh same-Scene runtime
+release line and user visual acceptance remain required.
+
+## Follow-up: retained assertion was not live authority
+
+The next exact-height reproduction showed that retention alone was not a
+valid assertion-state witness. SpringBoard made the Dock visible again while
+the Scene still retained an assertion whose `invalidateWithCompletion:`
+callback never arrived:
+
+```text
+1790913015.425 dock-yield-state scene=sceneID:com.macwsguide.host-4121D78E-59CD-48C4-9CF2-6EC79CA1A173 active-level=9 active-progress=1.000
+1790913015.426 dock-yield-request scene=sceneID:com.macwsguide.host-4121D78E-59CD-48C4-9CF2-6EC79CA1A173 frame={{125.5, 24}, {1139, 831.5}} controller=SBFloatingDockController route=native-behavior-assertion level=10
+1790913016.140 dock-yield-assertion-ready scene=sceneID:com.macwsguide.host-4121D78E-59CD-48C4-9CF2-6EC79CA1A173 level=10 presented=NO
+```
+
+There was still no release completion more than sixty seconds later, while a
+full iPadOS capture at `1790913077` visibly showed the Dock overlapping the
+retained large window. `MacWSRequestFloatingDockYield` had returned success
+only because its dictionary still contained an object. The corrected
+lifecycle checks the controller's live `isFloatingDockPresented` state,
+recycles a retained assertion that has lost authority, and binds release
+completion to the exact assertion generation. A 2.5-second main-queue timeout
+finishes a generation whose callback is omitted; late callbacks cannot clear
+its replacement. The first deployed timeout witness was:
+
+```text
+1790913716.833 dock-yield-released scene=sceneID:com.macwsguide.host-77DEF787-3FFE-4477-A192-D9BFCC9389C5 reason=window-fits-dock-safe-region reassert=NO completion=timeout
+```
+
+This repairs assertion ownership; it does not impose a maximum height or
+change the requested Scene size.
+
+## Follow-up: post-gesture transition overwrote the safe center
+
+The user reproduced overlap again at the final `1229.2x825.5` size. The exact
+Scene emitted a real gesture response and then, 34 ms later, a same-size
+system-transition response after the gesture scope had ended:
+
+```text
+1790913716.052 resize-response host scene=sceneID:com.macwsguide.host-77DEF787-3FFE-4477-A192-D9BFCC9389C5 proposed=1229.2x825.5 constrained=1229.2x825.5 policy=scene-gesture
+1790913716.053 dock-center-adjusted scene=sceneID:com.macwsguide.host-77DEF787-3FFE-4477-A192-D9BFCC9389C5 dock-height=114.5 container={{0, 0}, {1389, 970}} original={{79.877807618118823, 72.25}, {1229.2443847637624, 825.5}} target={{79.877807618118823, 24}, {1229.2443847637624, 825.5}} normalized={0.5, 0.4502577319587629} resolved-center={694.5, 436.75} size-preserved=YES route=immutable-app-layout
+1790913716.086 resize-response ignored scene=sceneID:com.macwsguide.host-77DEF787-3FFE-4477-A192-D9BFCC9389C5 proposed=1229.2x825.5 constrained=1229.2x825.5 source=system-transition
+```
+
+An LLDB disassembly of the exact original 20D67 SpringBoard IMP at live
+`0x216877af4` (unslid `0x1c79cfaf4`) established why the latter call matters.
+At `+176..+200` it passes the method's `center` argument to
+`normalizedPointForPoint:inBounds:`; at `+204..+212` that result goes to
+`attributesByModifyingNormalizedCenter:`. Only afterward, at `+304..+340`,
+does it infer and publish the attributed size. Thus the same-size follow-up is
+also an authoritative center publisher, not a harmless observer.
+
+The correction admits Dock-center policy to a non-gesture call only when both
+dimensions match the last real gesture sample within one point. Unrelated
+restore/reflow proposals remain excluded, preserving the prior fixed-window
+protection. The expected new witness is
+`route=matching-system-followup`; full-iPad visual acceptance is still
+required before marking this reproduction closed.
+
+## Final correction: global switcher frame provider (2026-10-02)
+
+The user reproduced one remaining sequence: launch correctly, shrink the
+window, then enlarge it to a size that still fits beside the Dock. The size was
+valid, but the final presentation was recentered against the full `1389x970`
+container. A diagnostic A/B changed the local
+`frameForLayoutRole:inAppLayout:withBounds:` origin from `0.5` to `-51`, yet
+the reusable container still landed at full-screen center `y=485`:
+
+```text
+1790921980.891 layout-role-frame-adjusted ... bounds={{0,0},{1389,970}} original={{0,0.5},{1167.5,819}} result={{0,-51},{1167.5,819}} size-preserved=YES
+1790921980.977 ... container-set-center ... frame={{111,76},{1167.5,819}} center={694.75,485}
+```
+
+That rejected the local-role frame as the final positioning authority.
+RE-confirmed on SpringBoard UUID
+`13B37E5E-5290-3E2E-91B9-4378BD2E8312`: the block beginning at
+`0x1c77537e4` obtains the AppLayout index, sends `anchorPointForIndex:` at
+`0x1c7753884`, then sends `frameForIndex:` at `0x1c7753898`. Its global frame
+origin is combined with the anchor-derived offset at `0x1c7753e74` and
+`0x1c7753eb8`; the nested presentation block finally calls `setCenter:` at
+`0x1c7756534`. Runtime Objective-C ivar metadata identified the exact receiver:
+
+```text
+1790922796.520 frame-for-index-ivar scene=sceneID:com.macwsguide.host-... owner=SBGridSwitcherViewController ... ivar=_rootModifier offset=1832 candidate=SBiPadOSPlatformSwitcherModifier ... responds=YES ... route=fluid-switcher-ivar
+```
+
+The production fix therefore intercepts only
+`SBiPadOSPlatformSwitcherModifier -frameForIndex:`. It resolves the AppLayout
+at that exact index, requires an exact non-workspace
+`com.macwsguide.host` Scene, and translates the returned global frame through
+the existing live Dock geometry helper. It does not change either dimension,
+introduce a height ceiling, snap to stock size presets, or hook a `UIView`
+setter. The accepted run changed only the origin:
+
+```text
+1790922836.154 index-frame-provider scene=sceneID:com.macwsguide.host-... provider=SBiPadOSPlatformSwitcherModifier index=1 bounds={{0, 0}, {1389, 970}} dock-height=114.5 original={{64.5, 76.5}, {1260, 817.5}} result={{64.5, 24}, {1260, 817.5}} size-preserved=YES route=switcher-global-frame
+1790922836.155 page-view-frame-producer scene=sceneID:com.macwsguide.host-... fully-presented=YES frame={{0, 0}, {1260, 817.5}} container-frame={{65, 23.5}, {1260, 817.5}} container-center={694.5, 432.75} route=fluid-switcher-delegate
+```
+
+A full iPadOS capture showed the unchanged large window ending above the
+visible Dock, and the user confirmed the original shrink-then-enlarge
+reproduction was fixed. All temporary view-setter, role-provider and ivar
+inventory hooks were removed after acceptance. The retained diagnostic for
+the exact global provider is opt-in and deduplicated by Scene and geometry.
+
 ## Regression contracts
 
 `misc/test_terminal_tab_dock_contract.py` enforces that:
@@ -184,8 +369,16 @@ from these runtime/model witnesses.
 - same-owner/same-group tab handoff preserves the predecessor frame;
 - cross-window paths retain real stream suspension;
 - Dock avoidance never mutates `frame.size` or the Scene size policy;
-- Dock avoidance publishes only a validated immutable normalized-center
-  change after Apple's stock whole-stage layout, and never mutates the
-  non-authoritative per-item frame result;
+- Dock avoidance publishes a safe center in both native-gesture and
+  programmatic authoritative resize transactions, keeps the whole-stage clone
+  only as a transient fallback, and never mutates the non-authoritative
+  per-item frame result;
+- the final `SBiPadOSPlatformSwitcherModifier -frameForIndex:` path translates
+  only an exact Host Scene, preserves both dimensions, and ships without
+  presentation-layer setter hooks;
+- the immediate system-transition follow-up inherits the safe center only
+  when its size matches the last real gesture sample;
 - the native assertion has balanced retention/invalidation;
+- asynchronous invalidation retains the exact assertion through completion
+  and reasserts only when a newer geometry pass still requires Dock yield;
 - full-screen workspace entry and current-stage departure release it.

@@ -130,6 +130,32 @@ def manifest(root: Path, binary: Path, source_snapshot: Path | None = None) -> d
             'binary_sha256': sha256(binary), 'sources': sources}
 
 
+def verify_windowing_rootless_load_commands(binary: Path) -> None:
+    """Reject a Windowing image that dyld cannot resolve on rootless iOS.
+
+    Apple ld64 still accepts the rootful Theos defaults, so authenticated
+    arm64e fixups and a valid signature alone do not prove that SpringBoard
+    can load the image.  Inspect the finished binary rather than inferring its
+    dependency paths from the requested package scheme.
+    """
+    result = subprocess.run(['otool', '-L', str(binary)], text=True,
+                            capture_output=True)
+    if result.returncode:
+        raise ValueError('cannot inspect MacWSWindowing load commands: ' +
+                         result.stderr.strip())
+    dependencies = [line.strip().split(' (compatibility version', 1)[0]
+                    for line in result.stdout.splitlines()[1:] if line.strip()]
+    rootful = sorted(path for path in dependencies
+                     if path.startswith('/Library/'))
+    if rootful:
+        raise ValueError('MacWSWindowing contains rootful load commands: ' +
+                         ', '.join(rootful))
+    substrate = '@rpath/CydiaSubstrate.framework/CydiaSubstrate'
+    if substrate not in dependencies:
+        raise ValueError('MacWSWindowing lacks rootless Substrate dependency: ' +
+                         substrate)
+
+
 def verify(root: Path, binary: Path, manifest_path: Path) -> None:
     expected = json.loads(manifest_path.read_text())
     actual = manifest(root, binary)
@@ -258,10 +284,12 @@ def main() -> int:
         elif not args.binary:
             parser.error(f'{args.action} requires --binary')
         elif args.action == 'create':
+            verify_windowing_rootless_load_commands(args.binary)
             args.manifest.write_text(json.dumps(manifest(args.root, args.binary,
                                                         args.source_snapshot),
                                                 indent=2, sort_keys=True) + '\n')
         else:
+            verify_windowing_rootless_load_commands(args.binary)
             verify(args.root, args.binary, args.manifest)
             if args.action == 'verify-package':
                 if not args.package or not args.staging:

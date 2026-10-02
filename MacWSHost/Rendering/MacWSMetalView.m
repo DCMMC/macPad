@@ -2495,6 +2495,17 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
             .sampleSequence = ++_inputSampleSequence,
             .reserved = 0x100u | _hardwareModifierSides,
         };
+        if (MacWSHostKeyboardLatencyDiagnosticsEnabled()) {
+            // Carry the same sample identity through broker/AppInput so a
+            // physical callback can be correlated at every boundary. The
+            // flag is diagnostic-only and never changes routing by itself.
+            record.flags |= MacWSInputFlagLatencyDiagnostic;
+            double now = CACurrentMediaTime();
+            MacWSLog(@"keyboard-latency stage=host-callback sample=%u kind=%u keycode=%u producer-to-host=%.3fms press=%.6f host=%.6f target=%d",
+                record.sampleSequence, record.kind, keyCode,
+                MAX(0.0, (now - press.timestamp) * 1000.0),
+                press.timestamp, now, record.targetPID);
+        }
         NSData *originalDown = _heldHardwareKeys[@(keyCode)];
         if (kind == MacWSInputKindKeyUp && originalDown.length == sizeof(record)) {
             MacWSInputRecord original;

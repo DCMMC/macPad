@@ -9,6 +9,30 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class KeyboardSnapshotWireTests(unittest.TestCase):
+    def test_physical_keyboard_latency_probe_covers_every_boundary(self):
+        host = (ROOT / 'MacWSHost/Rendering/MacWSMetalView.m').read_text()
+        host_diagnostics = (
+            ROOT / 'MacWSHost/Support/MacWSHostDiagnostics.m').read_text()
+        broker = (ROOT / 'macwsinputd/main.c').read_text()
+        proxy = (ROOT / 'libmachook/mac_hooks.m').read_text()
+        app = (ROOT / 'libmachook/AppInputBridge.m').read_text()
+        self.assertIn('MacWSHostKeyboardLatencyDiagnosticsEnabled()', host)
+        self.assertIn('/var/mnt/rootfs/private/tmp/macws_keyboard_latency_diagnostics',
+                      host_diagnostics)
+        self.assertIn(
+            'record.flags |= MacWSInputFlagLatencyDiagnostic;', host)
+        for source, witness in (
+                (broker, 'stage=broker'),
+                (proxy, 'stage=session-proxy'),
+                (app, 'stage=app-dispatch')):
+            self.assertIn('/tmp/macws_keyboard_latency_diagnostics', source)
+            self.assertIn(witness, source)
+        self.assertIn('stage=host-callback', host)
+        self.assertIn('MacWSRegisterKeyboardCGSTraceSample(', app)
+        self.assertIn('MacWSConsumeKeyboardCGSTraceSample(', app)
+        self.assertIn('sample=%u kind=%s keycode=%ld', app)
+        self.assertIn('route=%s', app)
+
     def test_real_broker_validation_and_rolling_abi(self):
         compiler = shutil.which('clang') or shutil.which('cc')
         if not compiler:
@@ -49,9 +73,9 @@ int main(void) {
     r.magic=0;assert(!RecordIsValid(&r));
 
     // Both actual broker call sites use this one production predicate.
-    // Empty PID/geometry cannot swallow a physical release. Every software
-    // toolbar key retains its exact AppInput pair, including special keys and
-    // Control/Option/Command chords.
+    // Global physical input keeps the session route. Exact-window physical
+    // input and every software-toolbar key retain their AppInput pair,
+    // including special keys and Control/Option/Command chords.
     assert(!IsNativeKeyboardProxyRecord(NULL));
     const uint32_t modifiers[]={0,0x10000u,0x20000u,0x30000u,
         0x40000u,0x80000u,0x100000u,0x1e0000u};
@@ -68,6 +92,8 @@ int main(void) {
         assert(IsNativeKeyboardProxyRecord(&r)==expected);
         r.targetPID=1234;r.frameWidth=1920;r.frameHeight=1080;
         assert(IsNativeKeyboardProxyRecord(&r)==expected);
+        r.sceneID=MacWSInputSceneForWindow(521,modifiers[m]);
+        assert(!IsNativeKeyboardProxyRecord(&r));
         r.kind=MacWSInputKindModifierSnapshot;
         assert(!IsNativeKeyboardProxyRecord(&r));
         r.kind=MacWSInputKindTap;

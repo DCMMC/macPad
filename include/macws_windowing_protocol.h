@@ -18,6 +18,14 @@ enum {
     MacWSWindowingInitialSize = 1u << 2,
     MacWSWindowingSceneConstraints = 1u << 3,
     MacWSWindowingDenseGrid = 1u << 4,
+    // Dynamic SpringBoard observation, not a static method-presence claim.
+    // `Known` means the real layout calculator has supplied its
+    // isChamoisWindowingUIEnabled argument at least once; `Active` mirrors
+    // that latest value.  UIApplication.supportsMultipleScenes is true for
+    // ordinary iPad Split View too, so it cannot authorize independent
+    // macPad window Scenes by itself.
+    MacWSWindowingChamoisKnown = 1u << 5,
+    MacWSWindowingChamoisActive = 1u << 6,
     MacWSWindowingRequired = (1u << 5) - 1u,
 };
 
@@ -29,6 +37,10 @@ static inline uint64_t MacWSWindowingState(uint32_t pid, uint8_t capabilities) {
 
 static inline uint32_t MacWSWindowingPublisher(uint64_t state) {
     return (uint32_t)state;
+}
+
+static inline uint8_t MacWSWindowingStateCapabilities(uint64_t state) {
+    return (uint8_t)(state >> 32);
 }
 
 static inline bool MacWSWindowingStateSupports(uint64_t state, uint8_t required) {

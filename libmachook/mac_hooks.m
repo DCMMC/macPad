@@ -8413,6 +8413,32 @@ static BOOL macws_vnc_forward_key(unsigned short keyCode, BOOL down,
                                   uint64_t modifiers, unsigned int keySym);
 static void macws_vnc_note_interaction(void);
 static BOOL macws_vnc_coordinate_activation(const MacWSInputRecord *pointer);
+static double macws_vnc_event_timestamp_seconds(void);
+
+static BOOL macws_keyboard_latency_diagnostics_enabled(void) {
+    return access("/tmp/macws_keyboard_latency_diagnostics", F_OK) == 0;
+}
+
+// stderr from injected macOS processes is not a reliable timing witness on
+// every launchd/chroot combination.  Keep the latency probe opt-in and append
+// each short record with one write(2), so the observer cannot lose the proxy
+// boundary merely because the target's stdio stream was replaced or buffered.
+static void macws_keyboard_latency_trace(const char *format, ...) {
+    if (!macws_keyboard_latency_diagnostics_enabled() || !format) return;
+    char line[512];
+    va_list arguments;
+    va_start(arguments, format);
+    int length = vsnprintf(line, sizeof(line), format, arguments);
+    va_end(arguments);
+    if (length <= 0) return;
+    size_t bytes = (size_t)length;
+    if (bytes >= sizeof(line)) bytes = sizeof(line) - 1;
+    int fd = open("/tmp/macws_keyboard_latency.trace",
+                  O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (fd < 0) return;
+    (void)write(fd, line, bytes);
+    close(fd);
+}
 
 // Fullscreen Mission Control cards are WindowServer presentation transforms,
 // not ordinary NSWindows. Runtime A/B on iPad13,6 (2026-09-08) sent the same
@@ -8710,6 +8736,9 @@ static void *macws_vnc_pointer_proxy_listener(void *unused) {
         "#### OSXVNC POINTER-PROXY ready pid=%d path=%s\n",
         getpid(), MACWS_VNC_POINTER_PROXY_SOCKET_PATH);
     fflush(stderr);
+    macws_keyboard_latency_trace(
+        "stage=session-proxy-ready pid=%d path=%s\n",
+        getpid(), MACWS_VNC_POINTER_PROXY_SOCKET_PATH);
 
     BOOL leftDown = NO;
     uint32_t activeContact = 0;
@@ -8739,7 +8768,34 @@ static void *macws_vnc_pointer_proxy_listener(void *unused) {
         }
         if (record.kind == MacWSInputKindKeyDown ||
             record.kind == MacWSInputKindKeyUp) {
+            double receivedAt = macws_keyboard_latency_diagnostics_enabled()
+                ? macws_vnc_event_timestamp_seconds() : 0.0;
             BOOL posted = macws_vnc_proxy_keyboard(record);
+            double postedAt = receivedAt > 0.0
+                ? macws_vnc_event_timestamp_seconds() : 0.0;
+            if (receivedAt > 0.0) {
+                double producerToProxy = record.timestamp > 0.0 &&
+                    receivedAt >= record.timestamp
+                    ? (receivedAt - record.timestamp) * 1000.0 : -1.0;
+                fprintf(stderr,
+                    "#### OSXVNC KEYBOARD-LATENCY stage=session-proxy "
+                    "sample=%u kind=%u keycode=%u producer-to-proxy=%.3fms "
+                    "proxy-post=%.3fms posted=%s\n",
+                    record.sampleSequence, record.kind,
+                    (unsigned)llround(record.pressure), producerToProxy,
+                    postedAt >= receivedAt
+                        ? (postedAt - receivedAt) * 1000.0 : -1.0,
+                    posted ? "YES" : "NO");
+                fflush(stderr);
+                macws_keyboard_latency_trace(
+                    "stage=session-proxy pid=%d sample=%u kind=%u keycode=%u "
+                    "producer-to-proxy=%.3fms proxy-post=%.3fms posted=%s\n",
+                    getpid(), record.sampleSequence, record.kind,
+                    (unsigned)llround(record.pressure), producerToProxy,
+                    postedAt >= receivedAt
+                        ? (postedAt - receivedAt) * 1000.0 : -1.0,
+                    posted ? "YES" : "NO");
+            }
             if (!posted || (record.kind == MacWSInputKindKeyDown &&
                             macws_runtime_diagnostics_enabled())) {
                 fprintf(stderr,

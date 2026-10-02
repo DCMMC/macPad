@@ -22,9 +22,12 @@
 #import <crt_externs.h>
 #import <stdatomic.h>
 #import <stdarg.h>
+#import <fcntl.h>
+#import <stdio.h>
 #import <sys/socket.h>
 #import <sys/stat.h>
 #import <sys/un.h>
+#import <unistd.h>
 #import <xpc/xpc.h>
 #import <notify.h>
 
@@ -232,6 +235,24 @@ static const char MacWSInputTargetReplyPath[] =
 static NSInteger MacWSAppInputEventNumber;
 static NSMutableArray *MacWSAppInputPending;
 static BOOL MacWSAppInputDrainScheduled;
+// Populated on the main thread once AppKit has created the real NSApplication
+// and published at least one window; immutable thereafter. NSApplication
+// documents -postEvent:atStart: as callable from a secondary thread, so this
+// context lets exact-window keyboard records enter the real AppKit event queue
+// without waiting for a CFRunLoop block that Unity's custom pump may not
+// service for hundreds of milliseconds.
+static CFTypeRef MacWSAppInputKeyboardApplication;
+static Class MacWSAppInputKeyboardEventClass;
+typedef struct {
+    uint32_t sampleSequence;
+    uint16_t keyCode;
+    uint16_t eventType;
+    double producedAt;
+    double postedAt;
+} MacWSKeyboardCGSTraceSample;
+static pthread_mutex_t MacWSKeyboardCGSTraceLock = PTHREAD_MUTEX_INITIALIZER;
+static MacWSKeyboardCGSTraceSample MacWSKeyboardCGSTraceSamples[64];
+static size_t MacWSKeyboardCGSTraceSampleCount;
 // Serializes the socket thread's enqueue-vs-live-post decision with the main
 // thread arming a real AppKit tracking loop. Without this lock an up record can
 // decide to enqueue just before live mode starts, then enter the pending array
@@ -406,6 +427,128 @@ static BOOL MacWSRuntimeDiagnosticsEnabled(void) {
         atomic_store_explicit(&cached, value, memory_order_release);
     }
     return value != 0;
+}
+
+static BOOL MacWSKeyboardLatencyDiagnosticsEnabled(void) {
+    // This narrow, dynamic probe observes only physical keyboard boundaries.
+    // It intentionally does not enable the render/JIT/runtime diagnostic
+    // umbrella, which would change the game workload being measured.
+    return access("/tmp/macws_keyboard_latency_diagnostics", F_OK) == 0;
+}
+
+// Called only after AppKit itself has produced the real NSApplication on the
+// main thread.  Do not call +sharedApplication from the inserted-dylib install
+// path: runtime on the direct 7DTD launch (2026-10-02 crash report) showed
+// _RegisterApplication aborting when that message created NSApp before the
+// process had joined its GUI launch coalition.
+static void MacWSCacheKeyboardContext(id application) {
+    if (!application || MacWSAppInputKeyboardApplication) return;
+    Class eventClass = objc_getClass("NSEvent");
+    if (!eventClass) return;
+    pthread_mutex_lock(&MacWSAppInputRouteLock);
+    if (!MacWSAppInputKeyboardApplication) {
+        MacWSAppInputKeyboardApplication =
+            CFRetain((__bridge CFTypeRef)application);
+        MacWSAppInputKeyboardEventClass = eventClass;
+    }
+    pthread_mutex_unlock(&MacWSAppInputRouteLock);
+}
+
+static void MacWSKeyboardLatencyTrace(const char *format, ...) {
+    if (!MacWSKeyboardLatencyDiagnosticsEnabled() || !format) return;
+    char line[512];
+    va_list arguments;
+    va_start(arguments, format);
+    int length = vsnprintf(line, sizeof(line), format, arguments);
+    va_end(arguments);
+    if (length <= 0) return;
+    size_t bytes = (size_t)length;
+    if (bytes >= sizeof(line)) bytes = sizeof(line) - 1;
+    int fd = open("/tmp/macws_keyboard_latency.trace",
+                  O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
+    if (fd < 0) return;
+    (void)write(fd, line, bytes);
+    close(fd);
+}
+
+// Diagnostic-only correlation for the asynchronous CGS candidate. A zero
+// return from CGPostKeyboardEvent is not an AppKit-delivery witness, so retain
+// the original physical sample until this process's real -sendEvent: hook sees
+// the matching type/keycode. The bounded FIFO is never consulted when the
+// sentinel is absent and stale candidates cannot claim an unrelated key.
+static void MacWSRegisterKeyboardCGSTraceSample(MacWSInputRecord record,
+                                                uint16_t keyCode,
+                                                uint16_t eventType,
+                                                double postedAt) {
+    if (!MacWSKeyboardLatencyDiagnosticsEnabled()) return;
+    MacWSKeyboardCGSTraceSample sample = {
+        .sampleSequence = record.sampleSequence,
+        .keyCode = keyCode,
+        .eventType = eventType,
+        .producedAt = record.timestamp,
+        .postedAt = postedAt,
+    };
+    pthread_mutex_lock(&MacWSKeyboardCGSTraceLock);
+    if (MacWSKeyboardCGSTraceSampleCount ==
+            sizeof(MacWSKeyboardCGSTraceSamples) /
+                sizeof(MacWSKeyboardCGSTraceSamples[0])) {
+        memmove(&MacWSKeyboardCGSTraceSamples[0],
+                &MacWSKeyboardCGSTraceSamples[1],
+                sizeof(MacWSKeyboardCGSTraceSamples) -
+                    sizeof(MacWSKeyboardCGSTraceSamples[0]));
+        MacWSKeyboardCGSTraceSampleCount--;
+    }
+    MacWSKeyboardCGSTraceSamples[MacWSKeyboardCGSTraceSampleCount++] = sample;
+    pthread_mutex_unlock(&MacWSKeyboardCGSTraceLock);
+}
+
+static void MacWSCancelKeyboardCGSTraceSample(uint32_t sampleSequence) {
+    if (!MacWSKeyboardLatencyDiagnosticsEnabled()) return;
+    pthread_mutex_lock(&MacWSKeyboardCGSTraceLock);
+    for (size_t index = 0; index < MacWSKeyboardCGSTraceSampleCount; index++) {
+        if (MacWSKeyboardCGSTraceSamples[index].sampleSequence !=
+                sampleSequence)
+            continue;
+        memmove(&MacWSKeyboardCGSTraceSamples[index],
+                &MacWSKeyboardCGSTraceSamples[index + 1],
+                (MacWSKeyboardCGSTraceSampleCount - index - 1) *
+                    sizeof(MacWSKeyboardCGSTraceSamples[0]));
+        MacWSKeyboardCGSTraceSampleCount--;
+        break;
+    }
+    pthread_mutex_unlock(&MacWSKeyboardCGSTraceLock);
+}
+
+static BOOL MacWSConsumeKeyboardCGSTraceSample(
+        uint16_t eventType, uint16_t keyCode, double now,
+        MacWSKeyboardCGSTraceSample *sampleOut) {
+    if (!sampleOut || !MacWSKeyboardLatencyDiagnosticsEnabled()) return NO;
+    BOOL found = NO;
+    pthread_mutex_lock(&MacWSKeyboardCGSTraceLock);
+    for (size_t index = 0; index < MacWSKeyboardCGSTraceSampleCount;) {
+        MacWSKeyboardCGSTraceSample sample =
+            MacWSKeyboardCGSTraceSamples[index];
+        BOOL stale = sample.postedAt <= 0.0 || now < sample.postedAt ||
+            now - sample.postedAt > 2.0;
+        BOOL matches = !stale && sample.eventType == eventType &&
+            sample.keyCode == keyCode;
+        if (!stale && !matches) {
+            index++;
+            continue;
+        }
+        memmove(&MacWSKeyboardCGSTraceSamples[index],
+                &MacWSKeyboardCGSTraceSamples[index + 1],
+                (MacWSKeyboardCGSTraceSampleCount - index - 1) *
+                    sizeof(MacWSKeyboardCGSTraceSamples[0]));
+        MacWSKeyboardCGSTraceSampleCount--;
+        if (matches) {
+            *sampleOut = sample;
+            found = YES;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&MacWSKeyboardCGSTraceLock);
+    return found;
 }
 
 // Game input backends sample key state from AppKit's event queue on their game
@@ -1945,6 +2088,44 @@ static void MacWSAppInputApplicationSendEvent(id self, SEL command, id event) {
     MacWSInstallUnityDidSendEventDiagnostic();
     NSUInteger type = event ? ((MacWSMsgUInteger)objc_msgSend)(
         event, sel_registerName("type")) : 0;
+    if ((type == 10 || type == 11) &&
+        MacWSKeyboardLatencyDiagnosticsEnabled()) {
+        double now = MacWSInputUptimeSeconds();
+        double eventProducedAt = ((MacWSMsgDouble)objc_msgSend)(
+            event, sel_registerName("timestamp"));
+        NSInteger keyCode = ((MacWSMsgInteger)objc_msgSend)(
+            event, sel_registerName("keyCode"));
+        MacWSKeyboardCGSTraceSample correlated = {0};
+        BOOL hasCorrelatedSample = keyCode >= 0 && keyCode <= UINT16_MAX &&
+            MacWSConsumeKeyboardCGSTraceSample(
+                (uint16_t)type, (uint16_t)keyCode, now, &correlated);
+        double producedAt = hasCorrelatedSample
+            ? correlated.producedAt : eventProducedAt;
+        double postToApp = hasCorrelatedSample && correlated.postedAt > 0.0 &&
+            now >= correlated.postedAt
+            ? (now - correlated.postedAt) * 1000.0 : -1.0;
+        fprintf(stderr,
+            "#### APP-INPUT KEYBOARD-LATENCY stage=app-dispatch pid=%d "
+            "sample=%u kind=%s keycode=%ld producer-to-app=%.3fms "
+            "post-to-app=%.3fms event=%.6f app=%.6f route=%s\n",
+            getpid(), hasCorrelatedSample ? correlated.sampleSequence : 0,
+            type == 10 ? "down" : "up", (long)keyCode,
+            producedAt > 0.0 && now >= producedAt
+                ? (now - producedAt) * 1000.0 : -1.0,
+            postToApp, eventProducedAt, now,
+            hasCorrelatedSample ? "cgs-correlated" : "uncorrelated");
+        fflush(stderr);
+        MacWSKeyboardLatencyTrace(
+            "stage=app-dispatch pid=%d sample=%u kind=%s keycode=%ld "
+            "producer-to-app=%.3fms post-to-app=%.3fms event=%.6f "
+            "app=%.6f route=%s\n",
+            getpid(), hasCorrelatedSample ? correlated.sampleSequence : 0,
+            type == 10 ? "down" : "up", (long)keyCode,
+            producedAt > 0.0 && now >= producedAt
+                ? (now - producedAt) * 1000.0 : -1.0,
+            postToApp, eventProducedAt, now,
+            hasCorrelatedSample ? "cgs-correlated" : "uncorrelated");
+    }
     if (type == 1 && MacWSRuntimeDiagnosticsEnabled() &&
         MacWSMainBundleIsSevenDaysToDie()) {
         uint64_t untilMicros = (uint64_t)(
@@ -2723,14 +2904,24 @@ static BOOL MacWSPrepareDirectMenuTapPostLocked(
 static BOOL MacWSPrepareDirectKeyPostLocked(
         MacWSInputRecord record, MacWSDirectTrackingSnapshot *snapshot) {
     if ((record.kind != MacWSInputKindKeyDown &&
-         record.kind != MacWSInputKindKeyUp) ||
-        !atomic_load_explicit(&MacWSAppInputSynchronousTrackingActive,
-                              memory_order_acquire) ||
-        !MacWSAppInputMenuContextValid ||
-        !MacWSAppInputMenuContext.application ||
-        !MacWSAppInputMenuContext.eventClass) return NO;
-    *snapshot = MacWSAppInputMenuContext;
-    snapshot->application = CFRetain(MacWSAppInputMenuContext.application);
+         record.kind != MacWSInputKindKeyUp)) return NO;
+    if (atomic_load_explicit(&MacWSAppInputSynchronousTrackingActive,
+                             memory_order_acquire) &&
+        MacWSAppInputMenuContextValid &&
+        MacWSAppInputMenuContext.application &&
+        MacWSAppInputMenuContext.eventClass) {
+        *snapshot = MacWSAppInputMenuContext;
+        snapshot->application = CFRetain(MacWSAppInputMenuContext.application);
+        return YES;
+    }
+    uint32_t windowNumber = MacWSInputWindowIDForScene(record.sceneID);
+    if (windowNumber == 0 || !MacWSAppInputKeyboardApplication ||
+        !MacWSAppInputKeyboardEventClass) return NO;
+    *snapshot = (MacWSDirectTrackingSnapshot){
+        .application = CFRetain(MacWSAppInputKeyboardApplication),
+        .eventClass = MacWSAppInputKeyboardEventClass,
+        .windowNumber = (NSInteger)windowNumber,
+    };
     return YES;
 }
 
@@ -6205,6 +6396,60 @@ static BOOL MacWSPostKeyRecord(MacWSInputRecord record, id application,
     uint32_t roundedKeyCode = (uint32_t)llround(record.pressure);
     if (fabs((double)record.pressure - roundedKeyCode) > 0.01) return NO;
     uint32_t keySym = record.contactID;
+
+    // Unity 2022.3.62f2 keeps rendering while its Cocoa pump drains ordinary
+    // -postEvent:atStart: records only about once per second.  Runtime on the
+    // iPad14,5 7DTD pid 13428 measured AppInput socket/queue arrival below
+    // 1.2 ms, followed by 234-997 ms before -[NSApplication sendEvent:].  A
+    // THEORY under live acceptance: issuing the legacy CoreGraphics post from
+    // this already-CGS-connected process may wake the event source that
+    // Unity's nextEvent path waits on. A zero return is not delivery proof;
+    // only a prompt matching -[NSApplication sendEvent:] witness plus visible
+    // movement can accept the route. Fall back to the ordinary NSEvent queue
+    // on any nonzero status. This is deliberately limited to the exact 7DTD
+    // hardware route; software text, Terminal shortcuts and every other
+    // AppKit application are unchanged.
+    if (fromSocketThread &&
+        record.source == MacWSInputSourceHardwareKeyboard &&
+        MacWSMainBundleIsSevenDaysToDie()) {
+        static MacWSPostLegacyKeyboardEvent postKeyboard;
+        static dispatch_once_t postKeyboardOnce;
+        dispatch_once(&postKeyboardOnce, ^{
+            postKeyboard = (MacWSPostLegacyKeyboardEvent)dlsym(
+                RTLD_DEFAULT, "CGPostKeyboardEvent");
+        });
+        // `contactID` uses X11 keysyms for non-printable keys; those values
+        // are not CGCharCode values. Physical keyCode is authoritative, so
+        // supply a character only for the single-byte printable range and
+        // leave Shift/arrows/function keys at zero like the proven desktop
+        // command route.
+        uint16_t character = keySym <= 0xffu ? (uint16_t)keySym : 0;
+        uint16_t eventType = record.kind == MacWSInputKindKeyDown ? 10 : 11;
+        double postedAt = MacWSInputUptimeSeconds();
+        BOOL traceSample = MacWSKeyboardLatencyDiagnosticsEnabled() &&
+            (record.flags & MacWSInputFlagLatencyDiagnostic);
+        if (traceSample)
+            MacWSRegisterKeyboardCGSTraceSample(
+                record, (uint16_t)roundedKeyCode, eventType, postedAt);
+        int32_t status = postKeyboard
+            ? postKeyboard(character, (uint16_t)roundedKeyCode,
+                           record.kind == MacWSInputKindKeyDown)
+            : -1;
+        if (status != 0 && traceSample)
+            MacWSCancelKeyboardCGSTraceSample(record.sampleSequence);
+        if (MacWSKeyboardLatencyDiagnosticsEnabled() &&
+            (record.flags & MacWSInputFlagLatencyDiagnostic)) {
+            double now = MacWSInputUptimeSeconds();
+            MacWSKeyboardLatencyTrace(
+                "stage=app-cgs-post pid=%d sample=%u kind=%u keycode=%u "
+                "producer-to-post=%.3fms status=%d\n",
+                getpid(), record.sampleSequence, record.kind, roundedKeyCode,
+                record.timestamp > 0.0 && now >= record.timestamp
+                    ? (now - record.timestamp) * 1000.0 : -1.0,
+                status);
+        }
+        if (status == 0) return YES;
+    }
     if (keySym == 0xff1bu) {
         if (record.kind == MacWSInputKindKeyUp &&
             atomic_exchange_explicit(&MacWSAppInputConsumeEscapeUp, NO,
@@ -6348,6 +6593,17 @@ static BOOL MacWSPostKeyRecord(MacWSInputRecord record, id application,
     } else {
         ((MacWSSendEvent)objc_msgSend)(application,
             sel_registerName("sendEvent:"), event);
+    }
+    if (MacWSKeyboardLatencyDiagnosticsEnabled() &&
+        (record.flags & MacWSInputFlagLatencyDiagnostic)) {
+        double now = MacWSInputUptimeSeconds();
+        MacWSKeyboardLatencyTrace(
+            "stage=app-queue pid=%d sample=%u kind=%u keycode=%u "
+            "producer-to-queue=%.3fms delivery=%s\n",
+            getpid(), record.sampleSequence, record.kind, roundedKeyCode,
+            record.timestamp > 0.0 && now >= record.timestamp
+                ? (now - record.timestamp) * 1000.0 : -1.0,
+            fromSocketThread ? "post-event" : "send-event");
     }
     if (MacWSRuntimeDiagnosticsEnabled()) {
         const void *eventRef = ((MacWSMsgBoolSEL)objc_msgSend)(
@@ -8282,6 +8538,7 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
                 getpid());
         return;
     }
+    MacWSCacheKeyboardContext(application);
     // Quit is application-scoped and remains valid for a hidden/windowless
     // target. Do not make it depend on NSScreen publication or install any
     // pointer hooks before entering AppKit's real termination lifecycle.
@@ -11540,6 +11797,19 @@ static void *MacWSAppInputThread(void *unused) {
             fflush(stderr);
             continue;
         }
+        if (MacWSKeyboardLatencyDiagnosticsEnabled() &&
+            (record.flags & MacWSInputFlagLatencyDiagnostic) &&
+            (record.kind == MacWSInputKindKeyDown ||
+             record.kind == MacWSInputKindKeyUp)) {
+            double now = MacWSInputUptimeSeconds();
+            MacWSKeyboardLatencyTrace(
+                "stage=app-socket pid=%d sample=%u kind=%u keycode=%u "
+                "producer-to-socket=%.3fms\n",
+                getpid(), record.sampleSequence, record.kind,
+                (unsigned)llround(record.pressure),
+                record.timestamp > 0.0 && now >= record.timestamp
+                    ? (now - record.timestamp) * 1000.0 : -1.0);
+        }
         if (record.flags & MacWSInputFlagLatencyDiagnostic) {
             double transportUS = fmax(
                 0.0, (MacWSInputUptimeSeconds() - record.timestamp) * 1.0e6);
@@ -11912,6 +12182,7 @@ static void MacWSPublishWindowMetrics(void) {
     id application = ((MacWSMsgID)objc_msgSend)(
         (id)applicationClass, sel_registerName("sharedApplication"));
     if (!application) return;
+    MacWSCacheKeyboardContext(application);
     id windows = ((MacWSMsgID)objc_msgSend)(
         application, sel_registerName("windows"));
     id keyWindow = ((MacWSMsgID)objc_msgSend)(

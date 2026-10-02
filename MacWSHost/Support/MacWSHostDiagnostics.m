@@ -36,6 +36,15 @@ BOOL MacWSHostTouchDiagnosticsEnabled(void) {
         F_OK) == 0;
 }
 
+BOOL MacWSHostKeyboardLatencyDiagnosticsEnabled(void) {
+    // Dynamic and keyboard-only: this can be enabled for one physical WASD
+    // sample without turning on the expensive renderer/AppInput flight
+    // recorders that would perturb the latency under measurement.
+    return access(
+        "/var/mnt/rootfs/private/tmp/macws_keyboard_latency_diagnostics",
+        F_OK) == 0;
+}
+
 double MacWSMachMilliseconds(uint64_t start, uint64_t end) {
     if (!start || end < start) return -1.0;
     static mach_timebase_info_data_t timebase;

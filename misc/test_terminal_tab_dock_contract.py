@@ -55,7 +55,7 @@ class FloatingDockGeometryContract(unittest.TestCase):
         self.assertIn("canFitWithDock", helper)
         self.assertIn("MacWSRequestFloatingDockYield(sceneIdentifier, frame)", helper)
 
-    def test_authoritative_immutable_model_is_adjusted_after_stock_layout(self):
+    def test_transient_whole_stage_model_is_adjusted_after_stock_layout(self):
         group = body(
             WINDOWING,
             "- (id)_appLayoutByPerformingAutoLayoutIfNeededInAppLayout:",
@@ -81,6 +81,61 @@ class FloatingDockGeometryContract(unittest.TestCase):
             model,
         )
         self.assertIn("route=immutable-app-layout", model)
+
+    def test_authoritative_resize_transactions_publish_the_safe_center(self):
+        response = body(
+            WINDOWING, "- (id)_responseForSceneSizeUpdateToSize:",
+        )
+        self.assertIn("MacWSHostCenterAvoidingFloatingDock(", response)
+        self.assertIn("realGestureResponse", response)
+        self.assertIn("matchingGestureFollowup", response)
+        self.assertIn("MacWSStableModelSize(selectedScene", response)
+        self.assertIn(
+            "fabs(stableModelSize.height - constrained.height) <= 1.0",
+            response,
+        )
+        self.assertIn('@"native-resize-response"', response)
+        self.assertIn('@"matching-system-followup"', response)
+        self.assertIn(
+            "%orig(constrained, authoritativeCenter, sceneUpdatesOnly)",
+            response,
+        )
+
+        programmatic = body(
+            WINDOWING,
+            "static void MacWSApplyResizeRequest(NSDictionary *request, NSString *path,\n"
+            "                                    NSUInteger attempt) {",
+        )
+        center = programmatic.index("MacWSHostCenterAvoidingFloatingDock(")
+        clone = programmatic.index(
+            'NSSelectorFromString(\n        @"appLayoutByModifyingLayoutAttributes:forItem:")'
+        )
+        self.assertLess(center, clone)
+        self.assertIn("attributesByModifyingNormalizedCenter:", programmatic)
+        self.assertIn("sizePreserved", programmatic)
+        self.assertIn("centerResolved", programmatic)
+        self.assertIn("route=programmatic-immutable-attributes", programmatic)
+
+    def test_final_switcher_frame_uses_dock_safe_center_without_resizing(self):
+        self.assertIn("%hook SBiPadOSPlatformSwitcherModifier", WINDOWING)
+        provider = body(WINDOWING, "- (CGRect)frameForIndex:")
+        self.assertIn('@"appLayouts"', provider)
+        self.assertIn('@"com.macwsguide.host"', provider)
+        self.assertIn("MacWSWorkspaceSinceByScene[scene]", provider)
+        self.assertIn('@"containerViewBounds"', provider)
+        self.assertIn('@"floatingDockHeight"', provider)
+        self.assertIn("MacWSHostFrameAvoidingFloatingDock(", provider)
+        self.assertIn("CGSizeEqualToSize(original.size, frame.size)", provider)
+        self.assertNotIn("frame.size =", provider)
+        self.assertNotIn("frame.size.width =", provider)
+        self.assertNotIn("frame.size.height =", provider)
+
+    def test_temporary_presentation_setter_diagnostics_are_not_shipped(self):
+        self.assertNotIn("%hook SBReusableSnapshotItemContainer", WINDOWING)
+        self.assertNotIn("%hook SBDeviceApplicationSceneView", WINDOWING)
+        self.assertNotIn("MacWSLogSceneViewGeometry", WINDOWING)
+        self.assertNotIn("MacWSLogFrameForIndexProviders", WINDOWING)
+        self.assertNotIn("MacWSLogLayoutRoleFrameProvider", WINDOWING)
 
     def test_repeated_internal_layout_witnesses_are_deduplicated(self):
         model = body(
@@ -120,15 +175,45 @@ class FloatingDockGeometryContract(unittest.TestCase):
         self.assertIn("route=native-dismiss", request)
 
     def test_native_dock_assertion_has_balanced_lifecycle(self):
+        request = body(WINDOWING, "static BOOL MacWSRequestFloatingDockYield(")
+        self.assertNotIn(
+            "if (MacWSDockYieldAssertionByScene[sceneIdentifier]) return YES",
+            request,
+        )
+        self.assertIn("dockPresented", request)
+        self.assertIn('assertion-lost-visible-dock-authority', request)
         release = body(WINDOWING, "static void MacWSReleaseFloatingDockYield(")
-        self.assertIn("removeObjectForKey:sceneIdentifier", release)
+        self.assertIn("MacWSDockYieldReleaseInFlightScenes", release)
+        self.assertIn("MacWSDockYieldReleaseAssertionByScene", release)
+        self.assertIn("2.5 * NSEC_PER_SEC", release)
+        self.assertIn('reason, @"timeout"', release)
+        invalidate = release.index("objc_msgSend)(assertion, selector")
+        self.assertIn("weakAssertion", release)
         self.assertIn('@"invalidateWithCompletion:"', release)
         self.assertIn('@"invalidate"', release)
+        finish = body(
+            WINDOWING,
+            "static void MacWSFinishFloatingDockYieldRelease(",
+        )
+        self.assertIn("MacWSDockYieldReleaseAssertionByScene", finish)
+        self.assertIn("if (!reassert)", finish)
+        self.assertIn(
+            "MacWSRequestFloatingDockYield(sceneIdentifier, CGRectZero)",
+            finish,
+        )
         helper = body(WINDOWING, "static CGRect MacWSHostFrameAvoidingFloatingDock(")
         self.assertIn("hasYieldAssertion", helper)
+        self.assertIn("wantsYield", helper)
         self.assertIn("MacWSDockYieldGeometryByScene", helper)
+        self.assertIn('@"screen_edge_padding"', helper)
+        self.assertIn('@"screen_scale"', helper)
         self.assertIn('@"window-fits-dock-safe-region"', helper)
         self.assertIn('@"container-geometry-changed"', helper)
+        self.assertIn("MacWSRequestFloatingDockYield(sceneIdentifier, frame)", helper)
+        self.assertLess(
+            helper.index('@"window-fits-dock-safe-region"'),
+            helper.index("CGFloat safeBottom"),
+        )
         current_stage = body(
             WINDOWING, "static void MacWSReleaseDockYieldsOutsideCurrentStage(",
         )

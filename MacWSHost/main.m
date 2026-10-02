@@ -166,6 +166,39 @@ static BOOL MacWSWindowingInitialSizeBridgeIsLoaded(void) {
     return MacWSWindowingLiveCapabilities(MacWSWindowingInitialSize, NULL);
 }
 
+typedef NS_ENUM(uint8_t, MacWSIndependentWindowingState) {
+    MacWSIndependentWindowingUnknown = 0,
+    MacWSIndependentWindowingInactive = 1,
+    MacWSIndependentWindowingActive = 2,
+};
+
+static MacWSIndependentWindowingState
+MacWSCurrentIndependentWindowingState(uint64_t *rawStateOut) {
+    uint64_t state = 0;
+    NSOperatingSystemVersion version =
+        NSProcessInfo.processInfo.operatingSystemVersion;
+    if (version.majorVersion < 16 ||
+        (version.majorVersion == 16 && version.minorVersion < 1)) {
+        // Runtime-confirmed on iPad14,5 / 20A8372: requesting a second
+        // 700-point Scene produces a 678x1024 Split View column even though
+        // UIApplication.supportsMultipleScenes is YES.  Treat this exact
+        // pre-16.1 system family as non-Chamois without depending on tweak
+        // injection, so an unavailable publisher cannot recreate the split.
+        if (rawStateOut) *rawStateOut = state;
+        return MacWSIndependentWindowingInactive;
+    }
+    BOOL publisherLive = MacWSWindowingLiveCapabilities(
+        MacWSWindowingFullscreen, &state);
+    if (rawStateOut) *rawStateOut = state;
+    if (!publisherLive) return MacWSIndependentWindowingUnknown;
+    uint8_t capabilities = MacWSWindowingStateCapabilities(state);
+    if ((capabilities & MacWSWindowingChamoisKnown) == 0)
+        return MacWSIndependentWindowingUnknown;
+    return (capabilities & MacWSWindowingChamoisActive)
+        ? MacWSIndependentWindowingActive
+        : MacWSIndependentWindowingInactive;
+}
+
 static CGFloat MacWSSceneMaximumAxis(CGFloat logicalMaximum, CGFloat density,
                                      CGFloat chrome, CGFloat minimum) {
     if (!isfinite(logicalMaximum) || logicalMaximum < 64.0) return 0.0;
@@ -330,6 +363,17 @@ static NSString *MacWSLocalizedPhase(NSString *phase) {
                     logicalGroupID:(uint32_t)logicalGroupID
                              title:(NSString *)title
                             reason:(NSString *)reason;
+- (void)openRequestedWindowInCurrentScene:(uint32_t)windowID
+                                  ownerPID:(int32_t)ownerPID
+                            logicalGroupID:(uint32_t)logicalGroupID
+                             preferredSize:(CGSize)preferredSize
+                               minimumSize:(CGSize)minimumSize
+                               maximumSize:(CGSize)maximumSize
+                                 resizable:(BOOL)resizable
+                                fixedWidth:(BOOL)fixedWidth
+                               fixedHeight:(BOOL)fixedHeight
+                                     title:(NSString *)title
+                                    reason:(NSString *)reason;
 - (NSUserActivity *)streamRestorationActivity;
 - (void)suspendSceneStream;
 - (void)resumeSceneStream;
@@ -361,6 +405,17 @@ static NSString *MacWSLocalizedPhase(NSString *phase) {
 - (BOOL)detachMissingWorkspaceReturnOwnerPID:(int32_t)ownerPID
                                     windowID:(uint32_t)windowID;
 @end
+
+static MacWSViewController *MacWSControllerForScene(UIScene *scene) {
+    if (![scene isKindOfClass:UIWindowScene.class]) return nil;
+    for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+        if ([window.rootViewController isKindOfClass:MacWSViewController.class])
+            return (MacWSViewController *)window.rootViewController;
+    }
+    return nil;
+}
+
+static void MacWSScheduleSingleSceneWindowingEnforcement(NSUInteger attempt);
 
 // A fullscreen workspace remains the presentation of the exact AppKit window
 // from which it was entered. Resolve that owned identity uniformly anywhere
@@ -443,10 +498,29 @@ static void MacWSEnsureRequestedSceneIsForeground(
         UIWindowScene *windowScene, NSUserActivity *activity,
         UIScene *preferredRequestingScene, NSUInteger attempt) {
     if (!windowScene || !windowScene.session || attempt > 2) return;
+    if (MacWSCurrentIndependentWindowingState(NULL) !=
+            MacWSIndependentWindowingActive) {
+        // A stale session restored on pre-Chamois iPadOS can reach this
+        // postcondition helper before single-Scene enforcement destroys it.
+        // Reactivating that exact session would recreate the Split View column
+        // that the new-scene gate is designed to prevent.
+        MacWSLog(@"scene-foreground-postcondition skipped id=%@ reason=independent-windowing-inactive",
+                 windowScene.session.persistentIdentifier);
+        MacWSScheduleSingleSceneWindowingEnforcement(0);
+        return;
+    }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                  (attempt == 0 ? 250 : 500) * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
         UISceneActivationState state = windowScene.activationState;
+        if (MacWSCurrentIndependentWindowingState(NULL) !=
+                MacWSIndependentWindowingActive) {
+            MacWSLog(@"scene-foreground-postcondition skipped id=%@ attempt=%lu reason=independent-windowing-became-inactive",
+                     windowScene.session.persistentIdentifier,
+                     (unsigned long)attempt);
+            MacWSScheduleSingleSceneWindowingEnforcement(0);
+            return;
+        }
         MacWSLog(@"scene-foreground-postcondition id=%@ attempt=%lu state=%ld",
                  windowScene.session.persistentIdentifier,
                  (unsigned long)attempt, (long)state);
@@ -510,6 +584,53 @@ static void MacWSRequestNewScene(UIScene *requestingScene,
                                  BOOL activateExistingForeground,
                                  void (^failureHandler)(NSError *error)) {
     UIApplication *application = UIApplication.sharedApplication;
+    uint64_t windowingState = 0;
+    MacWSIndependentWindowingState independentWindowing =
+        MacWSCurrentIndependentWindowingState(&windowingState);
+    if (independentWindowing != MacWSIndependentWindowingActive) {
+        // Runtime-confirmed on iPad14,5 / 20A8372: UIKit reports
+        // supportsMultipleScenes=YES while a requested 700-point window lands
+        // as a 678x1024 Split View column. SpringBoard's live Chamois state is
+        // the authority for independent floating Scenes. Reuse the current
+        // Scene when it is inactive (or not yet known) instead of requesting
+        // a layout mode this OS is not currently presenting.
+        MacWSViewController *controller =
+            MacWSControllerForScene(requestingScene);
+        NSString *reason = independentWindowing ==
+                MacWSIndependentWindowingInactive
+            ? @"当前系统未启用台前调度，已在同一个 macPad 窗口中切换，避免误入分屏。"
+            : @"正在确认系统窗口模式，已先在当前 macPad 窗口中打开，避免误入分屏。";
+        if (controller) {
+            if (windowID != 0) {
+                [controller openRequestedWindowInCurrentScene:windowID
+                    ownerPID:ownerPID logicalGroupID:logicalGroupID
+                    preferredSize:preferredSize minimumSize:minimumSize
+                    maximumSize:maximumSize resizable:resizable
+                    fixedWidth:fixedWidth fixedHeight:fixedHeight
+                    title:title reason:reason];
+            } else {
+                // `macwshost://new` with no exact window asks for another
+                // fullscreen workspace Scene.  Reuse is still required on a
+                // pre-Chamois system; the idempotent setter cannot toggle an
+                // already-fullscreen controller back to window mode.
+                [controller setFullscreenWorkspaceEnabled:YES];
+            }
+            MacWSLog(@"scene-activation reused-current reason=independent-windowing-%@ supportsMultiple=%@ state=%#llx window=%u owner=%d",
+                independentWindowing == MacWSIndependentWindowingInactive
+                    ? @"inactive" : @"unknown",
+                application.supportsMultipleScenes ? @"YES" : @"NO",
+                (unsigned long long)windowingState, windowID, ownerPID);
+            MacWSScheduleSingleSceneWindowingEnforcement(0);
+        } else if (failureHandler) {
+            NSError *error = [NSError errorWithDomain:
+                @"MacWSWindowingErrorDomain" code:1 userInfo:@{
+                    NSLocalizedDescriptionKey:
+                        @"当前 iPadOS 窗口不支持独立 macPad Scene，且没有可复用的活动窗口。"
+                }];
+            failureHandler(error);
+        }
+        return;
+    }
     NSString *creationIdentity = MacWSWindowIdentity(ownerPID, windowID, logicalGroupID);
     __block NSNumber *creationStarted = nil;
     NSUserActivity *activity = [[NSUserActivity alloc]
@@ -697,6 +818,12 @@ static BOOL MacWSRequestWindowedReplacementScene(
         uint32_t logicalGroupID, CGSize preferredSize, CGSize minimumSize, CGSize maximumSize,
         BOOL resizable, BOOL fixedWidth, BOOL fixedHeight, NSString *title,
         void (^failureHandler)(NSError *error)) {
+    if (MacWSCurrentIndependentWindowingState(NULL) !=
+            MacWSIndependentWindowingActive) {
+        // The caller already has an in-place restoration path. Use it when
+        // SpringBoard is not presenting independent Chamois windows.
+        return NO;
+    }
     UISceneSession *oldSession = requestingScene.session;
     NSString *oldIdentifier = oldSession.persistentIdentifier;
     if (!oldSession || !oldIdentifier.length || windowID == 0 || ownerPID <= 1)
@@ -5266,27 +5393,44 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
                           reason:(NSString *)reason {
     if (_sceneDestructionRequested || !window ||
         window.descriptor.windowID == 0) return;
-    [self openWindowIDInCurrentScene:window.descriptor.windowID
-                            ownerPID:window.descriptor.ownerPID
-                      logicalGroupID:window.descriptor.logicalGroupID
-                               title:window.title
-                              reason:reason];
-    _windowMinimumSize = CGSizeMake(window.descriptor.minimumLogicalWidth,
-                                   window.descriptor.minimumLogicalHeight);
-    _windowMaximumSize = window.maximumLogicalSize;
-    _windowPreferredSize = CGSizeMake(window.descriptor.logicalWidth,
-                                      window.descriptor.logicalHeight);
-    _windowResizable =
-        (window.descriptor.flags & MacWSStreamWindowResizable) != 0;
-    _windowWidthFixed =
-        (window.descriptor.flags & MacWSStreamWindowFixedWidth) != 0 ||
-        !_windowResizable;
-    _windowHeightFixed =
-        (window.descriptor.flags & MacWSStreamWindowFixedHeight) != 0 ||
-        !_windowResizable;
-    [_metalView observeTargetWindowLogicalSize:
-        CGSizeMake(window.descriptor.logicalWidth,
-                   window.descriptor.logicalHeight)];
+    [self openRequestedWindowInCurrentScene:window.descriptor.windowID
+        ownerPID:window.descriptor.ownerPID
+        logicalGroupID:window.descriptor.logicalGroupID
+        preferredSize:CGSizeMake(window.descriptor.logicalWidth,
+                                 window.descriptor.logicalHeight)
+        minimumSize:CGSizeMake(window.descriptor.minimumLogicalWidth,
+                               window.descriptor.minimumLogicalHeight)
+        maximumSize:window.maximumLogicalSize
+        resizable:(window.descriptor.flags & MacWSStreamWindowResizable) != 0
+        fixedWidth:(window.descriptor.flags & MacWSStreamWindowFixedWidth) != 0
+        fixedHeight:(window.descriptor.flags & MacWSStreamWindowFixedHeight) != 0
+        title:window.title reason:reason];
+}
+
+- (void)openRequestedWindowInCurrentScene:(uint32_t)windowID
+                                  ownerPID:(int32_t)ownerPID
+                            logicalGroupID:(uint32_t)logicalGroupID
+                             preferredSize:(CGSize)preferredSize
+                               minimumSize:(CGSize)minimumSize
+                               maximumSize:(CGSize)maximumSize
+                                 resizable:(BOOL)resizable
+                                fixedWidth:(BOOL)fixedWidth
+                               fixedHeight:(BOOL)fixedHeight
+                                     title:(NSString *)title
+                                    reason:(NSString *)reason {
+    if (_sceneDestructionRequested || windowID == 0 || ownerPID <= 1) return;
+    [self openWindowIDInCurrentScene:windowID ownerPID:ownerPID
+        logicalGroupID:logicalGroupID title:title reason:reason];
+    _windowMinimumSize = minimumSize;
+    _windowMaximumSize = maximumSize;
+    _windowPreferredSize = preferredSize;
+    _windowResizable = resizable;
+    _windowWidthFixed = fixedWidth || !resizable;
+    _windowHeightFixed = fixedHeight || !resizable;
+    if (isfinite(preferredSize.width) && isfinite(preferredSize.height) &&
+        preferredSize.width > 0.0 && preferredSize.height > 0.0) {
+        [_metalView observeTargetWindowLogicalSize:preferredSize];
+    }
     _metalView.minimumLogicalSize = _windowMinimumSize;
     _metalView.maximumLogicalSize = _windowMaximumSize;
     _metalView.targetWindowResizable = _windowResizable;
@@ -8229,6 +8373,82 @@ static void MacWSPruneDormantWorkspaceSessions(void) {
     }
 }
 
+static void MacWSScheduleSingleSceneWindowingEnforcement(NSUInteger attempt) {
+    MacWSIndependentWindowingState state =
+        MacWSCurrentIndependentWindowingState(NULL);
+    if (state == MacWSIndependentWindowingActive) return;
+    if (state == MacWSIndependentWindowingUnknown) {
+        if (attempt < 12) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                         250 * NSEC_PER_MSEC),
+                           dispatch_get_main_queue(), ^{
+                MacWSScheduleSingleSceneWindowingEnforcement(attempt + 1);
+            });
+        } else {
+            MacWSLog(@"single-scene enforcement deferred reason=chamois-state-unknown connected=%lu open=%lu",
+                (unsigned long)UIApplication.sharedApplication.connectedScenes.count,
+                (unsigned long)UIApplication.sharedApplication.openSessions.count);
+        }
+        return;
+    }
+    if (state != MacWSIndependentWindowingInactive) return;
+
+    UIApplication *application = UIApplication.sharedApplication;
+    UIWindowScene *keeper = nil;
+    for (UIScene *scene in application.connectedScenes) {
+        if (![scene isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *window in ((UIWindowScene *)scene).windows) {
+            if ([window respondsToSelector:@selector(_isApplicationKeyWindow)] &&
+                [window _isApplicationKeyWindow]) {
+                keeper = (UIWindowScene *)scene;
+                break;
+            }
+        }
+        if (keeper) break;
+    }
+    if (!keeper) {
+        for (UIScene *scene in application.connectedScenes) {
+            if ([scene isKindOfClass:UIWindowScene.class] &&
+                scene.activationState == UISceneActivationStateForegroundActive) {
+                keeper = (UIWindowScene *)scene;
+                break;
+            }
+        }
+    }
+    if (!keeper) {
+        for (UIScene *scene in application.connectedScenes) {
+            if ([scene isKindOfClass:UIWindowScene.class]) {
+                keeper = (UIWindowScene *)scene;
+                break;
+            }
+        }
+    }
+    if (!keeper || application.openSessions.count <= 1) return;
+
+    if (!MacWSSceneSessionsPreservingMacWindow)
+        MacWSSceneSessionsPreservingMacWindow = [NSMutableSet set];
+    NSString *keeperIdentifier = keeper.session.persistentIdentifier;
+    for (UISceneSession *session in [application.openSessions copy]) {
+        NSString *identifier = session.persistentIdentifier;
+        if ([identifier isEqualToString:keeperIdentifier] ||
+            [MacWSSceneSessionsPreservingMacWindow containsObject:identifier])
+            continue;
+        // On a system without active Chamois UI, multiple persistent Scenes
+        // are presented as Split View columns. Retire only the redundant iOS
+        // container and explicitly preserve its AppKit window so it remains
+        // available in the kept Scene's window picker.
+        [MacWSSceneSessionsPreservingMacWindow addObject:identifier];
+        MacWSLog(@"single-scene enforcement retire=%@ keep=%@ reason=chamois-inactive",
+                 identifier, keeperIdentifier);
+        [application requestSceneSessionDestruction:session options:nil
+            errorHandler:^(NSError *error) {
+                [MacWSSceneSessionsPreservingMacWindow removeObject:identifier];
+                MacWSLog(@"single-scene enforcement failed retire=%@ keep=%@ error=%@",
+                         identifier, keeperIdentifier, error);
+            }];
+    }
+}
+
 static NSString *MacWSSceneWindowIdentity(NSUserActivity *activity) {
     NSDictionary *info = activity.userInfo;
     int32_t ownerPID = 0;
@@ -8412,6 +8632,7 @@ static void MacWSDeduplicateWindowScenes(void) {
              windowScene.coordinateSpace.bounds.size.height,
              preferredSize.width, preferredSize.height, minimumSize.width,
              minimumSize.height, resizable ? @"YES" : @"NO");
+    MacWSScheduleSingleSceneWindowingEnforcement(0);
     if ([activity.userInfo[@"foreground_on_connect"] boolValue]) {
         // requestSceneSessionActivation may connect the requested window but
         // leave it Background under Stage Manager. Connection is not the
@@ -8954,6 +9175,7 @@ extern void MacWSRunIOSClearReference(void);
                    dispatch_get_main_queue(), ^{
         MacWSPruneDeadWindowSceneSessions();
         MacWSPruneDormantWorkspaceSessions();
+        MacWSScheduleSingleSceneWindowingEnforcement(0);
     });
     // Diagnostic-only native AGX reference.  Keeping this behind a sentinel
     // lets the established, FrontBoard-launched host provide the foreground

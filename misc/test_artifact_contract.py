@@ -53,6 +53,25 @@ class ArtifactContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'changed during cross-build'):
             contract.manifest(self.root, self.binary, snapshot)
 
+    def test_rootful_windowing_load_command_is_rejected(self):
+        output = (f'{self.binary}:\n'
+                  '\t@rpath/MacWSWindowing.dylib (compatibility version 0.0.0)\n'
+                  '\t/Library/Frameworks/CydiaSubstrate.framework/'
+                  'CydiaSubstrate (compatibility version 0.0.0)\n')
+        with mock.patch.object(contract.subprocess, 'run',
+                return_value=subprocess.CompletedProcess([], 0, output, '')):
+            with self.assertRaisesRegex(ValueError, 'rootful load commands'):
+                contract.verify_windowing_rootless_load_commands(self.binary)
+
+    def test_rootless_windowing_load_command_is_accepted(self):
+        output = (f'{self.binary}:\n'
+                  '\t@rpath/MacWSWindowing.dylib (compatibility version 0.0.0)\n'
+                  '\t@rpath/CydiaSubstrate.framework/CydiaSubstrate '
+                  '(compatibility version 0.0.0)\n')
+        with mock.patch.object(contract.subprocess, 'run',
+                return_value=subprocess.CompletedProcess([], 0, output, '')):
+            contract.verify_windowing_rootless_load_commands(self.binary)
+
     def test_missing_transitive_header_is_rejected(self):
         (self.root / 'include/capability.h').unlink()
         with self.assertRaisesRegex(ValueError, 'unresolved local include'):
@@ -83,6 +102,8 @@ class ArtifactContract(unittest.TestCase):
                 '--staging', str(self.root / 'staging')]), \
                 mock.patch.object(contract, 'verify_production_policy',
                     side_effect=ValueError('fixture diagnostic present')) as audit, \
+                mock.patch.object(contract,
+                    'verify_windowing_rootless_load_commands'), \
                 mock.patch.object(contract, 'verify_package') as archive:
             self.assertEqual(contract.main(), 1)
             audit.assert_called_once_with(self.root)

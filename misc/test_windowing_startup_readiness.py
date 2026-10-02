@@ -6,6 +6,9 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / "layout/usr/macOS/bin/macos_gui.sh").read_text()
 POSTINST = (ROOT / "layout/DEBIAN/postinst").read_text()
+HOST = (ROOT / "MacWSHost/main.m").read_text()
+TWEAK = (ROOT / "MacWSWindowing/Tweak.x").read_text()
+PROTOCOL = (ROOT / "include/macws_windowing_protocol.h").read_text()
 
 
 class WindowingStartupReadiness(unittest.TestCase):
@@ -45,6 +48,51 @@ class WindowingStartupReadiness(unittest.TestCase):
         self.assertNotIn('killall', ensure)
         self.assertNotIn('launchctl load', ensure)
         self.assertNotIn('killall SpringBoard', POSTINST)
+
+    def test_independent_scenes_require_live_chamois_state(self):
+        self.assertIn('MacWSWindowingChamoisKnown = 1u << 5', PROTOCOL)
+        self.assertIn('MacWSWindowingChamoisActive = 1u << 6', PROTOCOL)
+        self.assertIn(
+            'MacWSObserveChamoisWindowingState(isChamoisWindowingUIEnabled);',
+            TWEAK)
+        request = HOST.split('static void MacWSRequestNewScene(', 1)[1].split(
+            '\n// A fullscreen Scene', 1)[0]
+        state = HOST.split(
+            'MacWSCurrentIndependentWindowingState(uint64_t *rawStateOut)',
+            1)[1].split('\nstatic CGFloat MacWSSceneMaximumAxis', 1)[0]
+        self.assertIn('version.minorVersion < 1', state)
+        self.assertIn('MacWSIndependentWindowingInactive', state)
+        self.assertIn('MacWSCurrentIndependentWindowingState', request)
+        self.assertIn('openRequestedWindowInCurrentScene', request)
+        self.assertIn('setFullscreenWorkspaceEnabled:YES', request)
+        self.assertNotIn(
+            'if (windowID != 0 &&\n'
+            '        independentWindowing != MacWSIndependentWindowingActive)',
+            request)
+        self.assertIn('scene-activation reused-current', request)
+        self.assertLess(
+            request.index('openRequestedWindowInCurrentScene'),
+            request.index('requestSceneSessionActivation:existingSession'))
+        foreground = HOST.split(
+            'static void MacWSEnsureRequestedSceneIsForeground(', 1,
+        )[1].split('\nstatic void MacWSRequestNewScene(', 1)[0]
+        self.assertGreaterEqual(
+            foreground.count('MacWSIndependentWindowingActive'), 2,
+        )
+        self.assertIn('independent-windowing-became-inactive', foreground)
+        self.assertLess(
+            foreground.index('MacWSIndependentWindowingActive'),
+            foreground.index('requestSceneSessionActivation:windowScene.session'),
+        )
+
+    def test_chamois_inactive_sessions_collapse_without_closing_mac_windows(self):
+        collapse = HOST.split(
+            'static void MacWSScheduleSingleSceneWindowingEnforcement(', 2)[2]
+        collapse = collapse.split('\nstatic NSString *MacWSSceneWindowIdentity', 1)[0]
+        self.assertIn('MacWSIndependentWindowingInactive', collapse)
+        self.assertIn('MacWSSceneSessionsPreservingMacWindow addObject', collapse)
+        self.assertIn('requestSceneSessionDestruction:session', collapse)
+        self.assertNotIn('MacWSCloseMacWindowForSceneSession', collapse)
 
 
 if __name__ == '__main__':

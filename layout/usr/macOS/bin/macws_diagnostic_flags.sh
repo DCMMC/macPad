@@ -58,6 +58,7 @@ macws_diagnostic_flag_paths() {
         /tmp/macws_kcmd_fix \
         /tmp/macws_kcmd_stray_subtype3_diag \
         /tmp/macws_kcmd_wrapped_fix \
+        /tmp/macws_keyboard_latency_diagnostics \
         /tmp/macws_mtlcompiler_diagnostics \
         /tmp/macws_mtlcompiler_hold \
         /tmp/macws_observe_pf550 \

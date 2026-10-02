@@ -50,6 +50,24 @@ if [ "$cf_count" -lt 1 ] || [ "$plain_cf_count" -ne 0 ]; then
     exit 1
 fi
 echo "==> Verified arm64e __cfstring fixups: auth-bind/key=DA count=$cf_count, plain-bind count=0"
+
+# A default/rootful Theos build can have perfectly valid arm64e authenticated
+# fixups while still naming Substrate at /Library/Frameworks.  Dopamine's
+# rootless SpringBoard cannot resolve that path and ElleKit simply omits the
+# tweak.  Verify the actual LC_LOAD_DYLIB commands before publishing it.
+LOAD_COMMANDS=$(otool -L "$BUILT")
+if printf '%s\n' "$LOAD_COMMANDS" | grep -q $'\t/Library/'; then
+    echo 'Error: MacWSWindowing contains rootful /Library load commands.' >&2
+    printf '%s\n' "$LOAD_COMMANDS" >&2
+    exit 1
+fi
+if ! printf '%s\n' "$LOAD_COMMANDS" |
+        grep -q $'\t@rpath/CydiaSubstrate.framework/CydiaSubstrate '; then
+    echo 'Error: MacWSWindowing lacks its rootless @rpath Substrate dependency.' >&2
+    printf '%s\n' "$LOAD_COMMANDS" >&2
+    exit 1
+fi
+echo '==> Verified rootless MacWSWindowing load commands'
 python3 "$SCRIPT_DIR/macws_artifact_contract.py" create \
     --root "$PROJECT_DIR" --binary "$BUILT" --manifest "$BUILD_MANIFEST" \
     --source-snapshot "$SOURCE_SNAPSHOT"

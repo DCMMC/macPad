@@ -93,9 +93,16 @@ class HardwareKeyboardContractTests(unittest.TestCase):
                 self.assertEqual(host_input_matrix.resolve_window(87221, 0),
                                  521)
 
-    def test_physical_keys_use_runtime_proven_windowserver_proxy(self):
+    def test_physical_keys_select_exact_app_or_global_session_route(self):
         self.assertIn("nativeKeyboardProxyRecord", INPUTD)
         self.assertIn("MacWSInputSourceHardwareKeyboard", INPUTD)
+        self.assertIn("MacWSInputWindowIDForScene(record->sceneID) == 0",
+                      INPUTD)
+        self.assertIn("MacWSAppInputKeyboardApplication", APP_INPUT)
+        self.assertIn("stage=app-queue", APP_INPUT)
+        self.assertIn("stage=app-cgs-post", APP_INPUT)
+        self.assertIn("MacWSMainBundleIsSevenDaysToDie()", APP_INPUT)
+        self.assertIn("keySym <= 0xffu", APP_INPUT)
         self.assertIn("macws_vnc_proxy_keyboard", MAC_HOOKS)
         self.assertIn("CGEventCreateKeyboardEvent", MAC_HOOKS)
         self.assertIn("kCGSessionEventTap", MAC_HOOKS)

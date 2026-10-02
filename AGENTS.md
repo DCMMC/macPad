@@ -103,7 +103,7 @@ caught:
 The corrected attribution is retained in the historical AGX snapshot below so
 it is available to every agent without an external memory store.
 
-## Current Project Memory and Operating Baseline (2026-10-01)
+## Current Project Memory and Operating Baseline (2026-10-02)
 
 This section is the current summary. Later sections retain detailed and
 historical bring-up knowledge. If an older section conflicts with this one,
@@ -228,14 +228,28 @@ Display and windows:
 - Exact unbounded AppKit windows can grow beyond the virtual `NSScreen`; real
   application min/max/aspect/increment constraints still apply. Transient and
   genuinely bounded windows keep native AppKit constraints.
-- Floating-Dock avoidance must update the exact Host item's immutable
-  `SBDisplayItemLayoutAttributes.normalizedCenter` after stock whole-stage
-  auto layout, then clone the `SBAppLayout`. Modifying only
-  `_frameForLayoutRole:...` is non-authoritative: runtime logs returned `y=24`
-  while a full iPadOS capture still showed the centered window under the Dock.
-  Validate the new center with `centerInBounds:` and prove the size unchanged;
-  if the full size cannot coexist, retain the native floating-Dock behavior
-  assertion instead of adding a maximum-height constraint.
+- `UIApplication.supportsMultipleScenes` is not proof of independent floating
+  windows: runtime on iPad14,5 / iPadOS 16.0 / 20A8372 created a `678x1024`
+  Split View column for a second requested Scene. Treat iPadOS earlier than
+  16.1 as non-Chamois. On later systems, create an additional Scene only when
+  SpringBoard's real `isChamoisWindowingUIEnabled` calculator argument has
+  published `Known|Active`; otherwise reuse the current Scene. The M1 / 20D67
+  compatibility witness is `1790883210.214 ... known=YES active=YES`.
+- Floating-Dock avoidance must publish the corrected center in the exact
+  authoritative resize transaction: the `center:` argument passed into
+  `SBItemResizeGestureSwitcherModifier`'s response constructor for a native
+  gesture, or the immutable `SBDisplayItemLayoutAttributes` carried by a
+  programmatic transition. A frame-only change is non-authoritative, and even
+  an immutable clone returned only from the later whole-stage calculator is
+  transient: runtime log `1790877358.160` computed `y=24` for the current
+  `1179x814` model while the user still saw the persistent `y=78` placement.
+  Validate center and unchanged size before publishing; if the full size
+  cannot coexist, retain the native floating-Dock behavior assertion instead
+  of adding a maximum-height constraint. Its
+  `invalidateWithCompletion:` lifecycle is asynchronous: retain the exact
+  assertion until completion and serialize release/reassert decisions. The
+  `1790879379.516` to `1790879381.080` trace caught duplicate same-Scene
+  assertions when the old code dropped ownership before completion.
 
 Input and interoperability:
 
@@ -251,6 +265,13 @@ Input and interoperability:
   remains with UIKit, and Command-Tab/Command-Space remain iPadOS shortcuts.
   The source/RE contract is verified; do not claim a final physical-key
   acceptance beyond the dated evidence.
+- Windowed physical keys with an exact PID/window belong to that process's
+  AppInput endpoint; only window-zero/global hardware input uses the OSXvnc
+  session proxy. Runtime on iPad14,5 measured broker/proxy transport below
+  about 3.1 ms, while Unity 2022.3.62f2 drained ordinary AppKit-posted events
+  in `81-1003ms` batches. The exact 7DTD route may post from the game's own
+  CGS connection, but it is not accepted until the dated evidence contains a
+  prompt `app-cgs-post -> app-dispatch` physical W/A/S/D and Shift witness.
 - Electron/Catalyst precise scrolling no longer performs a synchronous global
   WindowServer hit test for every continuation event. Begin-time ownership
   validation remains; this is route-based, not a VS Code bundle-ID exception.
@@ -333,6 +354,10 @@ For every new device, OS build, app version, feature or regression:
 9. **Build the affected architectures.** `libmachook` requires both arm64 and
    arm64e thin installed images. SpringBoard code requires the validated
    Apple-ld64 artifact; an on-device lld result is not interchangeable.
+   MacWSWindowing must also carry the rootless
+   `@rpath/CydiaSubstrate.framework/CydiaSubstrate` load command. A rootful
+   `/Library/Frameworks/...` dependency passes signing and fixup checks but is
+   runtime-confirmed to make ElleKit omit the tweak.
 10. **Deploy through the project pipeline.** Verify source hashes and installed
     artifacts. Avoid direct in-place `scp` over a signed dylib: reusing the
     vnode can leave the kernel's code-signature cache stale.

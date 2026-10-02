@@ -359,6 +359,7 @@ flag	/tmp/macws_real_swapend	off	unsafe A/B	Lets macOS contend for the physical 
 flag	/tmp/macws_res_diag	off	diagnostic	AGX resource argument trace.
 flag	/tmp/macws_runtime_diagnostics	off	diagnostic master	Enables high-overhead recorders and per-frame/event logs.
 flag	/tmp/macws_app_input_diagnostics	off	AppInput diagnostic	Logs AppKit hit-window and event routing without enabling AGX/JIT recorders.
+flag	/tmp/macws_keyboard_latency_diagnostics	off	Keyboard latency diagnostic	Narrow per-key Host, broker, session-proxy and AppKit dispatch timing; does not enable renderer diagnostics.
 flag	/tmp/macws_7dtd_drawable_trace	off	7DTD diagnostic	Records the exact CAMetalLayer/drawable relationship and sparse GPU-completed IOSurface digests without changing presentation.
 flag	/tmp/macws_7dtd_jit_trace	off	7DTD diagnostic	Enables bounded JIT reservation/protection logging only in the exact native-arm64 7 Days To Die process; it does not change the W^X policy.
 flag	/tmp/macws_7dtd_blit_trace_active	off	7DTD diagnostic	Dynamically enables a bounded read-only witness for Unity's final texture/buffer blit arguments after the exact-process render trace was installed at launch.

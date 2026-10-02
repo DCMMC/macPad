@@ -63,7 +63,7 @@ class TextInputBridgeTests(unittest.TestCase):
         broker = (ROOT / "macwsinputd" / "main.c").read_text()
         bridge = (ROOT / "libmachook" / "AppInputBridge.m").read_text()
         self.assertIn(
-            "return record->source == MacWSInputSourceHardwareKeyboard;",
+            "MacWSInputWindowIDForScene(record->sceneID) == 0",
             broker,
         )
         self.assertIn("exactSoftwareUnicode", bridge)
