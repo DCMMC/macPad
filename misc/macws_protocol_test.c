@@ -72,10 +72,11 @@ int main(void) {
         0.0, 0.0, 1194.0, 834.0));
     assert(!MacWSLayerCoversLogicalDisplay(
         0.0, 0.0, 1194.0, 417.0, 0.0, 0.0, 1194.0, 834.0));
-    assert(MACWS_INPUT_VERSION == 8u);
+    assert(MACWS_INPUT_VERSION == 9u);
     assert(MACWS_INPUT_DOCUMENT_VERSION == 6u);
     assert(MACWS_INPUT_LEGACY_VERSION == 5u);
     assert(MACWS_STREAM_VERSION == 8u);
+    assert(MacWSStreamWindowRelativePointerRequested == (1u << 12));
     assert(MACWS_FINAL_COMPOSITE_VERSION == 1u);
     assert(sizeof(MacWSFinalCompositeRecord) == 56);
     assert(sizeof(MacWSInputRecord) == 84);
@@ -88,6 +89,8 @@ int main(void) {
     assert(MacWSInputKindPerformPaste == 23);
     assert(MacWSInputKindOpenDocuments == 24);
     assert(MacWSInputKindPerformQuit == 25);
+    assert(MacWSInputKindModifierSnapshot == 26);
+    assert(MacWSInputKindRelativePointer == 27);
     assert(MacWSInputVersionSupportsKind(
         MACWS_INPUT_LEGACY_VERSION, MacWSInputKindTouchDown));
     assert(MacWSInputVersionSupportsKind(
@@ -108,6 +111,14 @@ int main(void) {
            MACWS_INPUT_DOCUMENT_VERSION);
     assert(MacWSInputWireVersionForKind(MacWSInputKindPerformQuit) ==
            MACWS_INPUT_QUIT_VERSION);
+    assert(MacWSInputWireVersionForKind(MacWSInputKindModifierSnapshot) == 8u);
+    assert(MacWSInputWireVersionForKind(MacWSInputKindRelativePointer) ==
+           MACWS_INPUT_VERSION);
+    assert(!MacWSInputVersionSupportsKind(
+        8u, MacWSInputKindRelativePointer));
+    assert(MacWSInputVersionSupportsKind(
+        MACWS_INPUT_VERSION, MacWSInputKindRelativePointer));
+    assert(MacWSHostInputModeGame == 3);
     assert(sizeof(MacWSOpenDocumentAck) == 24);
     assert(MacWSSystemGestureAxisHorizontal == 1);
     assert(MacWSSystemGestureAxisVertical == 2);
@@ -303,6 +314,16 @@ int main(void) {
     assert(Near(mapped.x, viewport.visibleSource.x));
     assert(Near(mapped.y, viewport.visibleSource.y +
                           viewport.visibleSource.height));
+    float presentationX = 0.0f;
+    float presentationY = 0.0f;
+    assert(MacWSMapPixelPointBetweenDomains(
+        1194.0f, 834.0f, 2388.0f, 1668.0f,
+        1280.0f, 894.0f, &presentationX, &presentationY));
+    assert(Near(presentationX, 640.0f));
+    assert(Near(presentationY, 447.0f));
+    assert(!MacWSMapPixelPointBetweenDomains(
+        1.0f, 1.0f, 0.0f, 1668.0f,
+        1280.0f, 894.0f, &presentationX, &presentationY));
     assert(MacWSComputeViewport(1000, 1600, 1200, 600, 10, -1, 2,
                                 &viewport));
     assert(Near(viewport.zoom, 2.0f));

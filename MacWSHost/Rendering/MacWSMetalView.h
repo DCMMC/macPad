@@ -44,6 +44,10 @@ typedef NS_ENUM(NSUInteger, MacWSHostPresentationResolution) {
 @property(nonatomic) int32_t systemInputPID;
 @property(nonatomic, getter=isMacWSInputEnabled) BOOL macWSInputEnabled;
 @property(nonatomic) MacWSHostInputMode inputMode;
+// True only after iPadOS has accepted this Scene's pointer-lock preference.
+// The raw GCMouse delta route remains fail-closed while the request is pending
+// or denied, so ordinary absolute pointer input never silently disappears.
+@property(nonatomic, getter=isGamePointerLockActive) BOOL gamePointerLockActive;
 @property(nonatomic) MacWSHostDisplayDensity displayDensity;
 @property(nonatomic) MacWSHostPresentationResolution presentationResolution;
 @property(nonatomic) CGFloat fixedZoomScale;

@@ -1339,6 +1339,7 @@ static MacWSStreamWindowDescriptor WindowDescriptor(
              MacWSStreamWindowResizable |
              MacWSStreamWindowFocused | MacWSStreamWindowSpatialCanvas |
              MacWSStreamWindowFullscreenCanvas |
+             MacWSStreamWindowRelativePointerRequested |
              MacWSStreamWindowFixedWidth |
              MacWSStreamWindowFixedHeight);
     }

@@ -2,6 +2,7 @@
 
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
+#import <GameController/GameController.h>
 #import <UIKit/UIGestureRecognizerSubclass.h>
 #import <simd/simd.h>
 
@@ -269,6 +270,45 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
 
 @end
 
+static __weak MacWSMetalView *MacWSGamePointerOwner;
+
+static CGPoint MacWSInputPointInPresentationSpace(
+        const MacWSInputRecord *record,
+        uint32_t presentationWidth,
+        uint32_t presentationHeight) {
+    if (!record) return CGPointZero;
+    // Input records describe the authoritative AppKit backing-pixel domain.
+    // A completed direct drawable can use a different internal render size,
+    // so Host's layer resolver must first project the normalized point into
+    // the pixels that are actually being presented. Keep the record itself in
+    // AppKit space: inputd/AppInput use its frame dimensions to recover the
+    // correct NSWindow/CGEvent position.
+    float x = 0.0f;
+    float y = 0.0f;
+    if (!MacWSMapPixelPointBetweenDomains(
+            record->x, record->y, record->frameWidth, record->frameHeight,
+            presentationWidth, presentationHeight, &x, &y)) {
+        return CGPointMake(record->x, record->y);
+    }
+    return CGPointMake(x, y);
+}
+
+@interface MacWSMetalView ()
+- (void)refreshGamePointerDevice;
+- (void)gamePointerDeviceChanged:(NSNotification *)notification;
+- (BOOL)gamePointerCaptureReady;
+- (void)currentInputFrameWidth:(uint32_t *)widthOut
+                         height:(uint32_t *)heightOut;
+- (BOOL)retainAuthoritativeInputGeometryForPID:(int32_t)ownerPID
+                                       windowID:(uint32_t)windowID;
+- (void)clearAuthoritativeInputGeometry;
+- (BOOL)emitGameRelativeDeltaX:(int32_t)deltaX
+                        deltaY:(int32_t)deltaY
+                        source:(MacWSInputSource)source
+                     contactID:(uint32_t)contactID
+                     timestamp:(NSTimeInterval)timestamp;
+@end
+
 @implementation MacWSMetalView {
     MacWSMappedFrame *_frame;
     id<MTLCommandQueue> _commandQueue;
@@ -330,6 +370,11 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     int32_t _reportedFullscreenCanvasPID;
     uint32_t _reportedFullscreenCanvasWindowID;
     CGRect _reportedFullscreenCanvasPixels;
+    int32_t _authoritativeInputGeometryPID;
+    uint32_t _authoritativeInputGeometryWindowID;
+    uint32_t _authoritativeInputGeometryWidth;
+    uint32_t _authoritativeInputGeometryHeight;
+    float _authoritativeInputGeometryBackingScale;
     // Chromium has no application-declared FullscreenCanvas capability. It
     // may still become an exact native-fullscreen canvas after its descendant
     // IOSurface has independently joined the focused catalog window at the
@@ -373,6 +418,11 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     BOOL _trackpadHadMultipleTouches;
     BOOL _trackpadCursorWasTouched;
     BOOL _externalPointerHoverActive;
+    BOOL _gamePointerLockActive;
+    GCMouse *_gamePointerMouse;
+    double _gamePointerResidualX;
+    double _gamePointerResidualY;
+    uint64_t _gamePointerMotionCount;
     BOOL _pencilHoverActive;
     UITouch *_pencilTouch;
     CGPoint _pencilTouchStartPoint;
@@ -564,6 +614,17 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     [NSNotificationCenter.defaultCenter addObserver:self
         selector:@selector(catalystDrawableDidPresent:)
         name:MacWSCatalystDrawableDidPresentNotification object:nil];
+    if (@available(iOS 14.0, *)) {
+        for (NSNotificationName name in @[
+                GCMouseDidConnectNotification,
+                GCMouseDidDisconnectNotification,
+                GCMouseDidBecomeCurrentNotification,
+                GCMouseDidStopBeingCurrentNotification]) {
+            [NSNotificationCenter.defaultCenter addObserver:self
+                selector:@selector(gamePointerDeviceChanged:)
+                name:name object:nil];
+        }
+    }
 
     // Direct touch uses a soft contact halo.  It is deliberately different
     // from the trackpad cursor: one represents the finger's absolute contact,
@@ -836,6 +897,12 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
 }
 
 - (void)dealloc {
+    if (@available(iOS 14.0, *)) {
+        if (MacWSGamePointerOwner == self) {
+            _gamePointerMouse.mouseInput.mouseMovedHandler = nil;
+            MacWSGamePointerOwner = nil;
+        }
+    }
     if (_nativeResizeGestureRegistered) notify_cancel(_nativeResizeGestureToken);
     if (_dockExposeStateToken >= 0) notify_cancel(_dockExposeStateToken);
     [NSNotificationCenter.defaultCenter removeObserver:self
@@ -1027,6 +1094,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         identitySource = @"retained-targeted-fullscreen-endpoint";
         _reportedFullscreenCanvasPID = direct.ownerPID;
         _reportedFullscreenCanvasWindowID = matchedWindowID;
+        [self retainAuthoritativeInputGeometryForPID:direct.ownerPID
+                                            windowID:matchedWindowID];
         _reportedFullscreenCanvasPixels =
             CGRectMake(0, 0, canvasWidth, canvasHeight);
     }
@@ -1062,6 +1131,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         _fullscreenCanvasPIDs = [capabilities copy];
         _reportedFullscreenCanvasPID = logicalOwnerPID;
         _reportedFullscreenCanvasWindowID = matchedWindowID;
+        [self retainAuthoritativeInputGeometryForPID:logicalOwnerPID
+                                            windowID:matchedWindowID];
         _reportedFullscreenCanvasPixels =
             CGRectMake(0, 0, canvasWidth, canvasHeight);
     } else if (_inferredDescendantFullscreenCanvas &&
@@ -1085,6 +1156,7 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
                 _reportedFullscreenCanvasPID = 0;
                 _reportedFullscreenCanvasWindowID = 0;
                 _reportedFullscreenCanvasPixels = CGRectZero;
+                [self clearAuthoritativeInputGeometry];
             }
         }
         MacWSLog(@"descendant-fullscreen-canvas cleared pid=%d "
@@ -1334,6 +1406,7 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         !MacWSLegacyFramebufferFallbackEnabled();
     [_streamClient subscribeToMode:mode windowID:windowID];
     [self refreshPresentationPolicy];
+    [self refreshGamePointerDevice];
 }
 
 - (uint64_t)inputSceneIDWithModifiers:(uint32_t)modifiers {
@@ -1445,6 +1518,95 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     return _surfaceFrame ? _surfaceFrame.descriptor.contentHeight : _frame.height;
 }
 
+- (void)clearAuthoritativeInputGeometry {
+    _authoritativeInputGeometryPID = 0;
+    _authoritativeInputGeometryWindowID = 0;
+    _authoritativeInputGeometryWidth = 0;
+    _authoritativeInputGeometryHeight = 0;
+    _authoritativeInputGeometryBackingScale = 0.0f;
+}
+
+- (BOOL)retainAuthoritativeInputGeometryForPID:(int32_t)ownerPID
+                                       windowID:(uint32_t)windowID {
+    if (ownerPID <= 1 || windowID == 0) {
+        [self clearAuthoritativeInputGeometry];
+        return NO;
+    }
+    BOOL sameIdentity = _authoritativeInputGeometryPID == ownerPID &&
+        _authoritativeInputGeometryWindowID == windowID;
+    if (!sameIdentity) [self clearAuthoritativeInputGeometry];
+    for (MacWSStreamWindow *window in _latestWindows) {
+        MacWSStreamWindowDescriptor descriptor = window.descriptor;
+        if (descriptor.ownerPID != ownerPID ||
+            descriptor.windowID != windowID ||
+            descriptor.pixelWidth == 0 || descriptor.pixelHeight == 0 ||
+            !isfinite(descriptor.backingScale) ||
+            descriptor.backingScale < 0.5f ||
+            descriptor.backingScale > 8.0f) continue;
+        BOOL changed = !sameIdentity ||
+            _authoritativeInputGeometryWidth != descriptor.pixelWidth ||
+            _authoritativeInputGeometryHeight != descriptor.pixelHeight ||
+            fabsf(_authoritativeInputGeometryBackingScale -
+                  descriptor.backingScale) > 0.001f;
+        _authoritativeInputGeometryPID = ownerPID;
+        _authoritativeInputGeometryWindowID = windowID;
+        _authoritativeInputGeometryWidth = descriptor.pixelWidth;
+        _authoritativeInputGeometryHeight = descriptor.pixelHeight;
+        _authoritativeInputGeometryBackingScale = descriptor.backingScale;
+        if (changed) {
+            MacWSLog(@"fullscreen-input-geometry pid=%d window=%u "
+                     "pixels=%ux%u backing=%.3f source=validated-catalog",
+                     ownerPID, windowID, descriptor.pixelWidth,
+                     descriptor.pixelHeight, descriptor.backingScale);
+        }
+        return YES;
+    }
+    // SkyLight can temporarily retire the catalog entry after a validated
+    // fullscreen application hands its drawable directly to Host. Retain the
+    // geometry only for the exact same PID/window identity; a target or
+    // window transition clears it before another application can reuse it.
+    return sameIdentity && _authoritativeInputGeometryWidth != 0 &&
+        _authoritativeInputGeometryHeight != 0;
+}
+
+- (void)currentInputFrameWidth:(uint32_t *)widthOut
+                         height:(uint32_t *)heightOut {
+    uint32_t width = [self currentFrameWidth];
+    uint32_t height = [self currentFrameHeight];
+    uint32_t exactWindowID = self.targetWindowID;
+    BOOL retainedFullscreenCanvas = exactWindowID == 0 &&
+        self.targetPID > 1 &&
+        _reportedFullscreenCanvasPID == self.targetPID &&
+        _reportedFullscreenCanvasWindowID != 0 &&
+        [_fullscreenCanvasPIDs containsObject:@(self.targetPID)] &&
+        MacWSAppInputEndpointReady(self.targetPID);
+    if (retainedFullscreenCanvas)
+        exactWindowID = _reportedFullscreenCanvasWindowID;
+
+    if (self.targetPID > 1 && exactWindowID != 0) {
+        for (MacWSStreamWindow *window in _latestWindows) {
+            MacWSStreamWindowDescriptor descriptor = window.descriptor;
+            if (descriptor.ownerPID != self.targetPID ||
+                descriptor.windowID != exactWindowID ||
+                descriptor.pixelWidth == 0 ||
+                descriptor.pixelHeight == 0) continue;
+            width = descriptor.pixelWidth;
+            height = descriptor.pixelHeight;
+            break;
+        }
+    }
+    if (retainedFullscreenCanvas &&
+        _authoritativeInputGeometryPID == self.targetPID &&
+        _authoritativeInputGeometryWindowID == exactWindowID &&
+        _authoritativeInputGeometryWidth != 0 &&
+        _authoritativeInputGeometryHeight != 0) {
+        width = _authoritativeInputGeometryWidth;
+        height = _authoritativeInputGeometryHeight;
+    }
+    if (widthOut) *widthOut = width;
+    if (heightOut) *heightOut = height;
+}
+
 - (CGFloat)effectiveDensityScale {
     // Density describes the macOS source's logical geometry in the UIKit
     // Scene; it must not change when the presentation drawable is deliberately
@@ -1542,6 +1704,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         _reportedFullscreenCanvasWindowID = 0;
         _reportedFullscreenCanvasPixels = CGRectZero;
     }
+    if (_authoritativeInputGeometryPID != targetPID)
+        [self clearAuthoritativeInputGeometry];
     if (previousTargetPID > 1) {
         NSMutableSet<NSNumber *> *capabilities =
             [_fullscreenCanvasPIDs mutableCopy] ?: [NSMutableSet set];
@@ -1552,6 +1716,7 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     _directTouchUsesPrimaryDrag = targetPID > 1 &&
         [_spatialCanvasPIDs containsObject:@(targetPID)];
     [self refreshPresentationPolicy];
+    [self refreshGamePointerDevice];
 }
 
 - (void)noteValidatedFullscreenCanvasForPID:(int32_t)ownerPID
@@ -1563,13 +1728,18 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     _fullscreenCanvasPIDs = [capabilities copy];
     _reportedFullscreenCanvasPID = ownerPID;
     _reportedFullscreenCanvasWindowID = windowID;
+    [self retainAuthoritativeInputGeometryForPID:ownerPID windowID:windowID];
     uint32_t width = [self currentFrameWidth];
     uint32_t height = [self currentFrameHeight];
+    uint32_t inputWidth = 0;
+    uint32_t inputHeight = 0;
+    [self currentInputFrameWidth:&inputWidth height:&inputHeight];
     _reportedFullscreenCanvasPixels = width != 0 && height != 0
         ? CGRectMake(0, 0, width, height) : CGRectZero;
     MacWSLog(@"fullscreen-canvas-capability pid=%d window=%u "
-             "source=controller-validated-catalog canvas=%ux%u",
-             ownerPID, windowID, width, height);
+             "source=controller-validated-catalog canvas=%ux%u input=%ux%u",
+             ownerPID, windowID, width, height, inputWidth, inputHeight);
+    [self refreshGamePointerDevice];
     [self updateDrawableResolution];
     [self setNeedsDisplay];
 }
@@ -2168,11 +2338,13 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     }
     [self updateWindowTooSmallState];
     [self updatePointerVisibility];
+    [self refreshGamePointerDevice];
 }
 
 - (void)setInputMode:(MacWSHostInputMode)inputMode {
     if (inputMode != MacWSHostInputModeDirect &&
-        inputMode != MacWSHostInputModeTrackpad) return;
+        inputMode != MacWSHostInputModeTrackpad &&
+        inputMode != MacWSHostInputModeGame) return;
     if (_inputMode == MacWSHostInputModeDirect && _directTouch &&
         _directTouchState == MacWSDirectTouchStateDragging) {
         [self emitKind:MacWSInputKindTouchCancel touch:_directTouch
@@ -2184,7 +2356,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
                                flags:MacWSInputFlagScrollCancelled
                            timestamp:CACurrentMediaTime()];
     }
-    if (_inputMode == MacWSHostInputModeTrackpad && _trackpadTouch &&
+    if ((_inputMode == MacWSHostInputModeTrackpad ||
+         _inputMode == MacWSHostInputModeGame) && _trackpadTouch &&
         _trackpadButtonDown) {
         [self emitKind:MacWSInputKindTouchCancel framePoint:_trackpadCursor
              pressure:0 contactID:(uint32_t)_trackpadTouch.hash
@@ -2205,6 +2378,188 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     _directTouchIndicator.hidden = YES;
     [self setTrackpadPointerPressed:NO animated:NO];
     [self updatePointerVisibility];
+    [self refreshGamePointerDevice];
+}
+
+- (void)setGamePointerLockActive:(BOOL)gamePointerLockActive {
+    if (_gamePointerLockActive == gamePointerLockActive) return;
+    _gamePointerLockActive = gamePointerLockActive;
+    _gamePointerResidualX = 0.0;
+    _gamePointerResidualY = 0.0;
+    MacWSLog(@"game-pointer-lock state=%@ mode=%u pid=%d window=%u",
+        gamePointerLockActive ? @"locked" : @"unlocked",
+        self.inputMode, self.targetPID, self.targetWindowID);
+    [self refreshGamePointerDevice];
+}
+
+- (BOOL)isGamePointerLockActive {
+    return _gamePointerLockActive;
+}
+
+- (BOOL)gamePointerTargetPID:(int32_t *)targetPIDOut
+                    windowID:(uint32_t *)windowIDOut {
+    int32_t targetPID = self.targetPID;
+    uint32_t windowID = self.targetWindowID;
+    if (windowID == 0 && _reportedFullscreenCanvasPID == targetPID &&
+        _reportedFullscreenCanvasWindowID != 0) {
+        windowID = _reportedFullscreenCanvasWindowID;
+    }
+    BOOL exact = targetPID > 1 && windowID != 0;
+    if (targetPIDOut) *targetPIDOut = exact ? targetPID : 0;
+    if (windowIDOut) *windowIDOut = exact ? windowID : 0;
+    return exact;
+}
+
+- (BOOL)emitGameRelativeDeltaX:(int32_t)deltaX
+                        deltaY:(int32_t)deltaY
+                        source:(MacWSInputSource)source
+                     contactID:(uint32_t)contactID
+                     timestamp:(NSTimeInterval)timestamp {
+    if (self.inputMode != MacWSHostInputModeGame ||
+        !self.isMacWSInputEnabled ||
+        (source != MacWSInputSourceIndirectPointer &&
+         source != MacWSInputSourceFinger)) return NO;
+    int32_t targetPID = 0;
+    uint32_t windowID = 0;
+    if (![self gamePointerTargetPID:&targetPID windowID:&windowID]) return NO;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    [self currentInputFrameWidth:&width height:&height];
+    if (width == 0 || height == 0) return NO;
+    deltaX = MAX(-4096, MIN(4096, deltaX));
+    deltaY = MAX(-4096, MIN(4096, deltaY));
+    if (deltaX == 0 && deltaY == 0) return NO;
+    MacWSInputRecord record = {
+        .magic = MACWS_INPUT_MAGIC,
+        .version = MACWS_INPUT_VERSION,
+        .kind = MacWSInputKindRelativePointer,
+        .sceneID = MacWSInputSceneForWindow(windowID, 0),
+        .timestamp = timestamp,
+        .x = (float)width * 0.5f,
+        .y = (float)height * 0.5f,
+        .pressure = (float)deltaX,
+        .contactID = contactID,
+        .frameWidth = width,
+        .frameHeight = height,
+        .targetPID = targetPID,
+        .source = source,
+        .altitude = (float)deltaY,
+        .sampleSequence = ++_inputSampleSequence,
+    };
+    _gamePointerMotionCount++;
+    [self.statusDelegate metalView:self emittedInput:record];
+    if (MacWSHostGamePointerDiagnosticsEnabled() &&
+        (_gamePointerMotionCount <= 4 ||
+         (_gamePointerMotionCount % 240) == 0)) {
+        MacWSLog(@"game-pointer-motion sample=%llu pid=%d window=%u source=%u delta=(%d,%d) frame=%ux%u",
+            (unsigned long long)_gamePointerMotionCount,
+            targetPID, windowID, source, deltaX, deltaY, width, height);
+    }
+    return YES;
+}
+
+- (void)refreshGamePointerDevice {
+    if (!NSThread.isMainThread) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self refreshGamePointerDevice];
+        });
+        return;
+    }
+    if (@available(iOS 14.0, *)) {
+        int32_t targetPID = 0;
+        uint32_t windowID = 0;
+        BOOL shouldCapture = self.inputMode == MacWSHostInputModeGame &&
+            self.isGamePointerLockActive && self.isMacWSInputEnabled &&
+            [self gamePointerTargetPID:&targetPID windowID:&windowID];
+        GCMouse *mouse = GCMouse.current ?: GCMouse.mice.firstObject;
+        if (!shouldCapture || !mouse.mouseInput) {
+            if (MacWSGamePointerOwner == self) {
+                _gamePointerMouse.mouseInput.mouseMovedHandler = nil;
+                MacWSGamePointerOwner = nil;
+            }
+            _gamePointerMouse = nil;
+            _gamePointerResidualX = 0.0;
+            _gamePointerResidualY = 0.0;
+            return;
+        }
+        // MacWSGamePointerOwner is weak and nil is the normal first-owner
+        // state.  Hold one strong snapshot before transferring ownership;
+        // directly reading an ivar through a nil Objective-C pointer is a C
+        // memory access, not a nil-safe message send.  The old form crashed
+        // at nil + the runtime-slid _gamePointerMouse ivar offset on M1/iOS
+        // 16.3.1 as soon as UIKit confirmed the first pointer lock.
+        MacWSMetalView *previousOwner = MacWSGamePointerOwner;
+        if (previousOwner != self) {
+            if (previousOwner) {
+                previousOwner->_gamePointerMouse.mouseInput.mouseMovedHandler = nil;
+                previousOwner->_gamePointerMouse = nil;
+            }
+            MacWSGamePointerOwner = self;
+        }
+        if (_gamePointerMouse == mouse && mouse.mouseInput.mouseMovedHandler)
+            return;
+        _gamePointerMouse.mouseInput.mouseMovedHandler = nil;
+        _gamePointerMouse = mouse;
+        mouse.handlerQueue = dispatch_get_main_queue();
+        __weak MacWSMetalView *weakSelf = self;
+        mouse.mouseInput.mouseMovedHandler = ^(GCMouseInput *input,
+                                                float deltaX,
+                                                float deltaY) {
+            MacWSMetalView *strongSelf = weakSelf;
+            if (!strongSelf || MacWSGamePointerOwner != strongSelf ||
+                input != strongSelf->_gamePointerMouse.mouseInput ||
+                strongSelf.inputMode != MacWSHostInputModeGame ||
+                !strongSelf.isGamePointerLockActive ||
+                !strongSelf.isMacWSInputEnabled ||
+                !isfinite(deltaX) || !isfinite(deltaY)) return;
+            int32_t livePID = 0;
+            uint32_t liveWindowID = 0;
+            if (![strongSelf gamePointerTargetPID:&livePID
+                                          windowID:&liveWindowID]) return;
+            uint32_t width = [strongSelf currentFrameWidth];
+            uint32_t height = [strongSelf currentFrameHeight];
+            if (width == 0 || height == 0) return;
+
+            // GCMouse reports sub-count samples on a high-rate trackpad.
+            // Preserve them until a whole CoreGraphics mouse count can be
+            // represented, instead of rounding each callback independently.
+            strongSelf->_gamePointerResidualX +=
+                fmax(-4096.0, fmin(4096.0, (double)deltaX));
+            strongSelf->_gamePointerResidualY +=
+                fmax(-4096.0, fmin(4096.0, (double)deltaY));
+            int32_t dx = (int32_t)trunc(strongSelf->_gamePointerResidualX);
+            int32_t dy = (int32_t)trunc(strongSelf->_gamePointerResidualY);
+            if (dx == 0 && dy == 0) return;
+            strongSelf->_gamePointerResidualX -= dx;
+            strongSelf->_gamePointerResidualY -= dy;
+            // GCMouse's positive Y is opposite CoreGraphics' signed mouse
+            // delta convention. Runtime-confirmed by the user's M1/20D67
+            // camera test: X was correct while the unconverted Y moved the
+            // view in the opposite direction. Convert once at this iOS-device
+            // boundary; AppInput then preserves the signed CG delta verbatim.
+            [strongSelf emitGameRelativeDeltaX:dx
+                                        deltaY:-dy
+                                        source:MacWSInputSourceIndirectPointer
+                                     contactID:0x4d4f5553u // "MOUS"
+                                     timestamp:CACurrentMediaTime()];
+        };
+        MacWSLog(@"game-pointer-device bound=YES pid=%d window=%u vendor=%@",
+            targetPID, windowID, mouse.vendorName ?: @"unknown");
+    }
+}
+
+- (void)gamePointerDeviceChanged:(NSNotification *)notification {
+    (void)notification;
+    [self refreshGamePointerDevice];
+}
+
+- (BOOL)gamePointerCaptureReady {
+    int32_t targetPID = 0;
+    uint32_t windowID = 0;
+    return self.inputMode == MacWSHostInputModeGame &&
+        self.isGamePointerLockActive && MacWSGamePointerOwner == self &&
+        _gamePointerMouse.mouseInput.mouseMovedHandler != nil &&
+        [self gamePointerTargetPID:&targetPID windowID:&windowID];
 }
 
 - (BOOL)canBecomeFirstResponder { return YES; }
@@ -3021,6 +3376,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
             _reportedFullscreenCanvasWindowID != fullscreenCanvasWindowID) {
             _reportedFullscreenCanvasPID = self.targetPID;
             _reportedFullscreenCanvasWindowID = fullscreenCanvasWindowID;
+            [self retainAuthoritativeInputGeometryForPID:self.targetPID
+                                                windowID:fullscreenCanvasWindowID];
             MacWSLog(@"runtime-confirmed fullscreen-canvas-focus pid=%d "
                      "window=%u source=(%.0f,%.0f %.0fx%.0f) "
                      "desktop=%ux%u",
@@ -3077,6 +3434,7 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         _reportedFullscreenCanvasPID = 0;
         _reportedFullscreenCanvasWindowID = 0;
         _reportedFullscreenCanvasPixels = CGRectZero;
+        [self clearAuthoritativeInputGeometry];
     }
     // Window mode is not a video fit operation.  Keep its selected native
     // density invariant while UIKit and AppKit publish adjacent geometry
@@ -4362,8 +4720,9 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
 - (BOOL)framePointForViewPoint:(CGPoint)viewPoint
                        output:(CGPoint *)framePoint
            clampContinuationToContent:(BOOL)clampContinuation {
-    uint32_t frameWidth = [self currentFrameWidth];
-    uint32_t frameHeight = [self currentFrameHeight];
+    uint32_t frameWidth = 0;
+    uint32_t frameHeight = 0;
+    [self currentInputFrameWidth:&frameWidth height:&frameHeight];
     if (frameWidth == 0 || frameHeight == 0 || CGRectIsEmpty(_contentRect)) {
         return NO;
     }
@@ -4401,8 +4760,9 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
 }
 
 - (BOOL)viewPointForFramePoint:(CGPoint)framePoint output:(CGPoint *)viewPoint {
-    uint32_t frameWidth = [self currentFrameWidth];
-    uint32_t frameHeight = [self currentFrameHeight];
+    uint32_t frameWidth = 0;
+    uint32_t frameHeight = 0;
+    [self currentInputFrameWidth:&frameWidth height:&frameHeight];
     CGFloat visibleWidth = CGRectGetWidth(_visibleSourceRect);
     CGFloat visibleHeight = CGRectGetHeight(_visibleSourceRect);
     if (frameWidth == 0 || frameHeight == 0 || CGRectIsEmpty(_contentRect) ||
@@ -5031,6 +5391,10 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     if (!record || _streamClient.mode != MacWSStreamModeFullscreen)
         return NO;
     if (presentationTargetPID) *presentationTargetPID = record->targetPID;
+    uint32_t presentationWidth = [self currentFrameWidth];
+    uint32_t presentationHeight = [self currentFrameHeight];
+    CGPoint presentationPoint = MacWSInputPointInPresentationSpace(
+        record, presentationWidth, presentationHeight);
     BOOL globalPointer =
         record->kind == MacWSInputKindTouchDown ||
         record->kind == MacWSInputKindTouchMove ||
@@ -5070,7 +5434,7 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
                 visualPID = _fullscreenGlobalPointerPresentationPID;
             } else {
                 (void)[self resolveFullscreenLayerAtPoint:
-                    CGPointMake(record->x, record->y) pid:&visualPID
+                    presentationPoint pid:&visualPID
                     windowID:&visualWindowID descriptor:NULL];
             }
             if (beginsGlobalDrag) {
@@ -5123,9 +5487,12 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
                 // through record->targetPID=dockPID below and the newly
                 // frontmost application becomes the target from the catalog.
                 MacWSLog(@"fullscreen-presentation-target retained=%d "
-                         "ignored-system-proxy=%d kind=%u point=(%.1f,%.1f)",
+                         "ignored-system-proxy=%d kind=%u input=(%.1f,%.1f)/%ux%u presentation=(%.1f,%.1f)/%ux%u",
                          self.targetPID, dockPID, record->kind,
-                         record->x, record->y);
+                         record->x, record->y, record->frameWidth,
+                         record->frameHeight, presentationPoint.x,
+                         presentationPoint.y, presentationWidth,
+                         presentationHeight);
             }
             uint32_t modifiers =
                 MacWSInputModifiersForScene(record->sceneID);
@@ -5249,13 +5616,13 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         descriptor = _fullscreenGestureRouteDescriptor;
     } else {
         resolved = [self resolveFullscreenLayerAtPoint:
-            CGPointMake(record->x, record->y) pid:&ownerPID
+            presentationPoint pid:&ownerPID
                      windowID:&windowID descriptor:&descriptor];
     }
     if (resolved) {
         if (presentationTargetPID) *presentationTargetPID = ownerPID;
-        float desktopX = record->x;
-        float desktopY = record->y;
+        float desktopX = (float)presentationPoint.x;
+        float desktopY = (float)presentationPoint.y;
         uint32_t modifiers = MacWSInputModifiersForScene(record->sceneID);
         BOOL globalSystemSurface =
             (descriptor.flags & MacWSStreamFrameGlobalSystemSurface) != 0;
@@ -5372,8 +5739,9 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     BOOL showTrackpad = self.inputMode == MacWSHostInputModeTrackpad &&
         available && _trackpadCursorWasTouched && !_externalPointerHoverActive;
     if (showTrackpad) {
-        uint32_t width = [self currentFrameWidth];
-        uint32_t height = [self currentFrameHeight];
+        uint32_t width = 0;
+        uint32_t height = 0;
+        [self currentInputFrameWidth:&width height:&height];
         if (_trackpadCursor.x < 0 || _trackpadCursor.y < 0 ||
             _trackpadCursor.x >= width || _trackpadCursor.y >= height) {
             _trackpadCursor = CGPointMake(width * 0.5, height * 0.5);
@@ -5510,6 +5878,10 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
        timestamp:(NSTimeInterval)timestamp
           source:(MacWSInputSource)source {
     if (!self.isMacWSInputEnabled) return;
+    uint32_t inputWidth = 0;
+    uint32_t inputHeight = 0;
+    [self currentInputFrameWidth:&inputWidth height:&inputHeight];
+    if (inputWidth == 0 || inputHeight == 0) return;
     MacWSInputRecord record = {
         .magic = MACWS_INPUT_MAGIC,
         .version = MACWS_INPUT_VERSION,
@@ -5520,8 +5892,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         .y = (float)framePoint.y,
         .pressure = pressure,
         .contactID = contactID,
-        .frameWidth = [self currentFrameWidth],
-        .frameHeight = [self currentFrameHeight],
+        .frameWidth = inputWidth,
+        .frameHeight = inputHeight,
         .targetPID = self.targetPID,
         .source = source,
         .sampleSequence = ++_inputSampleSequence,
@@ -5616,8 +5988,9 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     _trackpadCursor = framePoint;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 80 * NSEC_PER_MSEC),
                    dispatch_get_main_queue(), ^{
-        uint32_t width = [self currentFrameWidth];
-        uint32_t height = [self currentFrameHeight];
+        uint32_t width = 0;
+        uint32_t height = 0;
+        [self currentInputFrameWidth:&width height:&height];
         if (width != 0 && height != 0) {
             self->_lastKeyboardFrameWidth = width;
             self->_lastKeyboardFrameHeight = height;
@@ -5654,8 +6027,31 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     BOOL pointerContinuation = kind == MacWSInputKindTouchMove ||
         kind == MacWSInputKindTouchUp ||
         kind == MacWSInputKindTouchCancel;
-    if (![self framePointForViewPoint:viewPoint output:&framePoint
-                   clampContinuationToContent:pointerContinuation]) return;
+    uint32_t inputWidth = 0;
+    uint32_t inputHeight = 0;
+    [self currentInputFrameWidth:&inputWidth height:&inputHeight];
+    if (inputWidth == 0 || inputHeight == 0) return;
+    if (touch.type == UITouchTypeIndirectPointer &&
+        [self gamePointerCaptureReady]) {
+        framePoint = CGPointMake(inputWidth * 0.5, inputHeight * 0.5);
+    } else if (![self framePointForViewPoint:viewPoint output:&framePoint
+                          clampContinuationToContent:pointerContinuation]) {
+        return;
+    }
+    if (touch.type == UITouchTypeIndirectPointer &&
+        MacWSHostTouchDiagnosticsEnabled() &&
+        (kind == MacWSInputKindTouchDown ||
+         kind == MacWSInputKindTap ||
+         kind == MacWSInputKindSecondaryTap)) {
+        MacWSLog(@"pointer-click-map pid=%d window=%u locked=%@ "
+                 "view=(%.2f,%.2f) input=(%.2f,%.2f)/%ux%u "
+                 "presentation=%ux%u",
+                 self.targetPID, self.targetWindowID,
+                 [self gamePointerCaptureReady] ? @"YES" : @"NO",
+                 viewPoint.x, viewPoint.y, framePoint.x, framePoint.y,
+                 inputWidth, inputHeight, [self currentFrameWidth],
+                 [self currentFrameHeight]);
+    }
     float pressure = touch.maximumPossibleForce > 0
         ? touch.force / touch.maximumPossibleForce : 0.0f;
     MacWSInputSource source = MacWSInputSourceFinger;
@@ -5686,8 +6082,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         .y = (float)framePoint.y,
         .pressure = pressure,
         .contactID = (uint32_t)touch.hash,
-        .frameWidth = [self currentFrameWidth],
-        .frameHeight = [self currentFrameHeight],
+        .frameWidth = inputWidth,
+        .frameHeight = inputHeight,
         .targetPID = self.targetPID,
         .source = source,
         .flags = inputFlags | extraFlags,
@@ -5946,8 +6342,9 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         _trackpadTravel = 0;
         _trackpadBeganAt = touch.timestamp;
         _trackpadHadMultipleTouches = event.allTouches.count > 1;
-        uint32_t width = [self currentFrameWidth];
-        uint32_t height = [self currentFrameHeight];
+        uint32_t width = 0;
+        uint32_t height = 0;
+        [self currentInputFrameWidth:&width height:&height];
         if (_trackpadCursor.x < 0 || _trackpadCursor.y < 0 ||
             _trackpadCursor.x >= width || _trackpadCursor.y >= height) {
             _trackpadCursor = CGPointMake(width * 0.5, height * 0.5);
@@ -5957,6 +6354,7 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC),
                        dispatch_get_main_queue(), ^{
             if (self->_trackpadTouch == touch &&
+                self.inputMode != MacWSHostInputModeGame &&
                 self->_trackpadTravel < 6.0 &&
                 !self->_trackpadHadMultipleTouches &&
                 !self->_trackpadButtonDown) {
@@ -6127,7 +6525,6 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         CGPoint point = [_trackpadTouch locationInView:self];
         CGFloat dx = point.x - _trackpadPreviousPoint.x;
         CGFloat dy = point.y - _trackpadPreviousPoint.y;
-        _trackpadPreviousPoint = point;
         _trackpadTravel += hypot(dx, dy);
         // The two-finger pan recognizer intentionally does not cancel raw
         // touches. Once a gesture becomes multi-touch, keep its translation
@@ -6138,37 +6535,66 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
                 ? [self currentFrameWidth] / CGRectGetWidth(_contentRect) : 1.0;
             CGFloat scaleY = CGRectGetHeight(_contentRect) > 0
                 ? [self currentFrameHeight] / CGRectGetHeight(_contentRect) : 1.0;
-            _trackpadCursor.x = fmin(fmax(_trackpadCursor.x + dx * scaleX * 1.25,
-                                          0.0), [self currentFrameWidth] - 1.0);
-            _trackpadCursor.y = fmin(fmax(_trackpadCursor.y + dy * scaleY * 1.25,
-                                          0.0), [self currentFrameHeight] - 1.0);
-            [self emitKind:_trackpadButtonDown ? MacWSInputKindTouchMove
-                                                : MacWSInputKindHover
-                 framePoint:_trackpadCursor pressure:_trackpadButtonDown ? 1.0f : 0.0f
-                  contactID:(uint32_t)_trackpadTouch.hash
-                   timestamp:_trackpadTouch.timestamp];
-            CGFloat sourceX = _trackpadCursor.x /
-                MAX([self currentFrameWidth] - 1, 1u);
-            CGFloat sourceY = _trackpadCursor.y /
-                MAX([self currentFrameHeight] - 1, 1u);
-            CGPoint previousViewportCenter = _viewportCenter;
-            if (sourceX < CGRectGetMinX(_visibleSourceRect))
-                _viewportCenter.x -= CGRectGetMinX(_visibleSourceRect) - sourceX;
-            else if (sourceX > CGRectGetMaxX(_visibleSourceRect))
-                _viewportCenter.x += sourceX - CGRectGetMaxX(_visibleSourceRect);
-            if (sourceY < CGRectGetMinY(_visibleSourceRect))
-                _viewportCenter.y -= CGRectGetMinY(_visibleSourceRect) - sourceY;
-            else if (sourceY > CGRectGetMaxY(_visibleSourceRect))
-                _viewportCenter.y += sourceY - CGRectGetMaxY(_visibleSourceRect);
-            simd_float4 unusedVertices[4];
-            [self updateContentRectAndVertices:unusedVertices];
-            [self updatePointerVisibility];
-            // The pointer is a native UIKit subview. At 1x, moving it must not
-            // re-present an unchanged multi-megabyte macOS IOSurface; redraw
-            // Metal only if a zoomed viewport was actually panned.
-            if (fabs(previousViewportCenter.x - _viewportCenter.x) > 0.00001 ||
-                fabs(previousViewportCenter.y - _viewportCenter.y) > 0.00001)
-                [self setNeedsDisplay];
+            if (self.inputMode == MacWSHostInputModeGame) {
+                // UIKit fingers are bounded contacts, but their successive
+                // deltas are not. Emit every coalesced sample as an exact-
+                // window relative record and never accumulate a clamped
+                // virtual cursor. Positive UIKit Y already matches the
+                // CoreGraphics mouse-delta convention used by AppInput.
+                NSArray<UITouch *> *samples =
+                    [event coalescedTouchesForTouch:_trackpadTouch];
+                if (samples.count == 0) samples = @[_trackpadTouch];
+                CGPoint previous = _trackpadPreviousPoint;
+                for (UITouch *sample in samples) {
+                    CGPoint samplePoint = [sample locationInView:self];
+                    CGFloat sampleDX = samplePoint.x - previous.x;
+                    CGFloat sampleDY = samplePoint.y - previous.y;
+                    previous = samplePoint;
+                    [self emitGameRelativeDeltaX:(int32_t)llround(
+                            sampleDX * scaleX * 1.25)
+                                                deltaY:(int32_t)llround(
+                            sampleDY * scaleY * 1.25)
+                                                source:MacWSInputSourceFinger
+                                             contactID:(uint32_t)_trackpadTouch.hash
+                                             timestamp:sample.timestamp];
+                }
+                _trackpadPreviousPoint = point;
+            } else {
+                _trackpadPreviousPoint = point;
+                _trackpadCursor.x = fmin(fmax(_trackpadCursor.x + dx * scaleX * 1.25,
+                                              0.0), [self currentFrameWidth] - 1.0);
+                _trackpadCursor.y = fmin(fmax(_trackpadCursor.y + dy * scaleY * 1.25,
+                                              0.0), [self currentFrameHeight] - 1.0);
+                [self emitKind:_trackpadButtonDown ? MacWSInputKindTouchMove
+                                                    : MacWSInputKindHover
+                     framePoint:_trackpadCursor pressure:_trackpadButtonDown ? 1.0f : 0.0f
+                      contactID:(uint32_t)_trackpadTouch.hash
+                       timestamp:_trackpadTouch.timestamp];
+                CGFloat sourceX = _trackpadCursor.x /
+                    MAX([self currentFrameWidth] - 1, 1u);
+                CGFloat sourceY = _trackpadCursor.y /
+                    MAX([self currentFrameHeight] - 1, 1u);
+                CGPoint previousViewportCenter = _viewportCenter;
+                if (sourceX < CGRectGetMinX(_visibleSourceRect))
+                    _viewportCenter.x -= CGRectGetMinX(_visibleSourceRect) - sourceX;
+                else if (sourceX > CGRectGetMaxX(_visibleSourceRect))
+                    _viewportCenter.x += sourceX - CGRectGetMaxX(_visibleSourceRect);
+                if (sourceY < CGRectGetMinY(_visibleSourceRect))
+                    _viewportCenter.y -= CGRectGetMinY(_visibleSourceRect) - sourceY;
+                else if (sourceY > CGRectGetMaxY(_visibleSourceRect))
+                    _viewportCenter.y += sourceY - CGRectGetMaxY(_visibleSourceRect);
+                simd_float4 unusedVertices[4];
+                [self updateContentRectAndVertices:unusedVertices];
+                [self updatePointerVisibility];
+                // The pointer is a native UIKit subview. At 1x, moving it must not
+                // re-present an unchanged multi-megabyte macOS IOSurface; redraw
+                // Metal only if a zoomed viewport was actually panned.
+                if (fabs(previousViewportCenter.x - _viewportCenter.x) > 0.00001 ||
+                    fabs(previousViewportCenter.y - _viewportCenter.y) > 0.00001)
+                    [self setNeedsDisplay];
+            }
+        } else {
+            _trackpadPreviousPoint = point;
         }
     }
     [super touchesMoved:touches withEvent:event];
@@ -6408,7 +6834,12 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         if (_trackpadButtonDown ||
             (!_trackpadHadMultipleTouches && _trackpadTravel < 10.0 &&
              touch.timestamp - _trackpadBeganAt < 0.40)) {
-            [self emitKind:kind framePoint:_trackpadCursor pressure:0
+            CGPoint clickPoint = _trackpadCursor;
+            if (self.inputMode == MacWSHostInputModeGame) {
+                clickPoint = CGPointMake([self currentFrameWidth] * 0.5,
+                                         [self currentFrameHeight] * 0.5);
+            }
+            [self emitKind:kind framePoint:clickPoint pressure:0
                   contactID:(uint32_t)_trackpadTouch.hash
                    timestamp:touch.timestamp];
         }
@@ -6552,8 +6983,9 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         if (![self framePointForViewPoint:[recognizer locationInView:self]
                                    output:&point]) return NO;
     } else {
-        uint32_t width = [self currentFrameWidth];
-        uint32_t height = [self currentFrameHeight];
+        uint32_t width = 0;
+        uint32_t height = 0;
+        [self currentInputFrameWidth:&width height:&height];
         if (point.x < 0 || point.y < 0 ||
             point.x >= width || point.y >= height)
             point = CGPointMake(width * 0.5, height * 0.5);
@@ -6567,6 +6999,10 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
                            flags:(uint16_t)flags
                        timestamp:(NSTimeInterval)timestamp {
     if (!self.isMacWSInputEnabled || !isfinite(amount)) return;
+    uint32_t inputWidth = 0;
+    uint32_t inputHeight = 0;
+    [self currentInputFrameWidth:&inputWidth height:&inputHeight];
+    if (inputWidth == 0 || inputHeight == 0) return;
     MacWSInputRecord record = {
         .magic = MACWS_INPUT_MAGIC,
         .version = MACWS_INPUT_VERSION,
@@ -6577,8 +7013,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         .y = (float)framePoint.y,
         .pressure = (float)amount,
         .contactID = 0x50494e43u, // "PINC"
-        .frameWidth = [self currentFrameWidth],
-        .frameHeight = [self currentFrameHeight],
+        .frameWidth = inputWidth,
+        .frameHeight = inputHeight,
         .targetPID = self.targetPID,
         .source = MacWSInputSourceFinger,
         .flags = flags,
@@ -6592,6 +7028,10 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
                            flags:(uint16_t)flags
                        timestamp:(NSTimeInterval)timestamp {
     if (!self.isMacWSInputEnabled || !isfinite(degrees)) return;
+    uint32_t inputWidth = 0;
+    uint32_t inputHeight = 0;
+    [self currentInputFrameWidth:&inputWidth height:&inputHeight];
+    if (inputWidth == 0 || inputHeight == 0) return;
     MacWSInputRecord record = {
         .magic = MACWS_INPUT_MAGIC,
         .version = MACWS_INPUT_VERSION,
@@ -6602,8 +7042,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         .y = (float)framePoint.y,
         .pressure = (float)degrees,
         .contactID = 0x524f5441u, // "ROTA"
-        .frameWidth = [self currentFrameWidth],
-        .frameHeight = [self currentFrameHeight],
+        .frameWidth = inputWidth,
+        .frameHeight = inputHeight,
         .targetPID = self.targetPID,
         .source = MacWSInputSourceFinger,
         .flags = flags,
@@ -6657,6 +7097,10 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
                          source:(MacWSInputSource)source
             directionMultiplier:(CGFloat)direction {
     if (!self.isMacWSInputEnabled) return;
+    uint32_t inputWidth = 0;
+    uint32_t inputHeight = 0;
+    [self currentInputFrameWidth:&inputWidth height:&inputHeight];
+    if (inputWidth == 0 || inputHeight == 0) return;
     BOOL startsGesture = (flags & MacWSInputFlagScrollBegan) != 0 &&
         (flags & MacWSInputFlagScrollMomentum) == 0;
     BOOL exposeOwnsScroll = [self dockExposeOwnsScroll];
@@ -6694,9 +7138,9 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     if (!isfinite(backingScale) || backingScale < 0.5) backingScale = 1.0;
     CGFloat contentWidth = CGRectGetWidth(_contentRect);
     CGFloat contentHeight = CGRectGetHeight(_contentRect);
-    CGFloat sourceWidth = [self currentFrameWidth] *
+    CGFloat sourceWidth = inputWidth *
         CGRectGetWidth(_visibleSourceRect) / backingScale;
-    CGFloat sourceHeight = [self currentFrameHeight] *
+    CGFloat sourceHeight = inputHeight *
         CGRectGetHeight(_visibleSourceRect) / backingScale;
     CGFloat scaleX = contentWidth > 1.0 ? sourceWidth / contentWidth : 1.0;
     CGFloat scaleY = contentHeight > 1.0 ? sourceHeight / contentHeight : 1.0;
@@ -6743,8 +7187,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         .y = (float)framePoint.y,
         .pressure = vertical,
         .contactID = horizontalBits,
-        .frameWidth = [self currentFrameWidth],
-        .frameHeight = [self currentFrameHeight],
+        .frameWidth = inputWidth,
+        .frameHeight = inputHeight,
         .targetPID = self.targetPID,
         .source = source,
         .flags = flags,
@@ -7622,8 +8066,9 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
              timestamp:CACurrentMediaTime()];
         return;
     }
-    uint32_t width = [self currentFrameWidth];
-    uint32_t height = [self currentFrameHeight];
+    uint32_t width = 0;
+    uint32_t height = 0;
+    [self currentInputFrameWidth:&width height:&height];
     if (_trackpadCursor.x < 0 || _trackpadCursor.y < 0 ||
         _trackpadCursor.x >= width || _trackpadCursor.y >= height)
         _trackpadCursor = CGPointMake(width * 0.5, height * 0.5);
@@ -7635,9 +8080,23 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     if (!self.isMacWSInputEnabled) return;
     if (recognizer.state == UIGestureRecognizerStateBegan)
         [self restoreHardwareKeyboardFocusWithReason:@"pointer-enter"];
+    // Once UIKit confirms pointer lock, GCMouse is the one authoritative
+    // movement source. Sending the clamped UIHover location as well would
+    // duplicate motion and reintroduce the very screen-edge limit this mode
+    // removes. Until confirmation arrives, ordinary absolute hover remains
+    // live so a denied lock cannot strand the pointer.
+    if ([self gamePointerCaptureReady]) {
+        _externalPointerHoverActive = NO;
+        [self updatePointerVisibility];
+        return;
+    }
     CGPoint viewPoint = [recognizer locationInView:self];
     CGPoint framePoint;
     if (![self framePointForViewPoint:viewPoint output:&framePoint]) return;
+    uint32_t inputWidth = 0;
+    uint32_t inputHeight = 0;
+    [self currentInputFrameWidth:&inputWidth height:&inputHeight];
+    if (inputWidth == 0 || inputHeight == 0) return;
     MacWSInputRecord record = {
         .magic = MACWS_INPUT_MAGIC,
         .version = MACWS_INPUT_VERSION,
@@ -7646,8 +8105,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         .timestamp = CACurrentMediaTime(),
         .x = (float)framePoint.x,
         .y = (float)framePoint.y,
-        .frameWidth = [self currentFrameWidth],
-        .frameHeight = [self currentFrameHeight],
+        .frameWidth = inputWidth,
+        .frameHeight = inputHeight,
         .targetPID = self.targetPID,
         .source = MacWSInputSourceIndirectPointer,
         .sampleSequence = ++_inputSampleSequence,
@@ -7667,6 +8126,10 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     CGPoint viewPoint = [recognizer locationInView:self];
     CGPoint framePoint = CGPointZero;
     if (![self framePointForViewPoint:viewPoint output:&framePoint]) return;
+    uint32_t inputWidth = 0;
+    uint32_t inputHeight = 0;
+    [self currentInputFrameWidth:&inputWidth height:&inputHeight];
+    if (inputWidth == 0 || inputHeight == 0) return;
     BOOL active = recognizer.state == UIGestureRecognizerStateBegan ||
                   recognizer.state == UIGestureRecognizerStateChanged;
     _pencilHoverActive = active;
@@ -7680,8 +8143,8 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
         .timestamp = CACurrentMediaTime(),
         .x = (float)framePoint.x,
         .y = (float)framePoint.y,
-        .frameWidth = [self currentFrameWidth],
-        .frameHeight = [self currentFrameHeight],
+        .frameWidth = inputWidth,
+        .frameHeight = inputHeight,
         .targetPID = self.targetPID,
         .source = MacWSInputSourcePencil,
         .flags = MacWSInputFlagPreciseLocation,
@@ -7740,6 +8203,13 @@ typedef NS_ENUM(uint8_t, MacWSDirectTouchState) {
     (void)client;
     ++_windowCatalogRevision;
     _latestWindows = [windows copy];
+    if (_reportedFullscreenCanvasPID > 1 &&
+        _reportedFullscreenCanvasWindowID != 0) {
+        [self retainAuthoritativeInputGeometryForPID:
+            _reportedFullscreenCanvasPID
+                                            windowID:
+            _reportedFullscreenCanvasWindowID];
+    }
     NSMutableSet<NSNumber *> *spatialCanvasPIDs = [NSMutableSet set];
     NSMutableSet<NSNumber *> *fullscreenCanvasPIDs =
         [_fullscreenCanvasPIDs mutableCopy] ?: [NSMutableSet set];

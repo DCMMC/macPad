@@ -50,6 +50,28 @@ static inline float MacWSClampFloat(float value, float minimum,
     return fminf(fmaxf(value, minimum), maximum);
 }
 
+// Project one pixel-domain point into another without changing its normalized
+// location. This is used when an application's authoritative AppKit backing
+// geometry differs from the internal resolution of its direct drawable.
+static inline bool MacWSMapPixelPointBetweenDomains(
+        float sourceX, float sourceY,
+        float sourceWidth, float sourceHeight,
+        float destinationWidth, float destinationHeight,
+        float *destinationX, float *destinationY) {
+    if (!destinationX || !destinationY || !isfinite(sourceX) ||
+        !isfinite(sourceY) || !isfinite(sourceWidth) ||
+        !isfinite(sourceHeight) || !isfinite(destinationWidth) ||
+        !isfinite(destinationHeight) || sourceWidth <= 0.0f ||
+        sourceHeight <= 0.0f || destinationWidth <= 0.0f ||
+        destinationHeight <= 0.0f) return false;
+    float mappedX = sourceX / sourceWidth * destinationWidth;
+    float mappedY = sourceY / sourceHeight * destinationHeight;
+    if (!isfinite(mappedX) || !isfinite(mappedY)) return false;
+    *destinationX = mappedX;
+    *destinationY = mappedY;
+    return true;
+}
+
 // AppKit window geometry and UIKit Scene geometry are both expressed in
 // logical points. Retina backing scale belongs only to the IOSurface/drawable
 // pixel conversion; feeding it into native Scene geometry made the requested

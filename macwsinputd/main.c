@@ -114,6 +114,13 @@ static bool KeyboardLatencyDiagnosticsEnabled(void) {
     return access("/tmp/macws_keyboard_latency_diagnostics", F_OK) == 0;
 }
 
+static bool GamePointerDiagnosticsEnabled(void) {
+    // Dynamic and relative-pointer-only: do not require the global switch,
+    // which also starts high-overhead rendering recorders in game processes.
+    return RuntimeDiagnosticsEnabled() ||
+        access("/tmp/macws_game_pointer_diagnostics", F_OK) == 0;
+}
+
 static double InputUptimeSeconds(void) {
 #ifdef CLOCK_UPTIME_RAW
     struct timespec now = {0};
@@ -198,6 +205,7 @@ static const char *KindName(MacWSInputKind kind) {
         case MacWSInputKindPerformPaste: return "perform-paste";
         case MacWSInputKindOpenDocuments: return "open-documents";
         case MacWSInputKindPerformQuit: return "perform-quit";
+        case MacWSInputKindRelativePointer: return "relative-pointer";
     }
     return "invalid";
 }
@@ -277,6 +285,16 @@ static bool RecordIsValid(const MacWSInputRecord *record) {
         return record->targetPID > 1 && record->sceneID != 0;
     if (record->kind == MacWSInputKindPerformQuit)
         return record->targetPID > 1;
+    if (record->kind == MacWSInputKindRelativePointer) {
+        return record->targetPID > 1 &&
+            MacWSInputWindowIDForScene(record->sceneID) != 0 &&
+            (record->source == MacWSInputSourceIndirectPointer ||
+             record->source == MacWSInputSourceFinger) &&
+            (record->flags & MacWSInputFlagGlobalSystemSurface) == 0 &&
+            isfinite(record->pressure) && isfinite(record->altitude) &&
+            fabsf(record->pressure) <= 4096.0f &&
+            fabsf(record->altitude) <= 4096.0f;
+    }
     if (record->kind == MacWSInputKindDesktopCommand)
         return record->targetPID > 1 &&
             record->contactID >= MacWSDesktopCommandSpaceLeft &&
@@ -375,6 +393,7 @@ static CGEventType EventTypeForRecord(const MacWSInputRecord *record,
         case MacWSInputKindPerformPaste:
         case MacWSInputKindOpenDocuments:
         case MacWSInputKindPerformQuit:
+        case MacWSInputKindRelativePointer:
             // Consumed before event construction in main().
             return 0;
     }
@@ -1641,6 +1660,8 @@ int main(void) {
             record.kind == MacWSInputKindDesktopCommand;
         bool systemGestureRecord =
             record.kind == MacWSInputKindSystemGesture;
+        bool relativePointerRecord =
+            record.kind == MacWSInputKindRelativePointer;
         bool gestureRecord = scrollRecord || magnifyRecord || rotateRecord;
         bool nativeKeyboardProxyRecord = IsNativeKeyboardProxyRecord(&record);
         if (nativeKeyboardProxyRecord) {
@@ -2104,6 +2125,25 @@ int main(void) {
             if (RuntimeDiagnosticsEnabled()) fflush(stderr);
             continue;
         }
+        if (relativePointerRecord) {
+            // Relative camera motion has no meaningful global-cursor
+            // fallback. It is accepted only with an exact PID/window and is
+            // consumed by that process's AppInput endpoint; interpreting an
+            // eventType=0 record as a Quartz mouse event would manufacture an
+            // absolute move at the locked anchor.
+            sequence++;
+            if (GamePointerDiagnosticsEnabled() &&
+                (sequence <= 4 || (sequence % 240) == 0)) {
+                fprintf(stderr,
+                    "MACWS-INPUT RELATIVE seq=%llu target=%d window=%d "
+                    "delta=(%.0f,%.0f) sent=%s errno=%d\n",
+                    (unsigned long long)sequence, eventTarget.pid,
+                    eventTarget.windowID, record.pressure, record.altitude,
+                    appBridgeSent ? "YES" : "NO", appBridgeError);
+                fflush(stderr);
+            }
+            continue;
+        }
         if (desktopCommandRecord) {
             sequence++;
             if (RuntimeDiagnosticsEnabled()) {
@@ -2265,7 +2305,8 @@ int main(void) {
         sequence++;
         bool continuous = record.kind == MacWSInputKindTouchMove ||
                           record.kind == MacWSInputKindHover ||
-                          record.kind == MacWSInputKindMenuHover;
+                          record.kind == MacWSInputKindMenuHover ||
+                          record.kind == MacWSInputKindRelativePointer;
         if ((RuntimeDiagnosticsEnabled() ||
              record.contactID == MACWS_INPUT_CONTACT_DIAGNOSTIC) &&
             (!continuous || (sequence % 60) == 0)) {

@@ -226,7 +226,8 @@ static size_t macws_dimension_from_env(const char *name, size_t fallback) {
         ? (size_t)parsed : fallback;
 }
 
-static int macws_log_write(void *cookie, const char *bytes, int count) {
+static __attribute__((unused)) int macws_log_write(
+        void *cookie, const char *bytes, int count) {
     (void)cookie;
     static char line[2048];
     static int used;
@@ -298,6 +299,8 @@ static void macws_dump_commands(id<MTLCommandBuffer> commandBuffer,
     }
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static IOSurfaceRef macws_create_bgra_surface(size_t width, size_t height) {
     NSDictionary *properties = @{
         (id)kIOSurfaceWidth: @(width),
@@ -308,6 +311,7 @@ static IOSurfaceRef macws_create_bgra_surface(size_t width, size_t height) {
     };
     return IOSurfaceCreate((CFDictionaryRef)properties);
 }
+#pragma clang diagnostic pop
 
 static IOSurfaceRef macws_create_pf550_surface(size_t width, size_t height) {
     // Runtime-captured verbatim from IOSurfaceCopyAllValues on WindowServer's

@@ -47,6 +47,7 @@ macws_diagnostic_flag_paths() {
         /tmp/macws_file_panel_diag \
         /tmp/macws_final_composite \
         /tmp/macws_focused_layer_direct \
+        /tmp/macws_game_pointer_diagnostics \
         /tmp/macws_geekbench_numeric_diag \
         /tmp/macws_inband_pf550 \
         /tmp/macws_inspect_failed_pf550 \

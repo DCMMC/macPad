@@ -45,6 +45,15 @@ BOOL MacWSHostKeyboardLatencyDiagnosticsEnabled(void) {
         F_OK) == 0;
 }
 
+BOOL MacWSHostGamePointerDiagnosticsEnabled(void) {
+    // Dynamic and relative-pointer-only.  The global runtime switch also
+    // enables AGX/JIT recorders in the chroot and materially perturbs a game
+    // workload, so a pointer-lock witness must not depend on it.
+    return MacWSHostDiagnosticsEnabled() || access(
+        "/var/mnt/rootfs/private/tmp/macws_game_pointer_diagnostics",
+        F_OK) == 0;
+}
+
 double MacWSMachMilliseconds(uint64_t start, uint64_t end) {
     if (!start || end < start) return -1.0;
     static mach_timebase_info_data_t timebase;

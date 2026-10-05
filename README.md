@@ -29,6 +29,10 @@ guarantee for the current build.
   Control gestures, pointer input, and native window constraints.
 - Magic Keyboard and software shortcut toolbar routing, including arrows and
   Control/Command chords.
+- A Game Camera input mode with iPadOS pointer lock, unbounded Magic Keyboard
+  and direct-touch camera motion, automatic activation from an application's
+  relative-mouse request, and click calibration independent of a game's
+  dynamic render resolution.
 - iOS Chinese IME composition committed to the exact focused AppKit window.
 - Retina Standard and Larger UI modes; unbounded AppKit windows can grow beyond
   the virtual screen when the app itself has no size limit.

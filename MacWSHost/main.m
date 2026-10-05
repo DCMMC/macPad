@@ -401,6 +401,7 @@ static NSString *MacWSLocalizedPhase(NSString *phase) {
 - (BOOL)forwardHardwarePressEvent:(UIPressesEvent *)event;
 - (void)observeHardwareModifiersForEvent:(UIEvent *)event;
 - (void)releaseHardwareKeyboardState;
+- (void)updateGamePointerLockPreferenceWithReason:(NSString *)reason;
 - (void)restoreWorkspaceReturnFromActivity:(NSUserActivity *)activity;
 - (BOOL)detachMissingWorkspaceReturnOwnerPID:(int32_t)ownerPID
                                     windowID:(uint32_t)windowID;
@@ -1564,6 +1565,15 @@ typedef void (^MacWSCompactMenuSelection)(MacWSMenuItem *item);
     uint64_t _sceneOcclusionEvaluationSerial;
     CFTimeInterval _lastNativeFocusRequestTime;
     BOOL _sceneStreamSuspendedForOcclusion;
+    BOOL _gamePointerLockViewVisible;
+    BOOL _lastGamePointerLockPreference;
+    BOOL _automaticGamePointerActive;
+    MacWSHostInputMode _inputModeBeforeAutomaticGame;
+    int32_t _automaticGamePointerPID;
+    uint32_t _automaticGamePointerWindowID;
+    int32_t _automaticGamePointerSuppressedPID;
+    uint32_t _automaticGamePointerSuppressedWindowID;
+    uint64_t _automaticGamePointerRevocationSerial;
     CGSize _deferredBackgroundSceneLogicalSize;
     CGSize _deferredAppKitSceneLogicalSize;
     uint32_t _deferredAppKitSceneWindowID;
@@ -2650,6 +2660,11 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     [NSNotificationCenter.defaultCenter addObserver:self
         selector:@selector(systemKeyboardFrameDidChange:)
         name:UIKeyboardWillChangeFrameNotification object:nil];
+    if (@available(iOS 14.0, *)) {
+        [NSNotificationCenter.defaultCenter addObserver:self
+            selector:@selector(pointerLockStateDidChange:)
+            name:UIPointerLockStateDidChangeNotification object:nil];
+    }
 
     _metalView = [[MacWSMetalView alloc] initWithFrame:CGRectZero];
     _metalView.translatesAutoresizingMaskIntoConstraints = NO;
@@ -3177,13 +3192,15 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     _interopLabel.numberOfLines = 0;
 
     _inputModeControl = [[UISegmentedControl alloc]
-        initWithItems:@[@"直接触控", @"精确触控板"]];
+        initWithItems:@[@"直接触控", @"精确触控板", @"游戏视角"]];
     MacWSHostInputMode savedInputMode = (MacWSHostInputMode)
         [NSUserDefaults.standardUserDefaults integerForKey:@"MacWSInputMode"];
-    if (savedInputMode != MacWSHostInputModeTrackpad)
+    if (savedInputMode != MacWSHostInputModeTrackpad &&
+        savedInputMode != MacWSHostInputModeGame)
         savedInputMode = MacWSHostInputModeDirect;
-    _inputModeControl.selectedSegmentIndex =
-        savedInputMode == MacWSHostInputModeTrackpad ? 1 : 0;
+    _inputModeControl.selectedSegmentIndex = savedInputMode ==
+        MacWSHostInputModeGame ? 2 :
+        (savedInputMode == MacWSHostInputModeTrackpad ? 1 : 0);
     _metalView.inputMode = savedInputMode;
     [_inputModeControl addTarget:self action:@selector(inputModeChanged:)
                 forControlEvents:UIControlEventValueChanged];
@@ -3434,6 +3451,8 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
               forSegmentAtIndex:0];
     [_inputModeControl setTitle:(english ? @"Precision Trackpad" : @"精确触控板")
               forSegmentAtIndex:1];
+    [_inputModeControl setTitle:(english ? @"Game Camera" : @"游戏视角")
+              forSegmentAtIndex:2];
     NSArray *density = english
         ? @[@"Retina Standard", @"Retina Larger"]
         : @[@"Retina 标准", @"Retina 放大"];
@@ -3523,6 +3542,7 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
+    _gamePointerLockViewVisible = YES;
     UISceneActivationState activation = self.view.window.windowScene.activationState;
     if (activation != UISceneActivationStateBackground &&
         activation != UISceneActivationStateUnattached &&
@@ -3578,6 +3598,7 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     [_metalView requestStreamWindowList];
     [_interopClient connect];
     [self restoreHardwareKeyboardFocusWithReason:@"view-did-appear"];
+    [self updateGamePointerLockPreferenceWithReason:@"view-did-appear"];
 }
 
 - (void)viewWillTransitionToSize:(CGSize)size
@@ -4006,6 +4027,8 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
 
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
+    _gamePointerLockViewVisible = NO;
+    [self updateGamePointerLockPreferenceWithReason:@"view-will-disappear"];
     [_statusTimer invalidate];
     _statusTimer = nil;
 }
@@ -4018,6 +4041,7 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     // Reclaim the workspace's physical-keyboard focus on the next main turn.
     dispatch_async(dispatch_get_main_queue(), ^{
         [self restoreHardwareKeyboardFocusWithReason:@"controls-hidden"];
+        [self updateGamePointerLockPreferenceWithReason:@"controls-hidden"];
     });
 }
 
@@ -4025,6 +4049,47 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     _controlDismissLayer.hidden = NO;
     _controlPanel.hidden = NO;
     _showControlsMaterial.hidden = YES;
+    [self updateGamePointerLockPreferenceWithReason:@"controls-shown"];
+}
+
+- (BOOL)prefersPointerLocked API_AVAILABLE(ios(14.0)) {
+    UIWindowScene *scene = self.viewIfLoaded.window.windowScene ?:
+        _connectedWindowScene;
+    return _gamePointerLockViewVisible &&
+        _metalView.inputMode == MacWSHostInputModeGame &&
+        _controlPanel.hidden && _metalView.isMacWSInputEnabled &&
+        _metalView.targetPID > 1 &&
+        scene.activationState == UISceneActivationStateForegroundActive;
+}
+
+- (void)updateGamePointerLockPreferenceWithReason:(NSString *)reason {
+    if (@available(iOS 14.0, *)) {
+        UIWindowScene *scene = self.viewIfLoaded.window.windowScene ?:
+            _connectedWindowScene;
+        BOOL requested = [self prefersPointerLocked];
+        [self setNeedsUpdateOfPrefersPointerLocked];
+        BOOL locked = requested && scene.pointerLockState.isLocked;
+        _metalView.gamePointerLockActive = locked;
+        if (_lastGamePointerLockPreference != requested ||
+            MacWSHostGamePointerDiagnosticsEnabled()) {
+            MacWSLog(@"game-pointer-preference requested=%@ locked=%@ reason=%@ scene=%@ state=%ld pid=%d window=%u",
+                requested ? @"YES" : @"NO", locked ? @"YES" : @"NO",
+                reason ?: @"unknown", scene.session.persistentIdentifier,
+                (long)scene.activationState, _metalView.targetPID,
+                _metalView.targetWindowID);
+        }
+        _lastGamePointerLockPreference = requested;
+    }
+}
+
+- (void)pointerLockStateDidChange:(NSNotification *)notification
+    API_AVAILABLE(ios(14.0)) {
+    UIScene *changedScene = notification.userInfo[
+        UIPointerLockStateSceneUserInfoKey];
+    UIWindowScene *ownScene = self.viewIfLoaded.window.windowScene ?:
+        _connectedWindowScene;
+    if (changedScene && changedScene != ownScene) return;
+    [self updateGamePointerLockPreferenceWithReason:@"lock-state-changed"];
 }
 
 - (void)restoreHardwareKeyboardFocusWithReason:(NSString *)reason {
@@ -4400,16 +4465,135 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     return NO;
 }
 
-- (void)inputModeChanged:(UISegmentedControl *)sender {
-    MacWSHostInputMode mode = sender.selectedSegmentIndex == 1
-        ? MacWSHostInputModeTrackpad : MacWSHostInputModeDirect;
+- (void)applyInputMode:(MacWSHostInputMode)mode
+             automatic:(BOOL)automatic
+                persist:(BOOL)persist {
+    _inputModeControl.selectedSegmentIndex = mode == MacWSHostInputModeGame
+        ? 2 : (mode == MacWSHostInputModeTrackpad ? 1 : 0);
     _metalView.inputMode = mode;
-    [NSUserDefaults.standardUserDefaults setInteger:mode forKey:@"MacWSInputMode"];
-    _inputLabel.text = mode == MacWSHostInputModeTrackpad
-        ? MacWSLocalized(@"输入：单指移动圆形指针，轻点单击，长按拖动，双指滚动/右击",
-                         @"Input: move the circular pointer with one finger; tap, hold-drag, two-finger scroll/right-click")
-        : MacWSLocalized(@"输入：轻点单击、单指滑动滚动；长按后滑动拖动，长按释放右击",
-                         @"Input: tap to click, swipe to scroll; hold-drag, or hold and release to right-click");
+    if (persist)
+        [NSUserDefaults.standardUserDefaults setInteger:mode
+                                                  forKey:@"MacWSInputMode"];
+    if (mode == MacWSHostInputModeGame) {
+        _inputLabel.text = automatic ? MacWSLocalized(
+            @"输入：已按游戏的相对鼠标请求自动进入游戏视角 · 妙控键盘与屏幕触摸均可无限转动",
+            @"Input: Game Camera entered from the game's relative-mouse request · Magic Keyboard and screen touch both rotate without an edge")
+            : MacWSLocalized(
+            @"输入：游戏视角 · 收起控制中心后锁定妙控键盘指针；屏幕触摸同样发送无限相对位移",
+            @"Input: Game Camera · hide Control Center to lock the Magic Keyboard pointer; screen touch also emits unlimited relative motion");
+        [self hideControls];
+    } else {
+        _inputLabel.text = mode == MacWSHostInputModeTrackpad
+            ? MacWSLocalized(@"输入：单指移动圆形指针，轻点单击，长按拖动，双指滚动/右击",
+                             @"Input: move the circular pointer with one finger; tap, hold-drag, two-finger scroll/right-click")
+            : MacWSLocalized(@"输入：轻点单击、单指滑动滚动；长按后滑动拖动，长按释放右击",
+                             @"Input: tap to click, swipe to scroll; hold-drag, or hold and release to right-click");
+        [self updateGamePointerLockPreferenceWithReason:@"input-mode-changed"];
+    }
+}
+
+- (void)inputModeChanged:(UISegmentedControl *)sender {
+    MacWSHostInputMode mode = sender.selectedSegmentIndex == 2
+        ? MacWSHostInputModeGame :
+        (sender.selectedSegmentIndex == 1
+            ? MacWSHostInputModeTrackpad : MacWSHostInputModeDirect);
+    if (_automaticGamePointerActive) {
+        if (mode != MacWSHostInputModeGame) {
+            _automaticGamePointerSuppressedPID = _automaticGamePointerPID;
+            _automaticGamePointerSuppressedWindowID =
+                _automaticGamePointerWindowID;
+        }
+        _automaticGamePointerActive = NO;
+        _automaticGamePointerPID = 0;
+        _automaticGamePointerWindowID = 0;
+        ++_automaticGamePointerRevocationSerial;
+    }
+    [self applyInputMode:mode automatic:NO persist:YES];
+}
+
+- (MacWSStreamWindow *)relativePointerRequestWindowInWindows:
+        (NSArray<MacWSStreamWindow *> *)windows {
+    int32_t targetPID = _streamMode == MacWSStreamModeWindow
+        ? _windowOwnerPID : _metalView.targetPID;
+    if (targetPID <= 1) return nil;
+    for (MacWSStreamWindow *window in windows) {
+        MacWSStreamWindowDescriptor descriptor = window.descriptor;
+        MacWSStreamWindowFlags required =
+            MacWSStreamWindowFocused |
+            MacWSStreamWindowRelativePointerRequested;
+        if (descriptor.ownerPID != targetPID || descriptor.windowID == 0 ||
+            (descriptor.flags & required) != required) continue;
+        if (_streamMode == MacWSStreamModeWindow &&
+            descriptor.windowID != _windowID &&
+            (_windowGroupID == 0 ||
+             descriptor.logicalGroupID != _windowGroupID)) continue;
+        return window;
+    }
+    return nil;
+}
+
+- (void)updateAutomaticGameInputForWindows:
+        (NSArray<MacWSStreamWindow *> *)windows {
+    MacWSStreamWindow *request =
+        [self relativePointerRequestWindowInWindows:windows];
+    if (request) {
+        ++_automaticGamePointerRevocationSerial;
+        int32_t ownerPID = request.descriptor.ownerPID;
+        uint32_t windowID = request.descriptor.windowID;
+        if (_automaticGamePointerSuppressedPID == ownerPID &&
+            _automaticGamePointerSuppressedWindowID == windowID) return;
+        _automaticGamePointerSuppressedPID = 0;
+        _automaticGamePointerSuppressedWindowID = 0;
+        if (_automaticGamePointerActive &&
+            _automaticGamePointerPID == ownerPID &&
+            _automaticGamePointerWindowID == windowID) return;
+        if (_automaticGamePointerActive) {
+            MacWSLog(@"game-pointer-auto retargeted old=%d/%u new=%d/%u",
+                     _automaticGamePointerPID,
+                     _automaticGamePointerWindowID, ownerPID, windowID);
+            _automaticGamePointerPID = ownerPID;
+            _automaticGamePointerWindowID = windowID;
+            return;
+        }
+        // A manually selected Game mode already owns its lifecycle. Do not
+        // turn it into an automatic mode that would later restore another
+        // choice when the application opens a menu.
+        if (_metalView.inputMode == MacWSHostInputModeGame) return;
+        _inputModeBeforeAutomaticGame = _metalView.inputMode;
+        _automaticGamePointerActive = YES;
+        _automaticGamePointerPID = ownerPID;
+        _automaticGamePointerWindowID = windowID;
+        MacWSLog(@"game-pointer-auto entered pid=%d window=%u previous=%u source=app-relative-pointer-contract",
+                 ownerPID, windowID, _inputModeBeforeAutomaticGame);
+        [self applyInputMode:MacWSHostInputModeGame
+                   automatic:YES persist:NO];
+        return;
+    }
+
+    if (_automaticGamePointerSuppressedPID != 0) {
+        _automaticGamePointerSuppressedPID = 0;
+        _automaticGamePointerSuppressedWindowID = 0;
+    }
+    if (!_automaticGamePointerActive) return;
+    uint64_t serial = ++_automaticGamePointerRevocationSerial;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        if (serial != self->_automaticGamePointerRevocationSerial ||
+            !self->_automaticGamePointerActive ||
+            [self relativePointerRequestWindowInWindows:
+                self->_streamWindows ?: @[]]) return;
+        MacWSHostInputMode restore = self->_inputModeBeforeAutomaticGame;
+        if (restore != MacWSHostInputModeDirect &&
+            restore != MacWSHostInputModeTrackpad)
+            restore = MacWSHostInputModeDirect;
+        MacWSLog(@"game-pointer-auto exited pid=%d window=%u restore=%u source=relative-request-revoked",
+                 self->_automaticGamePointerPID,
+                 self->_automaticGamePointerWindowID, restore);
+        self->_automaticGamePointerActive = NO;
+        self->_automaticGamePointerPID = 0;
+        self->_automaticGamePointerWindowID = 0;
+        [self applyInputMode:restore automatic:NO persist:NO];
+    });
 }
 
 - (void)densityChanged:(UISegmentedControl *)sender {
@@ -5955,6 +6139,7 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     else if (!appInput) inputReason = MacWSLocalized(@"目标应用输入端点尚未就绪", @"Target app input endpoint is not ready");
     BOOL inputWasReady = _metalView.isMacWSInputEnabled;
     [_metalView setMacWSInputEnabled:inputReady reason:inputReason];
+    [self updateGamePointerLockPreferenceWithReason:@"input-readiness"];
     if (inputReady && !inputWasReady) {
         // Scene activation and control dismissal can precede the first
         // DisplayStream frame. Their focus requests correctly decline while
@@ -6568,6 +6753,18 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         _systemPerformanceHUDSwitch.on =
             [action isEqualToString:@"system-performance-hud-on"];
         [self systemPerformanceHUDChanged:_systemPerformanceHUDSwitch];
+    } else if ([action isEqualToString:@"input-direct"] ||
+               [action isEqualToString:@"input-trackpad"] ||
+               [action isEqualToString:@"input-game"]) {
+        // This is the same user-visible mode transaction as tapping the
+        // segmented control.  In particular, input-game does not assert that
+        // capture succeeded: inputModeChanged: requests pointer lock and the
+        // relative route remains fail-closed until UIWindowScene reports a
+        // real locked state and GCMouse publishes a raw-motion endpoint.
+        _inputModeControl.selectedSegmentIndex =
+            [action isEqualToString:@"input-game"] ? 2 :
+            ([action isEqualToString:@"input-trackpad"] ? 1 : 0);
+        [self inputModeChanged:_inputModeControl];
     } else if ([action isEqualToString:@"hide-controls"]) {
         [self hideControls];
     } else if ([action isEqualToString:@"show-controls"]) {
@@ -7921,6 +8118,10 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
             });
         }
     }
+    // AppInput publishes the game's accepted relative-mouse state on its
+    // exact focused window. Run this after fullscreen/window identity repair
+    // above so an old catalog owner cannot acquire iPadOS pointer lock.
+    [self updateAutomaticGameInputForWindows:windows];
     NSUInteger logicalWindowCount = [self logicalWindowRepresentatives].count;
     [self setButton:_windowPickerButton
               title:logicalWindowCount
@@ -8076,6 +8277,7 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         record.kind != MacWSInputKindKeyDown &&
         record.kind != MacWSInputKindKeyUp &&
         record.kind != MacWSInputKindModifierSnapshot &&
+        record.kind != MacWSInputKindRelativePointer &&
         record.kind != MacWSInputKindPerformPaste &&
         record.kind != MacWSInputKindActivateTarget &&
         record.kind != MacWSInputKindDesktopCommand &&
@@ -8106,6 +8308,7 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
         case MacWSInputKindKeyDown: phase = @"key-down"; break;
         case MacWSInputKindKeyUp: phase = @"key-up"; break;
         case MacWSInputKindModifierSnapshot: phase = @"modifier-snapshot"; break;
+        case MacWSInputKindRelativePointer: phase = @"relative-pointer"; break;
         case MacWSInputKindConfigureWindow: phase = @"configure-window"; break;
         case MacWSInputKindActivateTarget: phase = @"activate-target"; break;
         case MacWSInputKindCloseWindow: phase = @"close-window"; break;
@@ -8122,6 +8325,7 @@ static UILabel *MacWSMakeLabel(NSString *text, UIFont *font, UIColor *color) {
     _inputLogSequence++;
     BOOL continuous = record.kind == MacWSInputKindTouchMove ||
                       record.kind == MacWSInputKindHover ||
+                      record.kind == MacWSInputKindRelativePointer ||
                       record.kind == MacWSInputKindScroll ||
                       record.kind == MacWSInputKindMagnify ||
                       record.kind == MacWSInputKindRotate ||
@@ -8723,13 +8927,18 @@ static void MacWSDeduplicateWindowScenes(void) {
     [controller applyDeferredForegroundSceneSize];
     dispatch_async(dispatch_get_main_queue(), ^{
         [controller restoreHardwareKeyboardFocusWithReason:@"scene-active"];
+        [controller updateGamePointerLockPreferenceWithReason:
+            @"scene-became-active"];
     });
 }
 
 - (void)sceneDidEnterBackground:(UIScene *)scene {
     UIApplication.sharedApplication.idleTimerDisabled = NO;
-    [(MacWSViewController *)self.window.rootViewController
-        synchronizeSceneOcclusionWithReason:@"scene-entered-background"];
+    MacWSViewController *controller =
+        (MacWSViewController *)self.window.rootViewController;
+    [controller synchronizeSceneOcclusionWithReason:@"scene-entered-background"];
+    [controller updateGamePointerLockPreferenceWithReason:
+        @"scene-entered-background"];
 }
 
 - (void)windowScene:(UIWindowScene *)windowScene
@@ -9135,6 +9344,7 @@ static void MacWSDeduplicateWindowScenes(void) {
                @"performance-hud-off", @"performance-hud-compact",
                @"performance-hud-full", @"system-performance-hud-on",
                @"system-performance-hud-off",
+               @"input-direct", @"input-trackpad", @"input-game",
                @"hide-controls", @"show-controls"]
               containsObject:host]) {
             MacWSViewController *controller = (MacWSViewController *)self.window.rootViewController;

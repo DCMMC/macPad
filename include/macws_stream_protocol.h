@@ -133,6 +133,14 @@ enum {
     // Scene so its resize grid can spring back on the constrained axis.
     MacWSStreamWindowFixedWidth = 1u << 10,
     MacWSStreamWindowFixedHeight = 1u << 11,
+    // The owning AppKit process has a live semantic relative-mouse contract:
+    // either CGAssociateMouseAndMouseCursorPosition(false), or a hidden
+    // CoreGraphics cursor paired with recent CGGetLastMouseDelta consumption.
+    // A hidden cursor alone is insufficient. This is not a bundle/title
+    // heuristic: Host may request iPadOS pointer lock only for the exact
+    // focused window carrying it, and must revoke automatic game-camera mode
+    // when the producer releases or stops consuming the relative route.
+    MacWSStreamWindowRelativePointerRequested = 1u << 12,
 };
 
 typedef uint32_t MacWSStreamFrameFlags;

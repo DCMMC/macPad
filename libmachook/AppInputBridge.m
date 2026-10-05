@@ -10,6 +10,7 @@
 @import Darwin;
 @import CydiaSubstrate;
 
+#import <CoreGraphics/CoreGraphics.h>
 #import <objc/message.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
@@ -24,6 +25,7 @@
 #import <stdarg.h>
 #import <fcntl.h>
 #import <stdio.h>
+#import <time.h>
 #import <sys/socket.h>
 #import <sys/stat.h>
 #import <sys/un.h>
@@ -41,6 +43,15 @@
 #import "macws_window_configuration.h"
 #import "MacWSCatalystInputPolicy.h"
 #import "MacWSInputLatency.h"
+
+// The Theos target uses an iPhoneOS SDK, which omits these macOS declarations
+// even though libmachook is injected into Ventura processes and links its
+// CoreGraphics at runtime. Keep the public macOS signatures explicit instead
+// of weakening the calls to an untyped dlsym boundary.
+extern CGError CGAssociateMouseAndMouseCursorPosition(boolean_t connected);
+extern CGError CGDisplayHideCursor(uint32_t display);
+extern CGError CGDisplayShowCursor(uint32_t display);
+extern void CGGetLastMouseDelta(int32_t *deltaX, int32_t *deltaY);
 
 typedef id (*MacWSMsgID)(id, SEL);
 typedef id (*MacWSMsgIDID)(id, SEL, id);
@@ -141,6 +152,37 @@ static NSData *MacWSLastWindowMetricsEntries;
 static uint64_t MacWSWindowMetricsGeneration;
 static id MacWSWindowGeometryObserverInstance;
 static BOOL MacWSWindowMetricsEventPublishPending;
+// Window metrics publish the application's live relative-mouse contract on
+// the exact key window so Host can follow application intent without a
+// bundle-ID allowlist. CGAssociate(false) is the direct contract. Some Unity
+// players instead hide the CoreGraphics cursor and continuously consume
+// CGGetLastMouseDelta; that paired producer/consumer state is equivalent but
+// expires when polling stops. Unity 2022.3 also has a stronger process-local
+// contract: -[PlayerWindowView setShowCursor:] is the engine boundary that
+// applies Cursor.visible to its real AppKit view. Observe that exact request while
+// still calling Unity's original implementation; do not infer game state from
+// a bundle identifier, title, or a globally hidden cursor.
+static _Atomic bool MacWSRelativePointerRequested;
+static _Atomic bool MacWSMouseAssociationRelative;
+static _Atomic uint32_t MacWSCursorHideDepth;
+static _Atomic uint64_t MacWSLastMouseDeltaMonotonicNS;
+static _Atomic bool MacWSMouseDeltaExpiryScheduled;
+static _Atomic bool MacWSUnityCursorHidden;
+static _Atomic bool MacWSUnityCursorStateKnown;
+// The application event loop may keep dispatching AppKit events while no
+// longer servicing libdispatch's main queue.  Keep request/publication
+// generations separate so that the same event boundary which observes a
+// relative-mode transition can synchronously publish it exactly once.
+static _Atomic uint64_t MacWSRelativePointerRequestGeneration;
+static _Atomic uint64_t MacWSRelativePointerPublishedGeneration;
+static MacWSMsgVoidBool MacWSOriginalUnitySetShowCursor;
+static MacWSMsgVoidID MacWSOriginalUnityMouseDown;
+static MacWSMsgVoidID MacWSOriginalUnityMouseUp;
+static MacWSMsgVoidID MacWSOriginalUnityMouseMoved;
+static MacWSMsgVoidID MacWSOriginalUnityKeyDown;
+static MacWSMsgVoidID MacWSOriginalUnityKeyUp;
+static void MacWSReconcileUnityViewAndPublish(id unityView,
+                                             const char *boundary);
 static char MacWSWindowConfigureAckKey;
 static char MacWSWindowScreenConstraintPolicyKey;
 static void MacWSPublishWindowMetrics(void);
@@ -163,8 +205,492 @@ static id MacWSPresentingWindow(id window, id application);
 static char MacWSTransientWindowAssociationKey;
 static id MacWSRootPresentingWindow(id window, id application);
 static BOOL MacWSRuntimeDiagnosticsEnabled(void);
+static BOOL MacWSGamePointerDiagnosticsEnabled(void);
 static int MacWSWorkspaceWillSleepToken = -1;
 static int MacWSWorkspaceDidWakeToken = -1;
+
+static uint64_t MacWSMonotonicNanoseconds(void) {
+    struct timespec now = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) return 0;
+    return (uint64_t)now.tv_sec * UINT64_C(1000000000) +
+        (uint64_t)now.tv_nsec;
+}
+
+static BOOL MacWSMouseDeltaIsRecent(uint64_t now) {
+    uint64_t last = atomic_load_explicit(
+        &MacWSLastMouseDeltaMonotonicNS, memory_order_acquire);
+    return now != 0 && last != 0 && now >= last &&
+        now - last <= UINT64_C(1000000000);
+}
+
+static void MacWSSetRelativePointerRequestedAndPublish(BOOL requested,
+                                                       const char *source,
+                                                       BOOL publishMetrics) {
+    bool previous = atomic_exchange_explicit(
+        &MacWSRelativePointerRequested, requested, memory_order_acq_rel);
+    if (previous == requested) return;
+    atomic_fetch_add_explicit(&MacWSRelativePointerRequestGeneration, 1,
+                              memory_order_acq_rel);
+
+    fprintf(stderr,
+        "#### APP-INPUT RELATIVE-REQUEST pid=%d requested=%s source=%s "
+        "associated=%s hidden-depth=%u\n",
+        getpid(), requested ? "YES" : "NO", source ?: "unknown",
+        atomic_load_explicit(&MacWSMouseAssociationRelative,
+                             memory_order_acquire) ? "YES" : "NO",
+        atomic_load_explicit(&MacWSCursorHideDepth,
+                             memory_order_acquire));
+    fflush(stderr);
+    if (publishMetrics) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (atomic_load_explicit(&MacWSAppInputInstallState,
+                                     memory_order_acquire) == 2) {
+                MacWSPublishWindowMetrics();
+            }
+        });
+    }
+}
+
+static void MacWSSetRelativePointerRequested(BOOL requested,
+                                             const char *source) {
+    MacWSSetRelativePointerRequestedAndPublish(requested, source, YES);
+}
+
+static void MacWSRefreshRelativePointerRequested(const char *source) {
+    BOOL associated = atomic_load_explicit(
+        &MacWSMouseAssociationRelative, memory_order_acquire);
+    BOOL unityCursorHidden = atomic_load_explicit(
+        &MacWSUnityCursorHidden, memory_order_acquire);
+    BOOL hidden = atomic_load_explicit(
+        &MacWSCursorHideDepth, memory_order_acquire) != 0;
+    BOOL consumingDeltas = hidden &&
+        MacWSMouseDeltaIsRecent(MacWSMonotonicNanoseconds());
+    MacWSSetRelativePointerRequested(
+        associated || unityCursorHidden || consumingDeltas, source);
+}
+
+static void MacWSUnitySetShowCursor(id self, SEL selector, BOOL visible) {
+    MacWSOriginalUnitySetShowCursor(self, selector, visible);
+    atomic_store_explicit(&MacWSUnityCursorStateKnown, true,
+                          memory_order_release);
+    atomic_store_explicit(&MacWSUnityCursorHidden, !visible,
+                          memory_order_release);
+    if (MacWSGamePointerDiagnosticsEnabled()) {
+        fprintf(stderr,
+            "#### APP-INPUT RELATIVE-UNITY-CURSOR pid=%d visible=%s "
+            "view=%p\n",
+            getpid(), visible ? "YES" : "NO", self);
+        fflush(stderr);
+    }
+    MacWSRefreshRelativePointerRequested(
+        visible ? "PlayerWindowView.setShowCursor(true)"
+                : "PlayerWindowView.setShowCursor(false)");
+    MacWSReconcileUnityViewAndPublish(self, "setShowCursor:");
+}
+
+static id MacWSFindUnityPlayerView(id view, Class targetClass,
+                                  NSUInteger depth, NSUInteger *budget) {
+    if (!view || !targetClass || !budget || *budget == 0) return nil;
+    (*budget)--;
+    if (((MacWSMsgBoolID)objc_msgSend)(
+            view, sel_registerName("isKindOfClass:"), (id)targetClass)) {
+        return view;
+    }
+    if (depth == 0 || !((MacWSMsgBoolSEL)objc_msgSend)(
+            view, sel_registerName("respondsToSelector:"),
+            sel_registerName("subviews"))) return nil;
+    id subviews = ((MacWSMsgID)objc_msgSend)(
+        view, sel_registerName("subviews"));
+    NSUInteger count = subviews ? [subviews count] : 0;
+    for (NSUInteger index = 0; index < count && *budget != 0; index++) {
+        id candidate = MacWSFindUnityPlayerView(
+            [subviews objectAtIndex:index], targetClass, depth - 1, budget);
+        if (candidate) return candidate;
+    }
+    return nil;
+}
+
+static id MacWSFindUnityPlayerResponder(id responder, Class targetClass) {
+    SEL nextResponder = sel_registerName("nextResponder");
+    for (NSUInteger index = 0;
+         responder && targetClass && index < 32;
+         index++) {
+        if (((MacWSMsgBoolID)objc_msgSend)(
+                responder, sel_registerName("isKindOfClass:"),
+                (id)targetClass)) return responder;
+        if (!((MacWSMsgBoolSEL)objc_msgSend)(
+                responder, sel_registerName("respondsToSelector:"),
+                nextResponder)) break;
+        id next = ((MacWSMsgID)objc_msgSend)(responder, nextResponder);
+        if (!next || next == responder) break;
+        responder = next;
+    }
+    return nil;
+}
+
+// Reconcile the engine's current view state as part of the existing low-rate
+// metrics pass. The setShowCursor: hook observes live transitions, while this
+// getter closes the startup race where Unity assigned its ivar before the
+// injected class was registered and swizzled. Keep the walk bounded and tied
+// to the exact key window; an unrelated hidden CoreGraphics cursor is not a
+// relative-pointer request.
+static void MacWSReconcileUnityCursorState(id keyWindow) {
+    Class unityViewClass = objc_getClass("PlayerWindowView");
+    if (!unityViewClass) unityViewClass = objc_getClass("UnityView");
+    SEL getter = sel_registerName("showCursor");
+    Method method = unityViewClass
+        ? class_getInstanceMethod(unityViewClass, getter) : NULL;
+    const char *encoding = method ? method_getTypeEncoding(method) : NULL;
+    BOOL known = NO;
+    BOOL visible = YES;
+    id unityView = nil;
+    id contentView = nil;
+    id firstResponder = nil;
+    if (keyWindow && encoding && strcmp(encoding, "B16@0:8") == 0) {
+        contentView = ((MacWSMsgID)objc_msgSend)(
+            keyWindow, sel_registerName("contentView"));
+        NSUInteger budget = 256;
+        unityView = MacWSFindUnityPlayerView(
+            contentView, unityViewClass, 12, &budget);
+        if (!unityView) {
+            firstResponder = ((MacWSMsgID)objc_msgSend)(
+                keyWindow, sel_registerName("firstResponder"));
+            unityView = MacWSFindUnityPlayerResponder(
+                firstResponder, unityViewClass);
+        }
+        if (unityView) {
+            visible = ((MacWSMsgBool)objc_msgSend)(unityView, getter);
+            known = YES;
+        }
+    }
+
+    if (!known && unityViewClass && MacWSGamePointerDiagnosticsEnabled()) {
+        static _Atomic bool loggedLookupMiss;
+        if (!atomic_exchange_explicit(&loggedLookupMiss, true,
+                                      memory_order_acq_rel)) {
+            id subviews = contentView ? ((MacWSMsgID)objc_msgSend)(
+                contentView, sel_registerName("subviews")) : nil;
+            NSUInteger subviewCount = subviews ? [subviews count] : 0;
+            fprintf(stderr,
+                "#### APP-INPUT RELATIVE-UNITY-LOOKUP pid=%d found=NO "
+                "window=%s content=%s subviews=%lu first=%s encoding=%s\n",
+                getpid(), keyWindow ? object_getClassName(keyWindow) : "nil",
+                contentView ? object_getClassName(contentView) : "nil",
+                (unsigned long)subviewCount,
+                firstResponder ? object_getClassName(firstResponder) : "nil",
+                encoding ?: "<null>");
+            fflush(stderr);
+        }
+    }
+
+    bool hidden = known && !visible;
+    bool previousKnown = atomic_exchange_explicit(
+        &MacWSUnityCursorStateKnown, known, memory_order_acq_rel);
+    bool previousHidden = atomic_exchange_explicit(
+        &MacWSUnityCursorHidden, hidden, memory_order_acq_rel);
+    if (previousKnown == known && previousHidden == hidden) return;
+    if (MacWSGamePointerDiagnosticsEnabled()) {
+        fprintf(stderr,
+            "#### APP-INPUT RELATIVE-UNITY-STATE pid=%d known=%s "
+            "visible=%s view=%p encoding=%s\n",
+            getpid(), known ? "YES" : "NO", visible ? "YES" : "NO",
+            unityView, encoding ?: "<null>");
+        fflush(stderr);
+    }
+
+    BOOL associated = atomic_load_explicit(
+        &MacWSMouseAssociationRelative, memory_order_acquire);
+    BOOL cursorHidden = atomic_load_explicit(
+        &MacWSCursorHideDepth, memory_order_acquire) != 0;
+    BOOL consumingDeltas = cursorHidden &&
+        MacWSMouseDeltaIsRecent(MacWSMonotonicNanoseconds());
+    // This function runs inside MacWSPublishWindowMetrics. Update the flag
+    // synchronously so this very generation carries it, but do not enqueue a
+    // recursive metrics publication.
+    MacWSSetRelativePointerRequestedAndPublish(
+        associated || hidden || consumingDeltas,
+        known ? "PlayerWindowView.showCursor-state"
+              : "PlayerWindowView-not-key-window",
+        NO);
+}
+
+// Unity 2022.3's custom Cocoa pump may continue invoking its NSView methods
+// while libdispatch's main queue is not draining recovery timers.  These are
+// real AppKit view callbacks, so reading the view and publishing its owning
+// window is safe only on the main thread.  Request and publication generations
+// ensure steady mouse motion takes the fast no-op path after one transition.
+static void MacWSReconcileUnityViewAndPublish(id unityView,
+                                             const char *boundary) {
+    if (!unityView) return;
+    if (!pthread_main_np()) {
+        if (MacWSGamePointerDiagnosticsEnabled()) {
+            static _Atomic bool loggedOffMain;
+            if (!atomic_exchange_explicit(&loggedOffMain, true,
+                                          memory_order_acq_rel)) {
+                fprintf(stderr,
+                    "#### APP-INPUT RELATIVE-UNITY-EVENT pid=%d "
+                    "boundary=%s main=NO ignored=YES\n",
+                    getpid(), boundary ?: "unknown");
+                fflush(stderr);
+            }
+        }
+        return;
+    }
+    id window = ((MacWSMsgID)objc_msgSend)(
+        unityView, sel_registerName("window"));
+    MacWSReconcileUnityCursorState(window);
+    uint64_t requested = atomic_load_explicit(
+        &MacWSRelativePointerRequestGeneration, memory_order_acquire);
+    uint64_t published = atomic_load_explicit(
+        &MacWSRelativePointerPublishedGeneration, memory_order_acquire);
+    if (MacWSGamePointerDiagnosticsEnabled()) {
+        static _Atomic uint64_t events;
+        uint64_t event = atomic_fetch_add_explicit(
+            &events, 1, memory_order_relaxed) + 1;
+        if (event <= 6 || requested != published) {
+            fprintf(stderr,
+                "#### APP-INPUT RELATIVE-UNITY-EVENT pid=%d event=%llu "
+                "boundary=%s main=YES window=%ld generation=%llu/%llu\n",
+                getpid(), (unsigned long long)event,
+                boundary ?: "unknown",
+                window ? (long)((MacWSMsgInteger)objc_msgSend)(
+                    window, sel_registerName("windowNumber")) : 0L,
+                (unsigned long long)requested,
+                (unsigned long long)published);
+            fflush(stderr);
+        }
+    }
+    if (requested != published) MacWSPublishWindowMetrics();
+}
+
+static void MacWSUnityMouseDown(id self, SEL selector, id event) {
+    MacWSOriginalUnityMouseDown(self, selector, event);
+    MacWSReconcileUnityViewAndPublish(self, "mouseDown:");
+}
+
+static void MacWSUnityMouseUp(id self, SEL selector, id event) {
+    MacWSOriginalUnityMouseUp(self, selector, event);
+    MacWSReconcileUnityViewAndPublish(self, "mouseUp:");
+}
+
+static void MacWSUnityMouseMoved(id self, SEL selector, id event) {
+    MacWSOriginalUnityMouseMoved(self, selector, event);
+    MacWSReconcileUnityViewAndPublish(self, "mouseMoved:");
+}
+
+static void MacWSUnityKeyDown(id self, SEL selector, id event) {
+    MacWSOriginalUnityKeyDown(self, selector, event);
+    MacWSReconcileUnityViewAndPublish(self, "keyDown:");
+}
+
+static void MacWSUnityKeyUp(id self, SEL selector, id event) {
+    MacWSOriginalUnityKeyUp(self, selector, event);
+    MacWSReconcileUnityViewAndPublish(self, "keyUp:");
+}
+
+static BOOL MacWSInstallUnityViewEventHook(Class unityViewClass,
+                                          const char *selectorName,
+                                          IMP replacement,
+                                          MacWSMsgVoidID *originalOut) {
+    SEL selector = sel_registerName(selectorName);
+    Method method = unityViewClass
+        ? class_getInstanceMethod(unityViewClass, selector) : NULL;
+    const char *encoding = method ? method_getTypeEncoding(method) : NULL;
+    // RE-confirmed via UnityPlayer 2022.3.62f2 UUID
+    // D50F7C77-F422-3DE2-986B-1237215E50F7: each selected PlayerWindowView
+    // callback is v24@0:8@16. Unknown ABIs fail closed.
+    if (!method || !encoding || strcmp(encoding, "v24@0:8@16") != 0)
+        return NO;
+    IMP implementation = method_getImplementation(method);
+    if (implementation == replacement) return *originalOut != NULL;
+    if (*originalOut) return NO;
+    *originalOut = (MacWSMsgVoidID)implementation;
+    method_setImplementation(method, replacement);
+    return YES;
+}
+
+static void MacWSInstallUnityRelativePointerContract(void) {
+    if (MacWSOriginalUnitySetShowCursor &&
+        MacWSOriginalUnityMouseDown && MacWSOriginalUnityMouseUp &&
+        MacWSOriginalUnityMouseMoved && MacWSOriginalUnityKeyDown &&
+        MacWSOriginalUnityKeyUp) return;
+    // RE-confirmed in UnityPlayer 2022.3.62f2 UUID
+    // D50F7C77-F422-3DE2-986B-1237215E50F7: the owning class is
+    // PlayerWindowView and the IMP is +0xf16550. Keep UnityView as a
+    // capability-compatible candidate used by other Unity desktop players;
+    // the exact method ABI below remains mandatory for either class.
+    Class unityViewClass = objc_getClass("PlayerWindowView");
+    if (!unityViewClass) unityViewClass = objc_getClass("UnityView");
+    SEL selector = sel_registerName("setShowCursor:");
+    Method method = unityViewClass
+        ? class_getInstanceMethod(unityViewClass, selector) : NULL;
+    const char *encoding = method ? method_getTypeEncoding(method) : NULL;
+    // The exact Unity 2022.3.62f2 method is v20@0:8B16. Fail closed if an
+    // unrelated class/version exposes a selector with a different ABI.
+    if (!method || !encoding || strcmp(encoding, "v20@0:8B16") != 0) {
+        if (MacWSGamePointerDiagnosticsEnabled()) {
+            fprintf(stderr,
+                "#### APP-INPUT RELATIVE-UNITY-HOOK pid=%d installed=NO "
+                "encoding=%s\n",
+                getpid(), encoding ?: "<null>");
+            fflush(stderr);
+        }
+        return;
+    }
+    IMP implementation = method_getImplementation(method);
+    if (implementation != (IMP)MacWSUnitySetShowCursor &&
+        !MacWSOriginalUnitySetShowCursor) {
+        MacWSOriginalUnitySetShowCursor = (MacWSMsgVoidBool)implementation;
+        method_setImplementation(method, (IMP)MacWSUnitySetShowCursor);
+    }
+    BOOL mouseDown = MacWSInstallUnityViewEventHook(
+        unityViewClass, "mouseDown:", (IMP)MacWSUnityMouseDown,
+        &MacWSOriginalUnityMouseDown);
+    BOOL mouseUp = MacWSInstallUnityViewEventHook(
+        unityViewClass, "mouseUp:", (IMP)MacWSUnityMouseUp,
+        &MacWSOriginalUnityMouseUp);
+    BOOL mouseMoved = MacWSInstallUnityViewEventHook(
+        unityViewClass, "mouseMoved:", (IMP)MacWSUnityMouseMoved,
+        &MacWSOriginalUnityMouseMoved);
+    BOOL keyDown = MacWSInstallUnityViewEventHook(
+        unityViewClass, "keyDown:", (IMP)MacWSUnityKeyDown,
+        &MacWSOriginalUnityKeyDown);
+    BOOL keyUp = MacWSInstallUnityViewEventHook(
+        unityViewClass, "keyUp:", (IMP)MacWSUnityKeyUp,
+        &MacWSOriginalUnityKeyUp);
+    if (MacWSGamePointerDiagnosticsEnabled()) {
+        fprintf(stderr,
+            "#### APP-INPUT RELATIVE-UNITY-HOOK pid=%d installed=YES "
+            "encoding=%s events=%s/%s/%s/%s/%s\n",
+            getpid(), encoding,
+            mouseDown ? "YES" : "NO", mouseUp ? "YES" : "NO",
+            mouseMoved ? "YES" : "NO", keyDown ? "YES" : "NO",
+            keyUp ? "YES" : "NO");
+        fflush(stderr);
+    }
+}
+
+static void MacWSScheduleUnityRelativePointerContractInstall(
+        unsigned attempt) {
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC),
+                   dispatch_get_main_queue(), ^{
+        if (MacWSOriginalUnitySetShowCursor) return;
+        MacWSInstallUnityRelativePointerContract();
+        if (!MacWSOriginalUnitySetShowCursor && attempt < 39) {
+            MacWSScheduleUnityRelativePointerContractInstall(attempt + 1);
+        }
+    });
+}
+
+static void MacWSScheduleMouseDeltaExpiry(void);
+
+static void MacWSCheckMouseDeltaExpiry(void) {
+    atomic_store_explicit(&MacWSMouseDeltaExpiryScheduled, false,
+                          memory_order_release);
+    MacWSRefreshRelativePointerRequested("hidden-delta-expiry");
+    BOOL needsAnotherCheck =
+        !atomic_load_explicit(&MacWSMouseAssociationRelative,
+                              memory_order_acquire) &&
+        atomic_load_explicit(&MacWSCursorHideDepth,
+                             memory_order_acquire) != 0 &&
+        MacWSMouseDeltaIsRecent(MacWSMonotonicNanoseconds());
+    if (needsAnotherCheck) MacWSScheduleMouseDeltaExpiry();
+}
+
+static void MacWSScheduleMouseDeltaExpiry(void) {
+    bool expected = false;
+    if (!atomic_compare_exchange_strong_explicit(
+            &MacWSMouseDeltaExpiryScheduled, &expected, true,
+            memory_order_acq_rel, memory_order_acquire)) return;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
+                   dispatch_get_main_queue(), ^{
+        MacWSCheckMouseDeltaExpiry();
+    });
+}
+
+static CGError MacWSAssociateMouseAndMouseCursorPosition(
+        boolean_t connected) {
+    // Under DYLD interposition, a call to the replaced symbol from the
+    // interposing image reaches the original implementation.  Do not use
+    // RTLD_NEXT here: this project runtime-confirmed that pattern can resolve
+    // NULL from an inserted image (the exec hooks retain the same contract).
+    CGError result = CGAssociateMouseAndMouseCursorPosition(connected);
+    if (result != kCGErrorSuccess) return result;
+
+    atomic_store_explicit(&MacWSMouseAssociationRelative, connected == 0,
+                          memory_order_release);
+    MacWSRefreshRelativePointerRequested(
+        connected == 0 ? "CGAssociate(false)" : "CGAssociate(true)");
+    return result;
+}
+
+static CGError MacWSDisplayHideCursor(uint32_t display) {
+    CGError result = CGDisplayHideCursor(display);
+    uint32_t depth = atomic_load_explicit(
+        &MacWSCursorHideDepth, memory_order_acquire);
+    if (result == kCGErrorSuccess) {
+        depth = atomic_fetch_add_explicit(
+            &MacWSCursorHideDepth, 1, memory_order_acq_rel) + 1;
+    }
+    if (MacWSGamePointerDiagnosticsEnabled()) {
+        fprintf(stderr,
+            "#### APP-INPUT RELATIVE-CURSOR pid=%d operation=hide "
+            "display=%u result=%d hidden-depth=%u\n",
+            getpid(), display, result, depth);
+        fflush(stderr);
+    }
+    return result;
+}
+
+static CGError MacWSDisplayShowCursor(uint32_t display) {
+    CGError result = CGDisplayShowCursor(display);
+    uint32_t depth = atomic_load_explicit(
+        &MacWSCursorHideDepth, memory_order_acquire);
+    if (result == kCGErrorSuccess) {
+        while (depth != 0 && !atomic_compare_exchange_weak_explicit(
+                   &MacWSCursorHideDepth, &depth, depth - 1,
+                   memory_order_acq_rel, memory_order_acquire)) {}
+        depth = atomic_load_explicit(
+            &MacWSCursorHideDepth, memory_order_acquire);
+        if (depth == 0) {
+            atomic_store_explicit(&MacWSLastMouseDeltaMonotonicNS, 0,
+                                  memory_order_release);
+            MacWSRefreshRelativePointerRequested("CGDisplayShowCursor");
+        }
+    }
+    if (MacWSGamePointerDiagnosticsEnabled()) {
+        fprintf(stderr,
+            "#### APP-INPUT RELATIVE-CURSOR pid=%d operation=show "
+            "display=%u result=%d hidden-depth=%u\n",
+            getpid(), display, result, depth);
+        fflush(stderr);
+    }
+    return result;
+}
+
+static void MacWSGetLastMouseDelta(int32_t *deltaX, int32_t *deltaY) {
+    CGGetLastMouseDelta(deltaX, deltaY);
+    static _Atomic uint64_t calls;
+    uint64_t call = atomic_fetch_add_explicit(
+        &calls, 1, memory_order_relaxed) + 1;
+    uint32_t depth = atomic_load_explicit(
+        &MacWSCursorHideDepth, memory_order_acquire);
+    if (MacWSGamePointerDiagnosticsEnabled() &&
+        (call <= 4 || (call % 600) == 0)) {
+        fprintf(stderr,
+            "#### APP-INPUT RELATIVE-DELTA-POLL pid=%d call=%llu "
+            "hidden-depth=%u delta=(%d,%d)\n",
+            getpid(), (unsigned long long)call, depth,
+            deltaX ? *deltaX : 0, deltaY ? *deltaY : 0);
+        fflush(stderr);
+    }
+    if (depth == 0) return;
+    atomic_store_explicit(&MacWSLastMouseDeltaMonotonicNS,
+                          MacWSMonotonicNanoseconds(),
+                          memory_order_release);
+    MacWSRefreshRelativePointerRequested("hidden-delta-consumer");
+    MacWSScheduleMouseDeltaExpiry();
+}
 
 // Main-thread-only dynamic scope around one Host ConfigureWindow setter. The
 // application maximum, aspect, increments and windowWillResize: response have
@@ -434,6 +960,14 @@ static BOOL MacWSKeyboardLatencyDiagnosticsEnabled(void) {
     // It intentionally does not enable the render/JIT/runtime diagnostic
     // umbrella, which would change the game workload being measured.
     return access("/tmp/macws_keyboard_latency_diagnostics", F_OK) == 0;
+}
+
+static BOOL MacWSGamePointerDiagnosticsEnabled(void) {
+    // This marker is deliberately dynamic and relative-pointer-only.  It can
+    // witness one physical camera gesture without enabling AppInput's other
+    // event traces or the global AGX/JIT recorders.
+    return MacWSRuntimeDiagnosticsEnabled() ||
+        access("/tmp/macws_game_pointer_diagnostics", F_OK) == 0;
 }
 
 // Called only after AppKit itself has produced the real NSApplication on the
@@ -2394,6 +2928,26 @@ static void MacWSAppInputApplicationSendEvent(id self, SEL command, id event) {
     }
     if (MacWSOriginalApplicationSendEvent)
         MacWSOriginalApplicationSendEvent(self, command, event);
+    // Unity's custom AppKit loop continues to enter -[NSApplication
+    // sendEvent:] even when its main dispatch queue stops running recovery
+    // timers. Re-read the exact PlayerWindowView cursor property after the
+    // real event has been handled: the click/key which enters or leaves an
+    // in-world camera can change Cursor.visible during that dispatch.  A
+    // generation mismatch causes one synchronous metrics publication; steady
+    // mouse motion does not enumerate windows or write a sidecar per event.
+    id relativeEventWindow = event ? ((MacWSMsgID)objc_msgSend)(
+        event, sel_registerName("window")) : nil;
+    if (!relativeEventWindow) {
+        relativeEventWindow = ((MacWSMsgID)objc_msgSend)(
+            self, sel_registerName("keyWindow"));
+    }
+    MacWSReconcileUnityCursorState(relativeEventWindow);
+    uint64_t relativeRequestGeneration = atomic_load_explicit(
+        &MacWSRelativePointerRequestGeneration, memory_order_acquire);
+    uint64_t relativePublishedGeneration = atomic_load_explicit(
+        &MacWSRelativePointerPublishedGeneration, memory_order_acquire);
+    if (relativeRequestGeneration != relativePublishedGeneration)
+        MacWSPublishWindowMetrics();
     MacWSAppInputDispatchModifierFlags = previousDispatchModifierFlags;
     MacWSAppInputDispatchModifierDepth = previousDispatchModifierDepth;
     if (systemLatencyMainStart > 0.0) {
@@ -3503,7 +4057,7 @@ static void MacWSInstallWorkspaceOpenWitness(void) {
                                                      openURLs);
     if (openURLsMethod && !MacWSOriginalWorkspaceOpenURLs) {
         MacWSOriginalWorkspaceOpenURLs = (MacWSWorkspaceOpenURLsFunction)
-            method_getImplementation(openURLsMethod);
+        method_getImplementation(openURLsMethod);
         method_setImplementation(openURLsMethod,
                                  (IMP)MacWSWorkspaceOpenURLsRedirect);
         if (MacWSRuntimeDiagnosticsEnabled()) {
@@ -4080,6 +4634,7 @@ static NSUInteger MacWSNSEventType(MacWSInputKind kind) {
         case MacWSInputKindPerformPaste:
         case MacWSInputKindOpenDocuments:
         case MacWSInputKindPerformQuit:
+        case MacWSInputKindRelativePointer:
         case MacWSInputKindConfigureWindow:
         case MacWSInputKindCloseWindow:
         case MacWSInputKindCreateInitialWindow:
@@ -4520,6 +5075,18 @@ static BOOL MacWSInputRecordIsValid(const MacWSInputRecord *record) {
     if (record->kind == MacWSInputKindOpenDocuments)
         return record->sceneID != 0;
     if (record->kind == MacWSInputKindPerformQuit) return YES;
+    if (record->kind == MacWSInputKindRelativePointer) {
+        return MacWSInputWindowIDForScene(record->sceneID) != 0 &&
+            (record->source == MacWSInputSourceIndirectPointer ||
+             record->source == MacWSInputSourceFinger) &&
+            (record->flags & MacWSInputFlagGlobalSystemSurface) == 0 &&
+            isfinite(record->pressure) && isfinite(record->altitude) &&
+            fabsf(record->pressure) <= 4096.0f &&
+            fabsf(record->altitude) <= 4096.0f &&
+            record->x >= 0.0f && record->y >= 0.0f &&
+            record->x < record->frameWidth &&
+            record->y < record->frameHeight;
+    }
     if (record->kind == MacWSInputKindDesktopCommand) {
         return record->contactID >= MacWSDesktopCommandSpaceLeft &&
             record->contactID <= MacWSDesktopCommandSpaceRight;
@@ -5005,6 +5572,124 @@ static id MacWSCreateAppMouseEvent(Class eventClass,
             expectedWindowPoint.y, actualPoint.x, actualPoint.y,
             equivalent ? "YES" : "NO");
         fflush(stderr);
+    }
+    return equivalent ? event : nil;
+}
+
+// Build the pointer-locked mouseMoved event from the raw GameController
+// counts supplied by the iOS Host.  Field 51 is the Ventura AppKit target
+// window field (RE-confirmed in -[NSEvent _initWithCGEvent:eventRef:]); fields
+// 4/5 are CoreGraphics' signed mouse delta fields.  The resulting public
+// NSEvent getters and named target ivars are validated before dispatch, so an
+// unknown AppKit layout fails closed instead of degrading into an absolute or
+// global cursor event.
+static id MacWSCreateAppRelativePointerEvent(Class eventClass,
+                                             MacWSInputRecord record,
+                                             id window,
+                                             CGPoint screenPoint,
+                                             CGPoint windowPoint,
+                                             CGRect screenFrame,
+                                             NSInteger windowNumber) {
+    static MacWSCreateMouseCGEvent createMouse;
+    static MacWSSetCGEventFlags setFlags;
+    static MacWSSetCGEventTimestamp setTimestamp;
+    static MacWSSetCGEventIntegerField setInteger;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        createMouse = (MacWSCreateMouseCGEvent)dlsym(
+            RTLD_DEFAULT, "CGEventCreateMouseEvent");
+        setFlags = (MacWSSetCGEventFlags)dlsym(
+            RTLD_DEFAULT, "CGEventSetFlags");
+        setTimestamp = (MacWSSetCGEventTimestamp)dlsym(
+            RTLD_DEFAULT, "CGEventSetTimestamp");
+        setInteger = (MacWSSetCGEventIntegerField)dlsym(
+            RTLD_DEFAULT, "CGEventSetIntegerValueField");
+    });
+    SEL eventWithCGEvent = sel_registerName("eventWithCGEvent:");
+    if (!eventClass || !window || windowNumber <= 0 || !createMouse ||
+        !setInteger || !class_respondsToSelector(
+            object_getClass(eventClass), eventWithCGEvent)) return nil;
+
+    CGPoint cgPoint = {
+        screenPoint.x,
+        screenFrame.origin.y + screenFrame.size.height - screenPoint.y,
+    };
+    MacWSCGEventRef cgEvent = createMouse(
+        NULL, 5 /* kCGEventMouseMoved */, cgPoint, 0);
+    if (!cgEvent) return nil;
+    setInteger(cgEvent, 4 /* kCGMouseEventDeltaX */,
+               (int64_t)llround(record.pressure));
+    setInteger(cgEvent, 5 /* kCGMouseEventDeltaY */,
+               (int64_t)llround(record.altitude));
+    setInteger(cgEvent, 51 /* AppKit window number */, windowNumber);
+    setInteger(cgEvent, 91 /* kCGMouseEventWindowUnderMousePointer */,
+               windowNumber);
+    setInteger(cgEvent,
+               92 /* ...WindowUnderMousePointerThatCanHandleThisEvent */,
+               windowNumber);
+    if (setFlags) setFlags(cgEvent,
+        MacWSInputModifiersForScene(record.sceneID));
+    if (setTimestamp && record.timestamp > 0.0)
+        setTimestamp(cgEvent, (uint64_t)llround(record.timestamp * 1.0e9));
+    id event = ((MacWSEventFromCGEvent)objc_msgSend)(
+        (id)eventClass, eventWithCGEvent, cgEvent);
+    CFRelease(cgEvent);
+    if (!event) return nil;
+
+    Ivar windowIvar = class_getInstanceVariable(eventClass, "_window");
+    Ivar windowNumberIvar = class_getInstanceVariable(
+        eventClass, "_windowNumber");
+    ptrdiff_t windowNumberOffset = windowNumberIvar
+        ? ivar_getOffset(windowNumberIvar) : -1;
+    size_t instanceSize = class_getInstanceSize(eventClass);
+    const char *windowType = windowIvar
+        ? ivar_getTypeEncoding(windowIvar) : NULL;
+    const char *windowNumberType = windowNumberIvar
+        ? ivar_getTypeEncoding(windowNumberIvar) : NULL;
+    if (!windowIvar || !windowNumberIvar || !windowType ||
+        windowType[0] != '@' || !windowNumberType ||
+        windowNumberType[0] != 'q' || instanceSize < sizeof(NSInteger) ||
+        windowNumberOffset < 0 ||
+        (size_t)windowNumberOffset > instanceSize - sizeof(NSInteger))
+        return nil;
+    object_setIvar(event, windowIvar, window);
+    memcpy((uint8_t *)(void *)event + windowNumberOffset,
+           &windowNumber, sizeof(windowNumber));
+
+    id observedWindow = ((MacWSMsgID)objc_msgSend)(
+        event, sel_registerName("window"));
+    NSInteger observedWindowNumber = ((MacWSMsgInteger)objc_msgSend)(
+        event, sel_registerName("windowNumber"));
+    CGPoint observedPoint = ((MacWSMsgPoint)objc_msgSend)(
+        event, sel_registerName("locationInWindow"));
+    double observedDX = ((MacWSMsgDouble)objc_msgSend)(
+        event, sel_registerName("deltaX"));
+    double observedDY = ((MacWSMsgDouble)objc_msgSend)(
+        event, sel_registerName("deltaY"));
+    BOOL equivalent = observedWindow == window &&
+        observedWindowNumber == windowNumber &&
+        isfinite(observedPoint.x) && isfinite(observedPoint.y) &&
+        fabs(observedPoint.x - windowPoint.x) <= 2.0 &&
+        fabs(observedPoint.y - windowPoint.y) <= 2.0 &&
+        isfinite(observedDX) && isfinite(observedDY) &&
+        fabs(observedDX - record.pressure) <= 0.5 &&
+        fabs(observedDY - record.altitude) <= 0.5;
+    if (MacWSGamePointerDiagnosticsEnabled()) {
+        static _Atomic uint64_t relativeEvents;
+        uint64_t sequence = atomic_fetch_add_explicit(
+            &relativeEvents, 1, memory_order_relaxed) + 1;
+        if (sequence <= 4 || (sequence % 240) == 0) {
+            fprintf(stderr,
+                "#### APP-INPUT RELATIVE-CREATE pid=%d event=%llu "
+                "window=%ld->%ld delta=(%.0f,%.0f)->(%.0f,%.0f) "
+                "local=(%.2f,%.2f)->(%.2f,%.2f) equivalent=%s\n",
+                getpid(), (unsigned long long)sequence,
+                (long)windowNumber, (long)observedWindowNumber,
+                record.pressure, record.altitude, observedDX, observedDY,
+                windowPoint.x, windowPoint.y, observedPoint.x,
+                observedPoint.y, equivalent ? "YES" : "NO");
+            fflush(stderr);
+        }
     }
     return equivalent ? event : nil;
 }
@@ -8515,7 +9200,8 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
                      record.contactID == MACWS_INPUT_CONTACT_DIAGNOSTIC) &&
         record.kind != MacWSInputKindTouchMove &&
         record.kind != MacWSInputKindHover &&
-        record.kind != MacWSInputKindMenuHover;
+        record.kind != MacWSInputKindMenuHover &&
+        record.kind != MacWSInputKindRelativePointer;
     if (logEvent) {
         fprintf(stderr,
                 "#### APP-INPUT MAIN pid=%d kind=%u target=%d thread-main=%s\n",
@@ -9716,7 +10402,8 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
         // real sheetParent / parentWindow / modalWindow relation resolves it
         // back to this Scene's requested base window. This preserves Scene
         // isolation between unrelated same-process document windows.
-        if (!reusedGestureRoute) {
+        if (!reusedGestureRoute &&
+            record.kind != MacWSInputKindRelativePointer) {
             id hitWindow = MacWSWindowForScreenPoint(application, screenPoint);
             if (hitWindow && hitWindow != requestedBaseWindow) {
                 NSInteger baseLevel = ((MacWSMsgInteger)objc_msgSend)(
@@ -9946,6 +10633,43 @@ static void MacWSPostInputOnMainThread(MacWSInputRecord record) {
             sel_registerName("windowNumber")) : 0;
     CGPoint windowPoint = ((MacWSMsgPointPoint)objc_msgSend)(window,
         sel_registerName("convertPointFromScreen:"), screenPoint);
+    if (record.kind == MacWSInputKindRelativePointer) {
+        // Pointer lock keeps the public cursor anchored while only dx/dy
+        // advances the game's camera. Preserve that anchor for Unity's
+        // separately polled +[NSEvent mouseLocation], then deliver the real
+        // mouseMoved NSEvent synchronously on the application's main thread.
+        MacWSAppInputPersistentMouseLocation = screenPoint;
+        MacWSAppInputPersistentMouseLocationValid = YES;
+        id relativeEvent = MacWSCreateAppRelativePointerEvent(
+            eventClass, record, window, screenPoint, windowPoint,
+            screenFrame, windowNumber);
+        if (!relativeEvent) {
+            fprintf(stderr,
+                "#### APP-INPUT DROP pid=%d reason=relative-event-create "
+                "window=%ld delta=(%.0f,%.0f)\n",
+                getpid(), (long)windowNumber,
+                record.pressure, record.altitude);
+            fflush(stderr);
+            return;
+        }
+        MacWSMarkProcessLocalMouseEvent(relativeEvent);
+        MacWSSendMouseEventWithStateBridge(application, relativeEvent, 0);
+        if (MacWSGamePointerDiagnosticsEnabled()) {
+            static _Atomic uint64_t relativeDispatches;
+            uint64_t sequence = atomic_fetch_add_explicit(
+                &relativeDispatches, 1, memory_order_relaxed) + 1;
+            if (sequence <= 4 || (sequence % 240) == 0) {
+                fprintf(stderr,
+                    "#### APP-INPUT RELATIVE-DISPATCH pid=%d event=%llu "
+                    "window=%ld delta=(%.0f,%.0f) local=(%.2f,%.2f)\n",
+                    getpid(), (unsigned long long)sequence,
+                    (long)windowNumber, record.pressure, record.altitude,
+                    windowPoint.x, windowPoint.y);
+                fflush(stderr);
+            }
+        }
+        return;
+    }
     // RE/runtime-confirmed on this Ventura AppKit build: a process-local
     // down/up pair reaches NSMenuWindowManagerMenuItemsContainerView but does
     // not enter the menu presentation dispatch, while CGPostMouseEvent from
@@ -11010,6 +11734,7 @@ static void MacWSEnqueueAppInputRecord(MacWSInputRecord record) {
                           record.kind == MacWSInputKindHover ||
                           record.kind == MacWSInputKindMenuHover ||
                           record.kind == MacWSInputKindScroll ||
+                          record.kind == MacWSInputKindRelativePointer ||
                           record.kind == MacWSInputKindConfigureWindow;
         BOOL replaced = NO;
         NSUInteger pendingCount = [MacWSAppInputPending count];
@@ -11025,7 +11750,17 @@ static void MacWSEnqueueAppInputRecord(MacWSInputRecord record) {
                     (record.kind != MacWSInputKindScroll ||
                      last.flags == record.flags) &&
                     last.targetPID == record.targetPID) {
-                    if (record.kind == MacWSInputKindScroll) {
+                    if (record.kind == MacWSInputKindRelativePointer) {
+                        record.pressure = fmaxf(-4096.0f,
+                            fminf(4096.0f,
+                                last.pressure + record.pressure));
+                        record.altitude = fmaxf(-4096.0f,
+                            fminf(4096.0f,
+                                last.altitude + record.altitude));
+                        [data release];
+                        data = [[NSData alloc] initWithBytes:&record
+                                                     length:sizeof(record)];
+                    } else if (record.kind == MacWSInputKindScroll) {
                         float previousHorizontal = 0.0f;
                         float incomingHorizontal = 0.0f;
                         memcpy(&previousHorizontal, &last.contactID,
@@ -11070,6 +11805,7 @@ static void MacWSEnqueueAppInputRecord(MacWSInputRecord record) {
                         candidate.kind == MacWSInputKindHover ||
                         candidate.kind == MacWSInputKindMenuHover ||
                         candidate.kind == MacWSInputKindScroll ||
+                        candidate.kind == MacWSInputKindRelativePointer ||
                         candidate.kind == MacWSInputKindMagnify ||
                         candidate.kind == MacWSInputKindRotate ||
                         candidate.kind == MacWSInputKindConfigureWindow) {
@@ -11781,7 +12517,8 @@ static void *MacWSAppInputThread(void *unused) {
         if (MacWSRuntimeDiagnosticsEnabled() &&
             record.kind != MacWSInputKindTouchMove &&
             record.kind != MacWSInputKindHover &&
-            record.kind != MacWSInputKindMenuHover) {
+            record.kind != MacWSInputKindMenuHover &&
+            record.kind != MacWSInputKindRelativePointer) {
             fprintf(stderr,
                     "#### APP-INPUT RX pid=%d bytes=%zd kind=%u target=%d "
                     "flags=%#x contact=%u\n",
@@ -12187,9 +12924,22 @@ static void MacWSPublishWindowMetrics(void) {
         application, sel_registerName("windows"));
     id keyWindow = ((MacWSMsgID)objc_msgSend)(
         application, sel_registerName("keyWindow"));
+    MacWSReconcileUnityCursorState(keyWindow);
     BOOL spatialCanvas = MacWSMainBundleUsesSpatialCanvasTouch();
     BOOL fullscreenCanvas =
         MacWSMainBundleUsesFullscreenCanvasPresentation();
+    uint64_t relativeRequestGeneration = 0;
+    uint64_t relativeGenerationAfterRead = 0;
+    BOOL relativePointerRequested = NO;
+    do {
+        relativeRequestGeneration = atomic_load_explicit(
+            &MacWSRelativePointerRequestGeneration, memory_order_acquire);
+        relativePointerRequested = atomic_load_explicit(
+            &MacWSRelativePointerRequested, memory_order_acquire);
+        relativeGenerationAfterRead = atomic_load_explicit(
+            &MacWSRelativePointerRequestGeneration, memory_order_acquire);
+    } while (relativeRequestGeneration != relativeGenerationAfterRead);
+    BOOL relativeContractRepresented = !relativePointerRequested;
     NSMutableData *entries = [NSMutableData data];
     NSMutableArray<NSString *> *diagnosticEntries =
         MacWSRuntimeDiagnosticsEnabled() ? [NSMutableArray array] : nil;
@@ -12224,6 +12974,8 @@ static void MacWSPublishWindowMetrics(void) {
         // through displayd's transient stream and cannot satisfy launcher
         // readiness or create their own Scene.
         BOOL visible = orderedVisible && windowLevel == 0;
+        if (relativePointerRequested && window == keyWindow)
+            relativeContractRepresented = YES;
         id presentingWindow = MacWSPresentingWindow(window, application);
         BOOL transient = presentingWindow != nil;
         // Retain the exact object-level classification used by the published
@@ -12255,7 +13007,9 @@ static void MacWSPublishWindowMetrics(void) {
                 (hasShadow ? MacWSStreamWindowHasShadow : 0) |
                 (spatialCanvas ? MacWSStreamWindowSpatialCanvas : 0) |
                 (fullscreenCanvas ?
-                    MacWSStreamWindowFullscreenCanvas : 0),
+                    MacWSStreamWindowFullscreenCanvas : 0) |
+                (relativePointerRequested && window == keyWindow
+                    ? MacWSStreamWindowRelativePointerRequested : 0),
             .logicalGroupID = MacWSLogicalWindowGroupID(window, application),
             .minimumLogicalWidth = (float)minimum.width,
             .minimumLogicalHeight = (float)minimum.height,
@@ -12313,7 +13067,17 @@ static void MacWSPublishWindowMetrics(void) {
     // sidecar while the AppKit window set remained unchanged.  The old early
     // return made that loss permanent for the lifetime of the application.
     if (!entriesChanged &&
-        [NSFileManager.defaultManager fileExistsAtPath:path]) return;
+        [NSFileManager.defaultManager fileExistsAtPath:path]) {
+        if (relativeContractRepresented &&
+            atomic_load_explicit(&MacWSRelativePointerRequestGeneration,
+                                 memory_order_acquire) ==
+                relativeRequestGeneration) {
+            atomic_store_explicit(
+                &MacWSRelativePointerPublishedGeneration,
+                relativeRequestGeneration, memory_order_release);
+        }
+        return;
+    }
     if (entriesChanged) {
         [MacWSLastWindowMetricsEntries release];
         MacWSLastWindowMetricsEntries = [entries copy];
@@ -12349,6 +13113,14 @@ static void MacWSPublishWindowMetrics(void) {
     }
     if (written && entriesChanged)
         MacWSNotifyDisplayCatalogChanged('m');
+    if (written && relativeContractRepresented &&
+        atomic_load_explicit(&MacWSRelativePointerRequestGeneration,
+                             memory_order_acquire) ==
+            relativeRequestGeneration) {
+        atomic_store_explicit(&MacWSRelativePointerPublishedGeneration,
+                              relativeRequestGeneration,
+                              memory_order_release);
+    }
 }
 
 static void MacWSScheduleWindowMetricsPublish(void) {
@@ -12550,6 +13322,9 @@ static void MacWSInstallAppInputBridgeNow(void) {
     }
     if (dockEndpoint) MacWSPublishDockExposeState(NO);
     if (!dockEndpoint) {
+        MacWSInstallUnityRelativePointerContract();
+        if (!MacWSOriginalUnitySetShowCursor)
+            MacWSScheduleUnityRelativePointerContractInstall(0);
         MacWSInstallWorkspacePowerLifecycle();
         MacWSInstallWorkspaceOpenWitness();
         MacWSInstallApplicationKeyWitness();
@@ -12690,3 +13465,19 @@ __attribute__((destructor)) static void MacWSRemoveAppInputBridge(void) {
     [MacWSOrderedWindowRegistry release];
     MacWSOrderedWindowRegistry = nil;
 }
+
+#define MACWS_APP_INPUT_INTERPOSE(_replacement, _replacee)                  \
+    __attribute__((used)) static struct {                                   \
+        const void *replacement;                                            \
+        const void *replacee;                                               \
+    } _macws_app_input_interpose_##_replacee                                \
+        __attribute__((section("__DATA,__interpose"))) = {                  \
+            (const void *)(uintptr_t)&_replacement,                         \
+            (const void *)(uintptr_t)&_replacee                             \
+        }
+
+MACWS_APP_INPUT_INTERPOSE(MacWSAssociateMouseAndMouseCursorPosition,
+                          CGAssociateMouseAndMouseCursorPosition);
+MACWS_APP_INPUT_INTERPOSE(MacWSDisplayHideCursor, CGDisplayHideCursor);
+MACWS_APP_INPUT_INTERPOSE(MacWSDisplayShowCursor, CGDisplayShowCursor);
+MACWS_APP_INPUT_INTERPOSE(MacWSGetLastMouseDelta, CGGetLastMouseDelta);

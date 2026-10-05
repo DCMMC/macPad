@@ -275,6 +275,15 @@ Input and interoperability:
 - Electron/Catalyst precise scrolling no longer performs a synchronous global
   WindowServer hit test for every continuation event. Begin-time ownership
   validation remains; this is route-based, not a VS Code bundle-ID exception.
+- Game Camera mode requests UIKit pointer lock and consumes `GCMouse` deltas
+  only after the Scene reports the lock active. Applications publish their
+  relative-pointer request through the exact window catalog, so Host can enter
+  and leave the mode automatically without a game bundle-ID allowlist. Direct
+  touch uses the same unbounded relative route. Absolute clicks retain the
+  validated AppKit backing-pixel geometry even when a direct drawable renders
+  at a different internal resolution; Host converts into presentation pixels
+  only for its own layer hit test. See
+  `docs/evidence/game-pointer-lock-and-click-geometry-20261006.md`.
 - Text, rich clipboard representations, files and cross-app drag use bounded,
   versioned payloads with origin/generation and path validation.
 

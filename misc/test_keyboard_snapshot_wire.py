@@ -55,7 +55,8 @@ int main(void) {
     assert(MacWSInputWireVersionForKind(MacWSInputKindOpenDocuments)==6);
     assert(MacWSInputWireVersionForKind(MacWSInputKindPerformQuit)==7);
     assert(MacWSInputWireVersionForKind(MacWSInputKindModifierSnapshot)==8);
-    for (unsigned version=5;version<=8;version++)
+    assert(MacWSInputWireVersionForKind(MacWSInputKindRelativePointer)==9);
+    for (unsigned version=5;version<=9;version++)
         assert(MacWSInputVersionSupportsKind(version,MacWSInputKindKeyUp));
     MacWSInputRecord r={.magic=MACWS_INPUT_MAGIC,.version=8,
         .kind=MacWSInputKindModifierSnapshot,.timestamp=1,
@@ -71,6 +72,21 @@ int main(void) {
     r.contactID=2;assert(!RecordIsValid(&r));r.contactID=0;
     r.timestamp=NAN;assert(!RecordIsValid(&r));r.timestamp=1;
     r.magic=0;assert(!RecordIsValid(&r));
+
+    r=(MacWSInputRecord){.magic=MACWS_INPUT_MAGIC,.version=9,
+        .kind=MacWSInputKindRelativePointer,.timestamp=1,
+        .sceneID=MacWSInputSceneForWindow(521,0),.x=960,.y=540,
+        .pressure=31,.altitude=-17,.frameWidth=1920,.frameHeight=1080,
+        .targetPID=1234,.source=MacWSInputSourceIndirectPointer};
+    assert(RecordIsValid(&r));
+    r.version=8;assert(!RecordIsValid(&r));r.version=9;
+    r.sceneID=MacWSInputSceneForWindow(0,0);assert(!RecordIsValid(&r));
+    r.sceneID=MacWSInputSceneForWindow(521,0);
+    r.source=MacWSInputSourceFinger;assert(RecordIsValid(&r));
+    r.source=MacWSInputSourcePencil;assert(!RecordIsValid(&r));
+    r.source=MacWSInputSourceIndirectPointer;
+    r.flags=MacWSInputFlagGlobalSystemSurface;assert(!RecordIsValid(&r));
+    r.flags=0;r.pressure=4097;assert(!RecordIsValid(&r));
 
     // Both actual broker call sites use this one production predicate.
     // Global physical input keeps the session route. Exact-window physical
