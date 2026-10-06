@@ -561,7 +561,7 @@ device and invalidate the next result.
 
 ## Imported Project-Memory Ledger (complete audit: 2026-10-07)
 
-The former per-agent project memory directory contained one index and four
+The live shared-agent project memory directory contains one index and four
 topic files: macOS build SDK setup, Claude Code in the iOS chroot, the chroot
 SOCKS proxy, and autosignd on-demand signing. This section carries every
 durable fact from those files into the repository. It is intentionally
@@ -569,18 +569,38 @@ self-contained: do not depend on a private agent memory store or resurrect
 the old cross-references. Where a 2026-06 observation is historical, that is
 stated explicitly; current source and current build outputs take precedence.
 
-### Codex memory reconciliation (re-audited 2026-10-07)
+### Local agent-memory reconciliation (corrected audit: 2026-10-07)
 
-The Codex-local durable-memory sources were checked directly after the former
-per-agent ledger was imported. `$CODEX_HOME/memories/` contained no files,
-`$CODEX_HOME/memories_1.sqlite` contained zero `stage1_outputs` rows, and the
-global `$CODEX_HOME/AGENTS.md` contained no project memory. Codex rollout
-JSONL, history, shell snapshots and desktop project-selection state are
-conversation/operational records, not durable project-memory files, and were
-not promoted into repository facts. Therefore the four-topic ledger below is
-the complete imported local-memory set as of this audit;
-no additional Codex memory remained outside this repository. Future durable discoveries belong in
-this file and dated `docs/evidence/`, not in a private memory directory.
+The first 2026-10-07 audit checked only Codex-native storage and was too
+narrow. A live shared-agent project-memory directory also exists under
+`~/.claude/projects/<encoded-old-checkout>/memory/`. It uses the repository's
+older checkout path (before the `Downloads/Projects/` move), so a search only
+for the current path or only below `$CODEX_HOME` misses it. The directory was
+read to EOF and contains exactly this five-file source set:
+
+- `MEMORY.md`: a four-entry index;
+- `macos-build-sdk-setup.md`;
+- `claude-code-on-ios-chroot.md`;
+- `chroot-socks-proxy.md`;
+- `autosignd-on-demand-signing.md`.
+
+The YAML `name`, `description`, `node_type`, `type`, and `originSessionId`
+fields are memory-system bookkeeping, not runtime project facts. The source
+filenames and every durable technical statement are retained below; private
+absolute usernames and the obsolete hard-coded deployment address are not.
+
+The Codex-native stores were also checked directly. `$CODEX_HOME/memories/`
+contained no files. `$CODEX_HOME/memories_1.sqlite` was present; it had
+zero `stage1_outputs` rows and zero jobs. The global `$CODEX_HOME/AGENTS.md`
+contained no project memory. `state_5.sqlite` records project threads with
+`memory_mode=enabled`, but that field is configuration, not memory content;
+the corresponding rollout JSONL files contain no injected memory block.
+Codex rollout JSONL, history, shell snapshots and desktop project-selection
+state remain conversation/operational records and were not promoted wholesale
+into repository facts. Thus the live five-file shared-agent source is fully
+mirrored by this ledger, and no unmatched durable project fact remained after
+this corrected audit. Future durable discoveries belong here and in dated
+`docs/evidence/`, not only in a private memory directory.
 
 ### autosignd on-demand signing (introduced 2026-06-11)
 
@@ -591,13 +611,15 @@ macOS dyld rejects the iOS `libjailbreak.dylib` with `incompatible platform:
 have 'iOS', need 'macOS'`. That is why signing is split across the chroot and
 an iOS-native daemon rather than implemented wholly in `libmachook`.
 
-- `autosignd/main.c` is an iOS/arm64 daemon. It listens at the host path
+- `autosignd/main.c` is an iOS/arm64 daemon (`TARGET=iphone`, `ARCHS=arm64`).
+  It listens at the host path
   `/var/mnt/rootfs/tmp/autosignd.sock`, which is `/tmp/autosignd.sock` inside
   the chroot. For each requested chroot path it prepends `/var/mnt/rootfs`,
   runs `ldid -S<entitlements> -M`, extracts every present architecture's
   CDHash, and admits each hash with `jbctl trustcache add`. An in-memory seen
-  set avoids repeated work. `postinst.sh` starts/restarts it and its historical
-  log location is `/var/mnt/rootfs/tmp/autosignd.log`.
+  set avoids repeated work. `postinst.sh` historically launched it with
+  `nohup`, restarts it on each run, and writes its historical log at
+  `/var/mnt/rootfs/tmp/autosignd.log`.
 - `libmachook/exec_hooks.c` interposes `posix_spawn`, `posix_spawnp`,
   `execve`, `execv`, and `execvp`. A bare executable is first resolved through
   `PATH`; the hook sends its chroot path to autosignd, waits up to five seconds
@@ -624,21 +646,25 @@ semantic contract, but revalidate current paths and hashes on a new build.
 The chroot can have working IP connectivity while its macOS resolver and
 Security/Keychain services are unreachable, producing `Could not resolve
 host`. Proxy environment variables are useful only if an actual listener is
-running. A historical self-contained setup made the iOS device SSH to its own
-sshd and exposed a dynamic forward on loopback:
+running. The historical separation witness was iOS-side HTTP access succeeding
+(`claude.ai` returned 302 and the tested npm registries returned 200) while the
+chroot still failed DNS. The recorded self-contained setup made the iOS device
+SSH to its own sshd and exposed port 1082 on the device's local address. That
+user-specific address is deliberately not reproduced here; use a validated,
+narrowly reachable local address and do not commit it:
 
 ```bash
 # One-time on the device: create a device-local key and authorize only that key.
 [ -f ~/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -N "" -f ~/.ssh/id_ed25519
 cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
 
-# Example only: use the device's actual local sshd port.
-ssh -f -N -D 127.0.0.1:1082 -o BatchMode=yes \
+# Example only: supply the device-local addresses and actual local sshd port.
+ssh -f -N -D <DEVICE_LOCAL_ADDRESS>:1082 -o BatchMode=yes \
   -o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes \
-  -o ServerAliveInterval=30 -p <LOCAL_SSH_PORT> root@127.0.0.1
+  -o ServerAliveInterval=30 -p <LOCAL_SSH_PORT> root@<DEVICE_SSH_ADDRESS>
 ```
 
-Use `ALL_PROXY=socks5h://127.0.0.1:1082` for tools that support SOCKS. The
+Use `ALL_PROXY=socks5h://<DEVICE_LOCAL_ADDRESS>:1082` for tools that support SOCKS. The
 `h` is load-bearing: DNS is resolved by the proxy/iOS side; `socks5://` leaves
 DNS in the broken chroot. Verify the listener with a bounded `curl` through
 `socks5h`, not with iOS `netstat`, which was unreliable in this environment.
@@ -660,26 +686,35 @@ The native bun/JSC Claude Code binary was verified in this environment on
 about the current release format.
 
 - The official installer rejected the chroot because `uname -m` reported the
-  iPad model identifier rather than `arm64`. The working installation path was
-  to read the release version endpoint and `manifest.json`, select the
-  `darwin-arm64` artifact and its SHA-256, download it directly, verify the
-  hash, install it at `/usr/local/bin/claude`, and mark it executable.
+  iPad model identifier rather than `arm64`, reporting `Unsupported
+  architecture`. The working installation path read
+  `https://downloads.claude.ai/claude-code-releases/latest`, then
+  `<version>/manifest.json`, selected the `darwin-arm64` artifact and its
+  SHA-256, downloaded `<version>/darwin-arm64/claude`, verified the hash,
+  installed it at `/usr/local/bin/claude`, and marked it executable.
   Python 3.13 was used for JSON and hashing because chroot `jq`/`shasum`
   wrappers could hit the AMFI shebang constraint.
 - Sign and trustcache the binary and every native helper it spawns. The
-  historical manual command was `ldid -S<project-entitlements> -M <binary>`
+  historical manual command was
+  `ldid -S/var/jb/usr/macOS/bin/entitlements.plist -M <binary>`
   followed by admission of each slice's CDHash; autosignd now owns the normal
   first-exec path.
-- JSC initially attempted a 64-GiB gigacage virtual-address reservation and
-  aborted. Export `GIGACAGE_ENABLED=0`; increased-memory/extended-VA
-  entitlements did not solve it. Do **not** set `BUN_JSC_useGigacage`: bun
-  rejected that as an invalid JSC environment variable.
+- JSC initially aborted with `FATAL: Could not allocate gigacage memory` and
+  `totalSize = 68719476736`, a 64-GiB virtual-address reservation. Export
+  `GIGACAGE_ENABLED=0`; `extended-virtual-addressing` and
+  `increased-memory-limit` entitlements did not solve it. Do **not** set
+  `BUN_JSC_useGigacage`: bun rejected that as an invalid JSC environment
+  variable.
 - `claude -p` initially failed `posix_spawn('/usr/bin/security')` with
   `EBADEXEC`/errno `-85`. Re-signing and trustcaching the fat arm64e+x86_64
   `/usr/bin/security` allowed Claude to fall back to file credentials.
-  `postinst.sh` historically covered both `claude` and `security`, while the
-  chroot `.bashrc`/`.bash_profile` exported the TUI environment. Confirm those
-  source paths before assuming a fresh rootfs still has the block.
+  `postinst.sh` historically covered both `claude` and `security` through
+  `sign_and_trustcache`, while the
+  chroot `.bashrc` block named `Claude Code TUI environment` exported the
+  runtime values and `.bash_profile` sourced it. The README also carried a
+  `Running Claude Code in the chroot` section. The historical user flow was
+  `run_bash.sh` followed by `claude`, modulo proxy and authentication. Confirm
+  those source paths before assuming a fresh rootfs still has the block.
 - Its API client accepts HTTP(S), not SOCKS, proxy URLs. The chroot still has
   no resolver, so the HTTP proxy must resolve on the upstream side. The
   historical test found `SSL_CERT_FILE` did not affect Claude's own request,
@@ -689,13 +724,17 @@ about the current release format.
   `ANTHROPIC_API_KEY` selects `x-api-key`; `ANTHROPIC_AUTH_TOKEN` together
   with `ANTHROPIC_BASE_URL` selects bearer authentication for a relay. An
   internal gateway must not be sent through an unrelated external proxy: add
-  a fixed host mapping plus `NO_PROXY`, use a proxy with internal egress, or
-  choose the correct base URL. The historical dummy-key checks distinguished
-  `Not logged in` from `Invalid API key`, proving the variables were read.
+  a fixed mapping to the chroot `/etc/hosts` plus `NO_PROXY`, use a proxy with internal egress, or
+  choose the correct base URL. Sending the historical internal gateway through
+  the unrelated external proxy produced an `*-external` quota response/HTTP
+  429; selecting the correct base URL resolved that particular setup. The
+  dummy-key checks distinguished `Not logged in` from `Invalid API key`,
+  proving the variables were read.
 
-`claude --version` and `--help` are installation checks only. A real prompt
-still requires an API credential or interactive `/login` and working browser/
-network routing. The minimal run environment includes the explicit chroot
+`claude --version` and `--help` are installation checks only. The historical
+unauthenticated prompt reached `Not logged in · Please run /login`; a real
+prompt still requires an API credential or interactive `/login` (OAuth needs
+a browser) and working network routing. The minimal run environment includes the explicit chroot
 `PATH`, `HOME=/Users/root`, `SSL_CERT_FILE=/etc/ssl/cert.pem`,
 `GIGACAGE_ENABLED=0`, and the appropriate proxy variables.
 
@@ -725,10 +764,12 @@ Two non-obvious SDK fixes were committed into the repository:
 The obsolete `login` subproject was removed because it duplicated
 `launchdchrootexec`'s bash-spawn path and was never executed; its Makefile,
 postinstall trustcache entry, and directory were deleted. The memory recorded
-five root subprojects at that time and a hard-coded deploy target in the old
-`build.sh`. Both are historical implementation details. Always inspect the
-current root `SUBPROJECTS` and the current parameterized build/deploy scripts;
-never restore a user-specific destination or treat the old count as current.
+five root subprojects at that time. Its remaining historical host pipeline ran
+`set_macos_version.py`, then `ldid`, then `codesign`, then SCP/SSH deployment
+to a hard-coded device destination. The count and destination are obsolete
+historical implementation details. Always inspect the current root `SUBPROJECTS` and the
+current parameterized build/deploy scripts; never restore a user-specific
+destination or treat the old count as current.
 
 ## Historical AGX Bring-up Snapshot (not the current project goal)
 
