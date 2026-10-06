@@ -103,7 +103,7 @@ caught:
 The corrected attribution is retained in the historical AGX snapshot below so
 it is available to every agent without an external memory store.
 
-## Current Project Memory and Operating Baseline (2026-10-02)
+## Current Project Memory and Operating Baseline (2026-10-07)
 
 This section is the current summary. Later sections retain detailed and
 historical bring-up knowledge. If an older section conflicts with this one,
@@ -133,6 +133,7 @@ patterns, GPU ABIs, and jailbreak trust behavior are version-specific.
 |---|---|---|---|
 | iPad13,6 (M1), iPadOS 16.3.1 / 20D67 | Dopamine rootless | Ventura 13.4 / 22F66 | Primary and broadest validation target: native AGX desktop, window/fullscreen Host, 120-Hz paths, input/IME, VS Code, Steam, Office workloads, system apps and interop |
 | iPad14,5 (M2), iPadOS 16.0 / 20A8372 | Dopamine rootless | Ventura 13.4 / 22F66 | Exact MTLCompilerService UUID adapter, VS Code web rendering, Steam/arm64 Unity 7DTD, direct presentation and audio paths validated; coverage is narrower than M1 |
+| iPad14,3 (M2), iPadOS 16.5.1 / 20F75 | Dopamine rootless | Ventura 13.4 / 22F66 | Porting candidate only: the exact compiler identity, native AGX ABI and cold workspace startup are runtime-confirmed, but the device remained locked before final Host pixels, sequence advance and unlocked interaction could be accepted |
 | iPad13,7, iPadOS 16.6 | NathanLR | Ventura rootfs experiment | Unsupported: runtime-confirmed CoreTrust signing cannot admit the patched macOS shared-cache closure and AMFI rejects the helper; package install fails closed without `/var/jb/usr/bin/jbctl` |
 | Any other device/build | unknown | unknown | Porting target, not supported until its identities, ABI and runtime witnesses are added |
 
@@ -279,10 +280,14 @@ Input and interoperability:
   only after the Scene reports the lock active. Applications publish their
   relative-pointer request through the exact window catalog, so Host can enter
   and leave the mode automatically without a game bundle-ID allowlist. Direct
-  touch uses the same unbounded relative route. Absolute clicks retain the
-  validated AppKit backing-pixel geometry even when a direct drawable renders
-  at a different internal resolution; Host converts into presentation pixels
-  only for its own layer hit test. See
+  touch uses the same unbounded relative route. The first absolute-click
+  calibration was runtime-rejected: relabeling both the point and frame by the
+  same factor left Dock's normalized CGEvent coordinate unchanged. The current
+  follow-up preserves the real UIKit click, inverses the visible-source
+  transform and uses the exact AppInput PID/window route only for a completed,
+  identity-matched direct drawable. It is a guarded candidate, not an accepted
+  fix, until a fresh game run supplies the exact route log and visible-button
+  witness. See
   `docs/evidence/game-pointer-lock-and-click-geometry-20261006.md`.
 - Text, rich clipboard representations, files and cross-app drag use bounded,
   versioned payloads with origin/generation and path validation.
@@ -333,6 +338,73 @@ Application-specific memory:
   that to a new version or to unrecorded apps such as Edge/Asobi without a
   fresh visible-output and interaction witness.
 
+### iPadOS 16.5.1 porting facts retained from the 2026-10-06 run
+
+- The iPad14,3 / 20F75 compiler service is exact UUID
+  `B5CBF457-B300-3FD0-A646-1261DA6E86B0`. Its authenticated build calls are at
+  `+0x2050`, `+0x2558` and `+0x2590`; the diagnostic reply-data call is at
+  `+0x26d8`. Keep offsets and expected instruction words in one UUID profile;
+  never admit the UUID with offsets from an older executable.
+- AGX selector `0x100` is a per-user-client capability boundary. Ventura's
+  original `0x78` output request must run first. Retry the legacy `0x70` shape
+  only when that exact read-only call returns `kIOReturnBadArgument`. A native
+  `0x78` connection preserves its type-0 resource-create structure unchanged;
+  only a successful legacy retry enables the older layout translation. This
+  is runtime-confirmed by the native probe and WindowServer create trace, not
+  an OS-version guess.
+- On this rootless kernel, the packaged `/var/jb/usr` exposure may be the exact
+  absolute link `/var/mnt/rootfs/var/jb/usr -> /var/jb/usr` when bindfs is not
+  supported. Accept only that link and only while the packaged Dock proxy is
+  executable through it; arbitrary links and nonempty directories still fail
+  closed.
+- Procursus clang 16 paired with LLD 14 cannot resolve the iOS 16.5 TBD-v4
+  Objective-C entries required by MacWSHost. The same SDK and sources link with
+  the installed Apple `ld64` 951.9. Do not replace that capability check with
+  weak undefined symbols or dynamic lookup.
+- Cold start and WindowServer recovery must create navigation Spaces, persist
+  wallpaper through the still-responsive SkyLight generation, and only then
+  reload Dock. Runtime sampling found all 4,203 observations of the reversed
+  order blocked in `get_session_port`; extending the timeout is not a fix.
+- The complete evidence, including compiler hash/instructions, MPS output
+  identities, native AGX request bytes, startup trace, cleanup and the still
+  pending visible-output acceptance, is in
+  `docs/evidence/ipad14-3-ios1651-port-20261006.md`.
+
+### Recovered iPadOS 16.4.1 compatibility work (synchronized 2026-10-07)
+
+The sibling `macPad` repository still carried useful changes from commit
+`024c0fb` that had never reached this guide. They are now shared. The original
+standalone runtime logs were not committed, so the observations below remain
+historical reported witnesses and do not by themselves promote iPad13,11 /
+20E252 into the validated platform matrix. Obtain fresh visible/protocol
+acceptance before making that claim.
+
+- The historical iPad13,11 / iPadOS 16.4.1 run reported selector `0x100`
+  accepting `0x78` and rejecting `0x70`. Its first resource could arrive before
+  AGXMetal's own query, so every newly published AGX connection now performs
+  the bounded read-only `0x78`-then-BadArgument-`0x70` probe and records the
+  result per connection. Unknown results enable no legacy mutation.
+- A native-`0x78` connection preserves type-0 and type-`0x82` resource shapes
+  and command storage. The historical control reported 13 completed final
+  composites when native command storage was preserved, versus Metal internal
+  errors `0x102/0x103` when the legacy command compactor ran. The legacy
+  transforms now require a positively negotiated `0x70` profile.
+- `AudioRenderBridge` uses dyld interposition plus `RTLD_NEXT` for the Ventura
+  shared-cache AudioUnit entry points. The former Substrate inline hook was
+  reported to cross an unreadable page while sizing `AudioUnitSetProperty` and
+  SIGBUS utility processes such as `codesign`; do not restore shared-cache
+  instruction scanning.
+- A NAS-restored rootfs may retain foreign numeric ownership. Package repair is
+  deliberately bounded to the two split dyld-cache files and the project-owned
+  boot-trust/settings state directories; never recursively `chown` the rootfs.
+  The cfprefsd directory helper also creates the root Preferences hierarchy
+  with `0700` ownership/mode before first use.
+- `misc/agx_device_info_probe.c`,
+  `misc/agx_native_iokit_substrate_observer.c`, and
+  `misc/agx_native_request_probe.m` are diagnostic-only reproduction tools.
+  The observer may inline-hook only a disposable one-shot probe; production
+  `libmachook` must continue to use the versioned interposition path.
+
 ### Non-negotiable agent workflow
 
 For every new device, OS build, app version, feature or regression:
@@ -362,7 +434,9 @@ For every new device, OS build, app version, feature or regression:
    scripts and `git diff --check`.
 9. **Build the affected architectures.** `libmachook` requires both arm64 and
    arm64e thin installed images. SpringBoard code requires the validated
-   Apple-ld64 artifact; an on-device lld result is not interchangeable.
+   Apple-ld64 artifact; an on-device lld result is not interchangeable. On
+   iPadOS 16.5.1, MacWSHost also requires the installed Apple `ld64` because
+   Procursus LLD 14 fails valid UIKit TBD-v4 Objective-C symbols.
    MacWSWindowing must also carry the rootless
    `@rpath/CydiaSubstrate.framework/CydiaSubstrate` load command. A rootful
    `/Library/Frameworks/...` dependency passes signing and fixup checks but is
@@ -485,7 +559,7 @@ After every run, verify the cleanup command succeeded and inspect the process
 list. A forgotten benchmark or recursive log scan can materially heat the
 device and invalidate the next result.
 
-## Imported Project-Memory Ledger (complete audit: 2026-10-01)
+## Imported Project-Memory Ledger (complete audit: 2026-10-07)
 
 The former per-agent project memory directory contained one index and four
 topic files: macOS build SDK setup, Claude Code in the iOS chroot, the chroot
@@ -494,6 +568,19 @@ durable fact from those files into the repository. It is intentionally
 self-contained: do not depend on a private agent memory store or resurrect
 the old cross-references. Where a 2026-06 observation is historical, that is
 stated explicitly; current source and current build outputs take precedence.
+
+### Codex memory reconciliation (re-audited 2026-10-07)
+
+The Codex-local durable-memory sources were checked directly after the former
+per-agent ledger was imported. `$CODEX_HOME/memories/` contained no files,
+`$CODEX_HOME/memories_1.sqlite` contained zero `stage1_outputs` rows, and the
+global `$CODEX_HOME/AGENTS.md` contained no project memory. Codex rollout
+JSONL, history, shell snapshots and desktop project-selection state are
+conversation/operational records, not durable project-memory files, and were
+not promoted into repository facts. Therefore the four-topic ledger below is
+the complete imported local-memory set as of this audit;
+no additional Codex memory remained outside this repository. Future durable discoveries belong in
+this file and dated `docs/evidence/`, not in a private memory directory.
 
 ### autosignd on-demand signing (introduced 2026-06-11)
 

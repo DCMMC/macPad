@@ -18,6 +18,25 @@ proxy_relative=macOS/Frameworks/Dock.framework/Versions/A/XPCServices/DockHelper
     exit 1
 }
 [ -d "$parent_dir" ] || mkdir -p "$parent_dir"
+
+# Runtime-confirmed on iPad14,3 / iPadOS 16.5.1 (2026-10-06): this kernel
+# rejects bindfs, and the packaged mount_bindfs helper publishes the exact
+# source as an absolute symlink instead.  That is a valid persistent exposure,
+# but the old mount-only probe resolved the link and then treated the populated
+# source as an unsafe target on the next launch.  Accept only the helper's
+# exact source link and still require the packaged proxy through it; a link to
+# any other tree remains a hard failure.
+if [ -L "$target_dir" ]; then
+    [ "$(readlink "$target_dir")" = "$source_dir" ] || {
+        echo "MacWS: unexpected /var/jb/usr exposure link: $target_dir" >&2
+        exit 1
+    }
+    [ -x "$target_dir/$proxy_relative" ] || {
+        echo "MacWS: /var/jb/usr exposure link does not contain the XPC proxy" >&2
+        exit 1
+    }
+    exit 0
+fi
 [ -d "$target_dir" ] || mkdir -p "$target_dir"
 canonical_target=$(realpath "$target_dir")
 canonical_parent=$(realpath "$parent_dir")

@@ -57,13 +57,13 @@ static MacWSAudioRenderContext *gMacWSAudioContexts;
 static _Atomic(int) gMacWSSoftwareCadenceMode = -1;
 
 static void MacWSResolveAudioSymbols(void) {
-    // These entry points live in the Ventura shared cache.  Inline-hooking
+    // These entry points live in the Ventura shared cache. Inline-hooking
     // them with MSHookFunction asks Substrate to discover a function's length
-    // by reading forward through instructions.  Runtime-confirmed on the M1
+    // by reading forward through instructions. Runtime-confirmed on the M1
     // iPad13,11 cache: AudioUnitSetProperty is adjacent to an unreadable cache
     // page, so Substrate's findFunctionSize crossed that boundary and SIGBUS'd
     // every utility process which happened to load AudioToolbox (including
-    // /usr/bin/codesign).  Resolve the un-interposed implementations through
+    // /usr/bin/codesign). Resolve the un-interposed implementations through
     // RTLD_NEXT and let dyld's supported __interpose mechanism redirect calls;
     // no shared-cache text is scanned or modified.
     gMacWSOriginalAudioUnitSetProperty = (MacWSAudioUnitSetPropertyFn)

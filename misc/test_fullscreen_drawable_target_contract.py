@@ -186,8 +186,9 @@ class FullscreenDrawableTargetContract(unittest.TestCase):
         )[1].split("- (void)handleTouch:", 1)[0]
         self.assertIn("BOOL directVisualAuthority", route)
         self.assertIn(
-            "[self authoritativeFullscreenDrawableFrame] != nil", route
+            "[self authoritativeFullscreenDrawableFrame]", route
         )
+        self.assertIn("fullscreenDirectVisual != nil", route)
         self.assertIn(
             "!directVisualAuthority ? dockPID : visualPID", route
         )

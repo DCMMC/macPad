@@ -385,7 +385,8 @@ static void MacWSUE4MetalCommandBufferFailure(void *commandBufferReference) {
     NSError *error = nil;
     NSUInteger status = 0;
     if ([commandBuffer respondsToSelector:@selector(label)])
-        label = [commandBuffer label];
+        label = ((id (*)(id, SEL))objc_msgSend)(commandBuffer,
+                                                @selector(label));
     if ([commandBuffer respondsToSelector:@selector(status)])
         status = ((NSUInteger (*)(id, SEL))objc_msgSend)(
             commandBuffer, @selector(status));
@@ -776,12 +777,23 @@ static void MacWSSteamAbort(void) {
         strstr(caller.dli_fname, "/HIServices.framework/") &&
         caller.dli_fbase &&
         (uintptr_t)returnAddress - (uintptr_t)caller.dli_fbase == 0x7e50) {
-        uintptr_t callerFrame = (uintptr_t)__builtin_frame_address(1);
-        uintptr_t messageAddress = callerFrame - 0x1070;
         pthread_t thread = pthread_self();
         uintptr_t stackHigh = (uintptr_t)pthread_get_stackaddr_np(thread);
         size_t stackSize = pthread_get_stacksize_np(thread);
         uintptr_t stackLow = stackHigh - stackSize;
+        uintptr_t currentFrame = (uintptr_t)__builtin_frame_address(0);
+        uintptr_t callerFrame = 0;
+        if (currentFrame >= stackLow &&
+            currentFrame <= stackHigh - sizeof(callerFrame)) {
+            // arm64's frame record begins with the previous x29 value. Read
+            // it only after bounding the current record inside this thread's
+            // stack; __builtin_frame_address(1) is both unsafe and rejected by
+            // the strict production compiler.
+            memcpy(&callerFrame, (const void *)currentFrame,
+                   sizeof(callerFrame));
+        }
+        uintptr_t messageAddress = callerFrame >= 0x1070
+            ? callerFrame - 0x1070 : 0;
         if (callerFrame && messageAddress >= stackLow &&
             messageAddress + 1024 <= stackHigh) {
             fprintf(stderr,

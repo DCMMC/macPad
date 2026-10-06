@@ -31,8 +31,9 @@ guarantee for the current build.
   Control/Command chords.
 - A Game Camera input mode with iPadOS pointer lock, unbounded Magic Keyboard
   and direct-touch camera motion, automatic activation from an application's
-  relative-mouse request, and click calibration independent of a game's
-  dynamic render resolution.
+  relative-mouse request. The current absolute-click correction is a guarded
+  exact-window candidate and still needs fresh in-game acceptance; it is not
+  advertised as fixed.
 - iOS Chinese IME composition committed to the exact focused AppKit window.
 - Retina Standard and Larger UI modes; unbounded AppKit windows can grow beyond
   the virtual screen when the app itself has no size limit.
@@ -50,6 +51,7 @@ and recovery observer.
 | --- | --- | --- | --- |
 | iPad13,6 (M1), iPadOS 16.3.1 / 20D67 | Dopamine rootless | Ventura 13.4 / 22F66 | Primary and broadest validation target |
 | iPad14,5 (M2), iPadOS 16.0 / 20A8372 | Dopamine rootless | Ventura 13.4 / 22F66 | Display, input, audio, VS Code, Steam, and exact arm64 Unity game path validated with narrower coverage |
+| iPad14,3 (M2), iPadOS 16.5.1 / 20F75 | Dopamine rootless | Ventura 13.4 / 22F66 | Porting candidate: compiler/AGX/workspace startup reached runtime witnesses, but final unlocked Host pixels and interaction are still pending |
 | iPad13,7, iPadOS 16.6 | NathanLR | Ventura experiment | Unsupported by the current CoreTrust/signing chain |
 | Other devices/builds | unknown | unknown | Must be treated as a new port |
 

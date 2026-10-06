@@ -72,6 +72,44 @@ static inline bool MacWSMapPixelPointBetweenDomains(
     return true;
 }
 
+// Recover the destination point represented by a source point after Host has
+// mapped a normalized source crop over the complete destination. Absolute
+// fullscreen system input needs this inverse transform: the renderer may show
+// an entire direct drawable inside a desktop canvas rectangle while the input
+// record was initially expressed in the retained AppKit window domain.
+static inline bool MacWSMapVisibleSourcePointToDestination(
+        float sourceX, float sourceY,
+        float sourceWidth, float sourceHeight,
+        float visibleSourceX, float visibleSourceY,
+        float visibleSourceWidth, float visibleSourceHeight,
+        float destinationWidth, float destinationHeight,
+        float *destinationX, float *destinationY) {
+    if (!destinationX || !destinationY || !isfinite(sourceX) ||
+        !isfinite(sourceY) || !isfinite(sourceWidth) ||
+        !isfinite(sourceHeight) || !isfinite(visibleSourceX) ||
+        !isfinite(visibleSourceY) || !isfinite(visibleSourceWidth) ||
+        !isfinite(visibleSourceHeight) || !isfinite(destinationWidth) ||
+        !isfinite(destinationHeight) || sourceWidth <= 1.0f ||
+        sourceHeight <= 1.0f || visibleSourceWidth <= 0.0f ||
+        visibleSourceHeight <= 0.0f || destinationWidth <= 1.0f ||
+        destinationHeight <= 1.0f) return false;
+    float normalizedSourceX = sourceX / (sourceWidth - 1.0f);
+    float normalizedSourceY = sourceY / (sourceHeight - 1.0f);
+    float normalizedDestinationX =
+        (normalizedSourceX - visibleSourceX) / visibleSourceWidth;
+    float normalizedDestinationY =
+        (normalizedSourceY - visibleSourceY) / visibleSourceHeight;
+    if (!isfinite(normalizedDestinationX) ||
+        !isfinite(normalizedDestinationY)) return false;
+    normalizedDestinationX = MacWSClampFloat(
+        normalizedDestinationX, 0.0f, 1.0f);
+    normalizedDestinationY = MacWSClampFloat(
+        normalizedDestinationY, 0.0f, 1.0f);
+    *destinationX = normalizedDestinationX * (destinationWidth - 1.0f);
+    *destinationY = normalizedDestinationY * (destinationHeight - 1.0f);
+    return true;
+}
+
 // AppKit window geometry and UIKit Scene geometry are both expressed in
 // logical points. Retina backing scale belongs only to the IOSurface/drawable
 // pixel conversion; feeding it into native Scene geometry made the requested

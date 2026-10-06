@@ -1510,6 +1510,8 @@ static int MacWSSteamSemPost(sem_t *semaphore) {
     return result;
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static int MacWSSteamSemGetValue(sem_t *semaphore, int *value) {
     MacWSSteamSemaphoreHandle *handle = MacWSSteamSemaphoreFind(semaphore);
     if (!handle) return sem_getvalue(semaphore, value);
@@ -1705,6 +1707,7 @@ DYLD_INTERPOSE(MacWSSteamSemWait, sem_wait)
 DYLD_INTERPOSE(MacWSSteamSemTryWait, sem_trywait)
 DYLD_INTERPOSE(MacWSSteamSemPost, sem_post)
 DYLD_INTERPOSE(MacWSSteamSemGetValue, sem_getvalue)
+#pragma clang diagnostic pop
 DYLD_INTERPOSE(MacWSSteamUsleep, usleep)
 DYLD_INTERPOSE(MacWSSteamNanosleep, nanosleep)
 DYLD_INTERPOSE(MacWSSteamShmOpen, shm_open)

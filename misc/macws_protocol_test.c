@@ -324,6 +324,18 @@ int main(void) {
     assert(!MacWSMapPixelPointBetweenDomains(
         1.0f, 1.0f, 0.0f, 1668.0f,
         1280.0f, 894.0f, &presentationX, &presentationY));
+    // A direct drawable covers the complete iPad content rectangle, but its
+    // initial input point was encoded through a retained half-size canvas in
+    // a 2x AppKit backing domain. Inverting that source crop must recover the
+    // complete desktop coordinate instead of leaving the click in its left
+    // half.
+    assert(MacWSMapVisibleSourcePointToDestination(
+        (0.5f * 0.5f) * (2560.0f - 1.0f),
+        (0.5f * 0.5f) * (1788.0f - 1.0f),
+        2560.0f, 1788.0f, 0.0f, 0.0f, 0.5f, 0.5f,
+        2388.0f, 1668.0f, &presentationX, &presentationY));
+    assert(Near(presentationX, (2388.0f - 1.0f) * 0.5f));
+    assert(Near(presentationY, (1668.0f - 1.0f) * 0.5f));
     assert(MacWSComputeViewport(1000, 1600, 1200, 600, 10, -1, 2,
                                 &viewport));
     assert(Near(viewport.zoom, 2.0f));

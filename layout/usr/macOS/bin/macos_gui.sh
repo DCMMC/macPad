@@ -1113,7 +1113,11 @@ ensure_navigation_spaces() {
         return 1
     }
     rm -f "$LOGDIR/navigation-spaces.log"
-    /var/jb/usr/bin/timeout -k 2 20 \
+    # This late one-shot controller needs SkyLight IPC but creates no Metal
+    # device, input endpoint, or application window. Keep the static
+    # compatibility interposes under the exact headless-utility constructor
+    # scope used by the wallpaper controller below.
+    MACWS_UTILITY_PROCESS=1 /var/jb/usr/bin/timeout -k 2 20 \
         "$CHROOTEXEC" 0 0 "$ROOTFS" "$WORKSPACECTL_BIN" \
         ensure-navigation-spaces > "$LOGDIR/navigation-spaces.log" 2>&1
     rc=$?
@@ -1242,8 +1246,8 @@ start_ws_dependents_after_replacement() {
         workspace_waited=$((workspace_waited + 1))
     done
     ensure_navigation_spaces || return 1
-    refresh_dock_after_navigation_spaces || return 1
     apply_workspace_wallpaper || return 1
+    refresh_dock_after_navigation_spaces || return 1
     # Full-screen Mission Control drags must be posted from OSXvnc's real
     # WindowServer/CGS client. Keep that process alive even when remote RFB is
     # disabled; write_plists then binds its RFB listener to localhost only.
@@ -3891,7 +3895,12 @@ apply_workspace_wallpaper() {
         return 1
     fi
     rm -f "$LOGDIR/workspace-controller.log"
-    /var/jb/usr/bin/timeout -k 2 20 \
+    # This one-shot controller performs an AppKit/NSWorkspace IPC and never
+    # creates a Metal device, input endpoint, or application window. Preserve
+    # the static syscall/bootstrap interposes under the existing exact
+    # headless-utility constructor contract. The caller runs it before Dock
+    # rebinds its new workspace generation.
+    MACWS_UTILITY_PROCESS=1 /var/jb/usr/bin/timeout -k 2 20 \
         "$CHROOTEXEC" 0 0 "$ROOTFS" "$WORKSPACECTL_BIN" \
         set-wallpaper "$WORKSPACE_WALLPAPER" \
         > "$LOGDIR/workspace-controller.log" 2>&1
@@ -4267,13 +4276,19 @@ repair_desktop() {
             "$FINDER_DESKTOP_LABEL" "Finder desktop owner" || return 1
     fi
 
+    # Apply through the current, responsive SkyLight session before replacing
+    # Dock.  On iPad14,3 / 20F75, a fresh AppKit client launched after the
+    # replacement Dock blocked in SLSInitialize/get_session_port; a sample of
+    # that exact process retained all 4,203 main-thread observations in
+    # mach_msg2_trap.  The setting is persistent, so the replacement Dock
+    # consumes it when loaded.
+    apply_workspace_wallpaper || return 1
     reload_desktop_job "$DOCK_PLIST" "$DOCK_LABEL" \
         "Dock and desktop-picture owner" || return 1
     reload_desktop_job "$SYSTEMUI_PLIST" "$SYSTEMUI_LABEL" \
         "macOS SystemUIServer" || return 1
     reload_desktop_job "$CONTROL_CENTER_PLIST" "$CONTROL_CENTER_LABEL" \
         "macOS Control Center" || return 1
-    apply_workspace_wallpaper || return 1
     wait_for_desktop_input_route || return 1
     log "TIMING desktop-repair stage=desktop-agents-wallpaper seconds=$((SECONDS - stage_started)) total=$((SECONDS - repair_started))"
     stage_started=$SECONDS
@@ -4983,10 +4998,13 @@ start_macos() {
     # get_session_port. They are now bounded and run only after LaunchServices,
     # WindowServer, and all real Aqua session owners have explicit readiness
     # witnesses. Establish two adjacent native Spaces for continuous three-
-    # finger navigation, then apply the persisted high-resolution wallpaper.
+    # finger navigation. Apply the persisted high-resolution wallpaper while
+    # this SkyLight generation is responsive, then rebind Dock to the completed
+    # catalog. A new AppKit client launched after that rebind can block in the
+    # session-port lookup on iPad14,3 / 20F75.
     ensure_navigation_spaces || return 1
-    refresh_dock_after_navigation_spaces || return 1
     apply_workspace_wallpaper || return 1
+    refresh_dock_after_navigation_spaces || return 1
     wait_for_desktop_input_route || return 1
     log "TIMING start-macos stage=aqua-spaces-wallpaper seconds=$((SECONDS - macos_stage_started)) total=$((SECONDS - macos_started))"
     macos_stage_started=$SECONDS

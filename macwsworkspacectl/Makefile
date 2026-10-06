@@ -12,7 +12,12 @@ _THEOS_INTERNAL_IFLAGS_BASE = -I$(THEOS_TARGET_INCLUDE_PATH) \
 TOOL_NAME = macwsworkspacectl
 
 macwsworkspacectl_FILES = main.m
-macwsworkspacectl_CFLAGS = -fobjc-arc -Wall -Wextra
+# The synchronous LaunchServices call and Carbon PSN activation/reopen route
+# are deliberate compatibility contracts for short-lived and direct-chroot
+# applications. Newer SDKs deprecate them but their replacements do not expose
+# the same synchronous PID/PSN semantics used here.
+macwsworkspacectl_CFLAGS = -fobjc-arc -Wall -Wextra \
+	-Wno-deprecated-declarations
 macwsworkspacectl_FRAMEWORKS = AppKit ApplicationServices Foundation QuickLookThumbnailing
 macwsworkspacectl_CODESIGN_FLAGS = -S../layout/usr/macOS/bin/entitlements.plist
 macwsworkspacectl_INSTALL_PATH = /usr/macOS/bin

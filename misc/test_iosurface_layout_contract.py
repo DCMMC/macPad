@@ -24,6 +24,7 @@ class IOSurfaceLayoutContract(unittest.TestCase):
         prelude = r'''
 typedef int BOOL;
 #define NO 0
+#define __bridge
 typedef void *id;
 typedef void *SEL;
 typedef size_t NSUInteger;

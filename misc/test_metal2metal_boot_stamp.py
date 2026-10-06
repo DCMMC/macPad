@@ -142,7 +142,7 @@ class MetalOutputIdentity(unittest.TestCase):
     def test_unpinned_route_accepts_manifest_verified_output(self):
         self.assertTrue(self.allowed(""))
 
-    def test_ios_16_0_and_16_2_native_llvm_outputs_remain_pinned(self):
+    def test_validated_ios_native_llvm_outputs_remain_pinned(self):
         source = SCRIPT.read_text()
         for identity in (
             # Runtime-confirmed on iPad14,5 / iPadOS 16.0.
@@ -152,6 +152,11 @@ class MetalOutputIdentity(unittest.TestCase):
             # pass their complete 4119/4119 and 148/148 runtime manifests.
             "8744686cc7981601f52f658578b9cd94cf9127c86530ee03a1e68883d2e3bb0c",
             "fa6c9b109e9ab2a7356654bd16ba66715d4ac5a04eea75dec220418a01f90736",
+            # Runtime-manifest-confirmed on iPad14,3 / iPadOS 16.5.1. The
+            # package's fail-closed boundary regenerated the same MPSCore
+            # identity already present on disk before either was admitted.
+            "742ba3df747c39148bf3c5bd93e4ae0f94375cffdf8fac4951dd1dbab479b3c3",
+            "cd5b2086b26372a6486e1af69db612ac52f6228892673e15f5412643662498c5",
         ):
             self.assertIn(identity, source)
 

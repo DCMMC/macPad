@@ -175,6 +175,7 @@ class GamePointerLockContractTests(unittest.TestCase):
 
     def test_absolute_clicks_keep_appkit_geometry_across_direct_scaling(self):
         view = (ROOT / "MacWSHost/Rendering/MacWSMetalView.m").read_text()
+        viewport_math = (ROOT / "include/macws_viewport_math.h").read_text()
 
         self.assertIn("_authoritativeInputGeometryPID", view)
         self.assertIn("retainAuthoritativeInputGeometryForPID", view)
@@ -183,6 +184,23 @@ class GamePointerLockContractTests(unittest.TestCase):
         self.assertIn("pointer-click-map", view)
         self.assertIn("MacWSInputPointInPresentationSpace", view)
         self.assertIn("MacWSMapPixelPointBetweenDomains", view)
+        self.assertIn(
+            "MacWSMapVisibleSourcePointToDestination", viewport_math
+        )
+        self.assertIn("fullscreen-direct-pointer-map", view)
+        self.assertIn("exactDirectInputGeometry", view)
+        self.assertIn("route=exact-app-input", view)
+        self.assertIn(
+            "record->sceneID = MacWSInputSceneForWindow(", view
+        )
+        self.assertNotIn(
+            "self.window.windowScene.screen.bounds", view
+        )
+        self.assertNotRegex(
+            view,
+            r"gamePointerCaptureReady\]\) \{\s+"
+            r"framePoint = CGPointMake\(inputWidth \* 0\.5",
+        )
         self.assertRegex(
             view,
             r"resolveFullscreenLayerAtPoint:\s*"

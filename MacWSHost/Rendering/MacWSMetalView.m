@@ -5395,6 +5395,8 @@ static CGPoint MacWSInputPointInPresentationSpace(
     uint32_t presentationHeight = [self currentFrameHeight];
     CGPoint presentationPoint = MacWSInputPointInPresentationSpace(
         record, presentationWidth, presentationHeight);
+    MacWSCatalystDrawableFrame *fullscreenDirectVisual =
+        [self authoritativeFullscreenDrawableFrame];
     BOOL globalPointer =
         record->kind == MacWSInputKindTouchDown ||
         record->kind == MacWSInputKindTouchMove ||
@@ -5405,6 +5407,76 @@ static CGPoint MacWSInputPointInPresentationSpace(
         record->kind == MacWSInputKindTap ||
         record->kind == MacWSInputKindSecondaryTap;
     if (globalPointer) {
+        // A completed direct drawable with an exact PID/window join is not a
+        // generic desktop hit. Deliver its button transaction through that
+        // application's AppInput endpoint in the window's own backing-pixel
+        // domain. The old fullscreen route posted it through Dock as a global
+        // CGEvent; game-camera mode simultaneously replaced every UIKit click
+        // with the canvas center, so a visible in-game button could never
+        // receive the point the user actually pressed.
+        //
+        // Recover the point inside the complete direct drawable by inverting
+        // the same visible-source transform used by Metal. Do not involve the
+        // iPad UIScreen bounds here: they are UIKit points and are unrelated
+        // to either the macOS desktop or this exact AppKit window.
+        BOOL exactDirectInputGeometry = fullscreenDirectVisual &&
+            _authoritativeInputGeometryPID == self.targetPID &&
+            _authoritativeInputGeometryWindowID ==
+                _reportedFullscreenCanvasWindowID &&
+            _authoritativeInputGeometryWidth != 0 &&
+            _authoritativeInputGeometryHeight != 0 &&
+            MacWSAppInputEndpointReady(self.targetPID);
+        if (exactDirectInputGeometry) {
+            float localX = 0.0f;
+            float localY = 0.0f;
+            uint32_t sourceWidth = record->frameWidth;
+            uint32_t sourceHeight = record->frameHeight;
+            CGPoint sourcePoint = CGPointMake(record->x, record->y);
+            if (MacWSMapVisibleSourcePointToDestination(
+                    record->x, record->y,
+                    record->frameWidth, record->frameHeight,
+                    CGRectGetMinX(_visibleSourceRect),
+                    CGRectGetMinY(_visibleSourceRect),
+                    CGRectGetWidth(_visibleSourceRect),
+                    CGRectGetHeight(_visibleSourceRect),
+                    _authoritativeInputGeometryWidth,
+                    _authoritativeInputGeometryHeight,
+                    &localX, &localY)) {
+                uint32_t modifiers =
+                    MacWSInputModifiersForScene(record->sceneID);
+                record->x = localX;
+                record->y = localY;
+                record->frameWidth = _authoritativeInputGeometryWidth;
+                record->frameHeight = _authoritativeInputGeometryHeight;
+                record->targetPID = self.targetPID;
+                record->sceneID = MacWSInputSceneForWindow(
+                    _reportedFullscreenCanvasWindowID, modifiers);
+                record->flags &= ~MacWSInputFlagGlobalSystemSurface;
+                if (presentationTargetPID)
+                    *presentationTargetPID = self.targetPID;
+                if (MacWSHostTouchDiagnosticsEnabled() &&
+                    (record->kind == MacWSInputKindTouchDown ||
+                     record->kind == MacWSInputKindTap ||
+                     record->kind == MacWSInputKindSecondaryTap)) {
+                    MacWSLog(@"fullscreen-direct-pointer-map pid=%d "
+                             "window=%u source=(%.2f,%.2f)/%ux%u "
+                             "visible=(%.6f,%.6f %.6fx%.6f) "
+                             "local=(%.2f,%.2f)/%ux%u "
+                             "route=exact-app-input",
+                             self.targetPID,
+                             _reportedFullscreenCanvasWindowID,
+                             sourcePoint.x, sourcePoint.y,
+                             sourceWidth, sourceHeight,
+                             CGRectGetMinX(_visibleSourceRect),
+                             CGRectGetMinY(_visibleSourceRect),
+                             CGRectGetWidth(_visibleSourceRect),
+                             CGRectGetHeight(_visibleSourceRect),
+                             localX, localY,
+                             record->frameWidth, record->frameHeight);
+                }
+                return YES;
+            }
+        }
         // A fullscreen desktop is one WindowServer input surface, just like a
         // physical Mac display or OSXvnc.  Do not route pointer input into the
         // AppKit process whose *captured* pixels happen to be under the
@@ -5432,6 +5504,9 @@ static CGPoint MacWSInputPointInPresentationSpace(
                 record->contactID ==
                     _fullscreenGlobalPointerPresentationContactID) {
                 visualPID = _fullscreenGlobalPointerPresentationPID;
+            } else if (fullscreenDirectVisual) {
+                visualPID = self.targetPID;
+                visualWindowID = _reportedFullscreenCanvasWindowID;
             } else {
                 (void)[self resolveFullscreenLayerAtPoint:
                     presentationPoint pid:&visualPID
@@ -5456,7 +5531,7 @@ static CGPoint MacWSInputPointInPresentationSpace(
                 // Control cards still use Dock because they have no such
                 // authoritative application drawable.
                 BOOL directVisualAuthority = visualPID == self.targetPID &&
-                    [self authoritativeFullscreenDrawableFrame] != nil;
+                    fullscreenDirectVisual != nil;
                 *presentationTargetPID =
                     (record->flags & MacWSInputFlagLatencyDiagnostic) &&
                     !directVisualAuthority ? dockPID : visualPID;
@@ -6031,10 +6106,7 @@ static CGPoint MacWSInputPointInPresentationSpace(
     uint32_t inputHeight = 0;
     [self currentInputFrameWidth:&inputWidth height:&inputHeight];
     if (inputWidth == 0 || inputHeight == 0) return;
-    if (touch.type == UITouchTypeIndirectPointer &&
-        [self gamePointerCaptureReady]) {
-        framePoint = CGPointMake(inputWidth * 0.5, inputHeight * 0.5);
-    } else if (![self framePointForViewPoint:viewPoint output:&framePoint
+    if (![self framePointForViewPoint:viewPoint output:&framePoint
                           clampContinuationToContent:pointerContinuation]) {
         return;
     }

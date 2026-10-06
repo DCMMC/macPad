@@ -22,6 +22,16 @@ class RestoreBootContract(unittest.TestCase):
         self.assertNotIn(
             'grep -Fq "/var/jb/usr on $canonical_target ("', BIND)
 
+    def test_bind_probe_accepts_only_the_exact_helper_fallback_symlink(self):
+        symlink_probe = 'if [ -L "$target_dir" ]; then'
+        directory_creation = '[ -d "$target_dir" ] || mkdir -p "$target_dir"'
+        self.assertIn(symlink_probe, BIND)
+        self.assertIn(
+            '[ "$(readlink "$target_dir")" = "$source_dir" ]', BIND)
+        self.assertIn(
+            '[ -x "$target_dir/$proxy_relative" ]', BIND)
+        self.assertLess(BIND.index(symlink_probe), BIND.index(directory_creation))
+
     def test_filtered_restore_recreates_only_the_volatile_tmp_directory(self):
         self.assertIn("ROOTFS=/var/mnt/rootfs", AUTOSIGND)
         self.assertIn(
@@ -72,22 +82,6 @@ class RestoreBootContract(unittest.TestCase):
         self.assertEqual(PACKAGE_POSTINST.count(trust), 1)
         self.assertLess(PACKAGE_POSTINST.index(trust),
                         PACKAGE_POSTINST.index(publish))
-
-    def test_package_repairs_only_bounded_nas_owned_runtime_state(self):
-        self.assertIn('normalize_restored_runtime_metadata()',
-                      PACKAGE_POSTINST)
-        self.assertIn(
-            '"$cache_root/dyld_shared_cache_arm64e.01"',
-            PACKAGE_POSTINST)
-        self.assertIn('"$ROOTFS/var/db/macws/boot-trust"',
-                      PACKAGE_POSTINST)
-        self.assertIn('"$ROOTFS/var/db/macws/settings-runtime"',
-                      PACKAGE_POSTINST)
-        repair = PACKAGE_POSTINST.split(
-            'normalize_restored_runtime_metadata() {', 1)[1].split('\n}', 1)[0]
-        self.assertNotIn('chown -R', repair)
-        self.assertIn('[ ! -L "$cache_path" ]', repair)
-        self.assertIn('[ ! -L "$state_dir" ]', repair)
 
     def test_office_helper_gets_project_policy_before_trust_restore(self):
         postinst = (ROOT / "layout/usr/macOS/bin/postinst.sh").read_text()

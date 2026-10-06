@@ -80,7 +80,12 @@ RSYNC_EXCLUDES=(
     --exclude=.theos/
     --exclude='*/.theos/'
     --exclude=packages/
-    --exclude=docs/
+    # The production-policy admission check reads this authoritative manifest
+    # on-device.  Keep the much larger evidence/documentation tree out of the
+    # source overlay while making a fresh-device full build self-contained.
+    --include=docs/
+    --include=docs/runtime-switches.tsv
+    --exclude='docs/*'
     --exclude='*.deb'
     --exclude='__pycache__/'
     --exclude='*.pyc'
@@ -566,6 +571,14 @@ build_full() {
     run_privileged_device_script <<REMOTE
 set -euo pipefail
 cd '$REMOTE_PROJECT'
+# A manually inspected or recovery build may have run under sudo and left the
+# shared Theos cache root-owned.  Full builds normally run as mobile after the
+# sudo ticket is validated; normalize only when ownership drift is actually
+# present so Swift's
+# before-all marker cleanup and the incremental object graph remain usable.
+if find .theos ! -user "\$(id -u)" -print -quit 2>/dev/null | grep -q .; then
+    sudo chown -R "\$(id -u):\$(id -g)" .theos
+fi
 THEOS='$THEOS_PATH' bash misc/build_on_ios.sh --resume
 REMOTE
 }

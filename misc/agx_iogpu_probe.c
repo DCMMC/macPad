@@ -92,6 +92,7 @@ static int load_libjb(void) {
 
 typedef enum {
     kProbeFieldsOnly,
+    kProbeDeviceInfoOnly,
     kProbeQueueOnly,
     kProbeExercise,
 } probe_mode_t;
@@ -217,6 +218,26 @@ static void probe_one(const char *match_class, uint32_t type,
     if (mode == kProbeFieldsOnly) {
         fprintf(stderr,
                 "  fields-only: skipping resource/queue call tests\n");
+        IOServiceClose(conn);
+        return;
+    }
+
+    // Selector 0x100 is a read-only device-information query used by AGX's
+    // setupImmediate path. Kernel builds hard-check its output structure
+    // length. Probe a small, explicit set of known/adjacent ABI sizes so a
+    // new OS adapter can be pinned to runtime evidence instead of broadening
+    // the production clamp or suppressing the driver's initialization error.
+    if (mode == kProbeDeviceInfoOnly) {
+        static const size_t sizes[] = {0x68, 0x70, 0x78, 0x80};
+        for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+            unsigned char out_info[0x80] = {0};
+            size_t out_size = sizes[i];
+            kr = IOConnectCallStructMethod(conn, 0x100, NULL, 0,
+                out_info, &out_size);
+            fprintf(stderr,
+                "  sel=0x100 requested=%#zx returned=%#zx -> kr=%#x %s\n",
+                sizes[i], out_size, kr, kr == 0 ? "(OK)" : "(FAIL)");
+        }
         IOServiceClose(conn);
         return;
     }
@@ -463,6 +484,8 @@ int main(int argc, char **argv) {
     probe_mode_t mode = kProbeFieldsOnly;
     if (argc > 3 && strcmp(argv[3], "queue") == 0) {
         mode = kProbeQueueOnly;
+    } else if (argc > 3 && strcmp(argv[3], "info") == 0) {
+        mode = kProbeDeviceInfoOnly;
     } else if (argc > 3 && strcmp(argv[3], "exercise") == 0) {
         mode = kProbeExercise;
     }

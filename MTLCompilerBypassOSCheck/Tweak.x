@@ -386,13 +386,12 @@ static void InstallMetalCachePathAdapter(void) {
 // original compiler entry point; no compiler result or loader validation is
 // bypassed.
 //
-// MTLCompilerService 6D2CFE56-8D88-39AA-BC25-7FFE5058ED4E has three calls to
-// the same service-vtable +0x18 build slot.  `_compileRequestMain` calls it at
-// __TEXT+0x20e8 through `blraaz x9` (0xd63f093f).  The XPC handler calls it at
-// __TEXT+0x25f0 when the hang timer is active and at __TEXT+0x2628 when
-// MTL_HANG_TIMER_LENGTH_IN_SECONDS is less than one; those two instructions
-// are `blraaz x8` (0xd63f091f).  The worker entry loads the same six-argument
-// ABI from its context before the call: service, plugin/request identifiers,
+// MTLCompilerService uses three calls to the same service-vtable +0x18 build
+// slot. The exact offsets are executable-identity-specific and live in the
+// UUID profiles below. In every admitted profile `_compileRequestMain` uses
+// `blraaz x9` (0xd63f093f); the hang-timer and no-timer XPC paths use
+// `blraaz x8` (0xd63f091f). The worker entry loads the same six-argument ABI
+// from its context before the call: service, plugin/request identifiers,
 // request bytes, request length, and result storage.
 //
 // Runtime-confirmed 2026-07-28: adapting only +0x25f0/+0x2628 let Chromium's
@@ -608,8 +607,8 @@ static uint64_t MacWSFNV1a64(const void *data, size_t length) {
 }
 
 // The compiler result is wrapped into XPC data immediately after the build
-// call returns on the same request-handler thread (RE-confirmed in the
-// UUID-locked executable at __TEXT+0x25f0/+0x2628 followed by +0x2770).
+// call returns on the same request-handler thread (RE-confirmed in every
+// UUID-locked executable profile below).
 // Preserve only diagnostic correlation metadata across that boundary.  The
 // request and result bytes themselves remain owned and consumed by Apple's
 // original implementation.
@@ -759,10 +758,10 @@ static void DumpRawCompilerRequest(uint32_t sequence, uintptr_t discriminator,
                 requestSize - remaining, requestSize);
 }
 
-// Read-only compiler-result witness.  MTLCompilerService's exact executable
-// reply block calls xpc_data_create at UUID-locked __TEXT+0x2770 with the
-// compiler result bytes and length.  The adapter redirects only that BL here,
-// records the returned container verbatim, then calls the real XPC API.  No
+// Read-only compiler-result witness. MTLCompilerService's exact executable
+// reply block calls xpc_data_create at the UUID-profiled reply offset with the
+// compiler result bytes and length. The adapter redirects only that BL here,
+// records the returned container verbatim, then calls the real XPC API. No
 // result bytes or status are changed.
 static void *MacWSCompilerReplyDataCreate(const void *bytes, size_t length) {
     if (!MacWSCompilerDiagnosticsEnabled()) return xpc_data_create(bytes, length);
@@ -1031,26 +1030,75 @@ static uintptr_t MacWSMTLCodeGenServiceBuildRequest(
 
 static void InstallMacOSMetalTargetAdapter(void) {
     // RE-confirmed from the complete executables, not inferred from the OS
-    // version.  Both images have the same three authenticated build-call
+    // version. All admitted images have the same three authenticated build-call
     // sites and the same reply call:
     //
-    //   iOS 16.3.1 (20D67) UUID 6D2CFE56-8D88-39AA-BC25-7FFE5058ED4E
+    //   iOS 16.3.1 (20D67)  UUID 6D2CFE56-8D88-39AA-BC25-7FFE5058ED4E
     //   iOS 16.0   (20A8372) UUID B4745394-88D0-3739-9E17-4DE2FB12B00E
+    //   iOS 16.5.1 (20F75)  UUID B5CBF457-B300-3FD0-A646-1261DA6E86B0
     //
     // The 20A8372 executable has SHA-256
     // 2f980bfb46e3d97c5a330f54c158b41de21793ec113f3d33891e3599e75faba5;
     // otool disassembly confirms +0x20e8 is `blraaz x9`, +0x25f0 and
     // +0x2628 are `blraaz x8`, and +0x2770 is the same xpc_data_create BL.
-    // Keep an exact UUID allowlist in addition to the per-instruction checks
-    // below so an unexamined service build always retains stock behavior.
-    static const uint8_t expectedUUIDs[][16] = {
+    // The 20F75 executable has SHA-256
+    // 4f8475c2ffeae25f35d36ba2614a8986941f904439d46f1295546ca4ef758e5a.
+    // RE-confirmed from that exact file: the same semantic calls are at
+    // +0x2050/+0x2558/+0x2590, and +0x26d8 is `bl _xpc_data_create` with
+    // encoding 0x940004ae. Do not combine its UUID with the older offsets:
+    // doing so would pass identity but fail the instruction invariant.
+    //
+    // Keep offsets and expected instructions in the same exact UUID profile
+    // so an unexamined service build always retains stock behavior.
+    struct MacWSTargetAdapterCallSite {
+        uintptr_t offset;
+        uint32_t expected;
+    };
+    struct MacWSTargetAdapterProfile {
+        uint8_t uuid[16];
+        struct MacWSTargetAdapterCallSite callSites[3];
+        uintptr_t replyOffset;
+        uint32_t expectedReplyCall;
+    };
+    static const struct MacWSTargetAdapterProfile profiles[] = {
         {
-            0x6d, 0x2c, 0xfe, 0x56, 0x8d, 0x88, 0x39, 0xaa,
-            0xbc, 0x25, 0x7f, 0xfe, 0x50, 0x58, 0xed, 0x4e,
+            .uuid = {
+                0x6d, 0x2c, 0xfe, 0x56, 0x8d, 0x88, 0x39, 0xaa,
+                0xbc, 0x25, 0x7f, 0xfe, 0x50, 0x58, 0xed, 0x4e,
+            },
+            .callSites = {
+                {0x20e8, 0xd63f093f},
+                {0x25f0, 0xd63f091f},
+                {0x2628, 0xd63f091f},
+            },
+            .replyOffset = 0x2770,
+            .expectedReplyCall = 0x9400047c,
         },
         {
-            0xb4, 0x74, 0x53, 0x94, 0x88, 0xd0, 0x37, 0x39,
-            0x9e, 0x17, 0x4d, 0xe2, 0xfb, 0x12, 0xb0, 0x0e,
+            .uuid = {
+                0xb4, 0x74, 0x53, 0x94, 0x88, 0xd0, 0x37, 0x39,
+                0x9e, 0x17, 0x4d, 0xe2, 0xfb, 0x12, 0xb0, 0x0e,
+            },
+            .callSites = {
+                {0x20e8, 0xd63f093f},
+                {0x25f0, 0xd63f091f},
+                {0x2628, 0xd63f091f},
+            },
+            .replyOffset = 0x2770,
+            .expectedReplyCall = 0x9400047c,
+        },
+        {
+            .uuid = {
+                0xb5, 0xcb, 0xf4, 0x57, 0xb3, 0x00, 0x3f, 0xd0,
+                0xa6, 0x46, 0x12, 0x61, 0xda, 0x6e, 0x86, 0xb0,
+            },
+            .callSites = {
+                {0x2050, 0xd63f093f},
+                {0x2558, 0xd63f091f},
+                {0x2590, 0xd63f091f},
+            },
+            .replyOffset = 0x26d8,
+            .expectedReplyCall = 0x940004ae,
         },
     };
     const struct mach_header_64 *mh = NULL;
@@ -1070,18 +1118,18 @@ static void InstallMacOSMetalTargetAdapter(void) {
     }
     const struct load_command *lc =
         (const struct load_command *)((const uint8_t *)mh + sizeof(*mh));
-    bool uuidMatches = false;
+    const struct MacWSTargetAdapterProfile *profile = NULL;
     uint8_t actualUUID[16] = {0};
     for (uint32_t i = 0; i < mh->ncmds; i++) {
         if (lc->cmd == LC_UUID) {
             const struct uuid_command *uc = (const struct uuid_command *)lc;
             memcpy(actualUUID, uc->uuid, sizeof(actualUUID));
             for (size_t candidate = 0;
-                 candidate < sizeof(expectedUUIDs) / sizeof(expectedUUIDs[0]);
+                 candidate < sizeof(profiles) / sizeof(profiles[0]);
                  candidate++) {
-                if (memcmp(actualUUID, expectedUUIDs[candidate],
+                if (memcmp(actualUUID, profiles[candidate].uuid,
                            sizeof(actualUUID)) == 0) {
-                    uuidMatches = true;
+                    profile = &profiles[candidate];
                     break;
                 }
             }
@@ -1089,7 +1137,7 @@ static void InstallMacOSMetalTargetAdapter(void) {
         }
         lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
     }
-    if (!uuidMatches) {
+    if (!profile) {
         MTLPatchLog("target adapter: MTLCompilerService UUID mismatch "
                     "%02x%02x%02x%02x-%02x%02x-%02x%02x-"
                     "%02x%02x-%02x%02x%02x%02x%02x%02x",
@@ -1103,15 +1151,6 @@ static void InstallMacOSMetalTargetAdapter(void) {
     OrigMTLCodeGenServiceBuildRequest =
         (MTLCodeGenServiceBuildRequestFn)dlsym(
             RTLD_DEFAULT, "MTLCodeGenServiceBuildRequest");
-    struct MacWSTargetAdapterCallSite {
-        uintptr_t offset;
-        uint32_t expected;
-    };
-    static const struct MacWSTargetAdapterCallSite callSites[] = {
-        {0x20e8, 0xd63f093f}, // _compileRequestMain: blraaz x9
-        {0x25f0, 0xd63f091f}, // XPC handler, hang timer: blraaz x8
-        {0x2628, 0xd63f091f}, // XPC handler, no timer: blraaz x8
-    };
     if (!OrigMTLCodeGenServiceBuildRequest) {
         MTLPatchLog("target adapter: symbol unavailable");
         OrigMTLCodeGenServiceBuildRequest = NULL;
@@ -1126,14 +1165,14 @@ static void InstallMacOSMetalTargetAdapter(void) {
         OrigMTLCodeGenServiceBuildRequest = NULL;
         return;
     }
-    uint32_t branches[sizeof(callSites) / sizeof(callSites[0])] = {0};
-    for (size_t i = 0; i < sizeof(callSites) / sizeof(callSites[0]); i++) {
+    uint32_t branches[3] = {0};
+    for (size_t i = 0; i < 3; i++) {
         uint32_t *callSite =
-            (uint32_t *)((uintptr_t)mh + callSites[i].offset);
+            (uint32_t *)((uintptr_t)mh + profile->callSites[i].offset);
         intptr_t delta = (intptr_t)target - (intptr_t)callSite;
-        if (*callSite != callSites[i].expected) {
+        if (*callSite != profile->callSites[i].expected) {
             MTLPatchLog("target adapter: validation failed offset=%#lx site=%p insn=%#x",
-                        (unsigned long)callSites[i].offset, callSite,
+                        (unsigned long)profile->callSites[i].offset, callSite,
                         *callSite);
             OrigMTLCodeGenServiceBuildRequest = NULL;
             return;
@@ -1141,7 +1180,7 @@ static void InstallMacOSMetalTargetAdapter(void) {
         if ((delta & 3) != 0 || delta < -(1LL << 27) ||
             delta >= (1LL << 27)) {
             MTLPatchLog("target adapter: wrapper out of BL range offset=%#lx site=%p target=%#lx delta=%#lx",
-                        (unsigned long)callSites[i].offset, callSite,
+                        (unsigned long)profile->callSites[i].offset, callSite,
                         (unsigned long)target, (unsigned long)delta);
             OrigMTLCodeGenServiceBuildRequest = NULL;
             return;
@@ -1149,21 +1188,23 @@ static void InstallMacOSMetalTargetAdapter(void) {
         branches[i] = 0x94000000u |
             ((uint32_t)((uint64_t)(delta >> 2) & 0x03ffffffu));
     }
-    for (size_t i = 0; i < sizeof(callSites) / sizeof(callSites[0]); i++) {
+    for (size_t i = 0; i < 3; i++) {
         uint32_t *callSite =
-            (uint32_t *)((uintptr_t)mh + callSites[i].offset);
+            (uint32_t *)((uintptr_t)mh + profile->callSites[i].offset);
         PatchInstruction(callSite, branches[i]);
         MTLPatchLog("target adapter installed offset=%#lx site=%p old=%#x new=%#x wrapper=%#lx orig=%p",
-                    (unsigned long)callSites[i].offset, callSite,
-                    callSites[i].expected, *callSite, (unsigned long)target,
+                    (unsigned long)profile->callSites[i].offset, callSite,
+                    profile->callSites[i].expected, *callSite,
+                    (unsigned long)target,
                     OrigMTLCodeGenServiceBuildRequest);
     }
 
     // Reply dumping is a bounded diagnostic witness, not runtime machinery.
     // Never patch the stock iOS reply path in production.
     if (MacWSCompilerDiagnosticsEnabled()) {
-        uint32_t *replyDataSite = (uint32_t *)((uintptr_t)mh + 0x2770);
-        const uint32_t expectedReplyCall = 0x9400047c; // bl _xpc_data_create stub
+        uint32_t *replyDataSite =
+            (uint32_t *)((uintptr_t)mh + profile->replyOffset);
+        const uint32_t expectedReplyCall = profile->expectedReplyCall;
         uintptr_t replyTarget = StripPAC((const void *)MacWSCompilerReplyDataCreate);
         // Architectural stripping preserves the exact four-byte-aligned
         // entry; never compensate by searching neighboring instructions.
