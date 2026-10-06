@@ -15,10 +15,44 @@ class AgentsMemoryLedgerContract(unittest.TestCase):
             "$CODEX_HOME/memories_1.sqlite",
             "zero `stage1_outputs` rows",
             "zero jobs",
-            "`memory_mode=enabled`",
-            "no injected memory block",
-            "no unmatched durable project fact remained",
+            "do **not** imply that Codex has no",
             "live shared-agent project memory directory contains one index and four",
+        ):
+            self.assertIn(witness, AGENTS)
+
+    def test_codex_thread_compaction_memory_is_recorded(self):
+        for witness in (
+            "Codex thread-compaction memory (corrected audit: 2026-10-07)",
+            "38 Codex threads",
+            "14 threads with indexed compactions",
+            "1,092 `contextCompaction` items",
+            "$CODEX_HOME/thread_history_1.sqlite",
+            "$CODEX_HOME/sqlite/codex-dev.db",
+            "$CODEX_HOME/sqlite/codex-thread-summaries-dev.db",
+            "replacement history",
+            "encrypted compaction object",
+            "the compaction and retained histories are real",
+        ):
+            self.assertIn(witness, AGENTS)
+
+    def test_codex_recovered_runtime_facts_are_retained(self):
+        for witness in (
+            "native-agx-vnc-multiapp-soak-20260728.txt",
+            "Google Chrome `150.0.7871.187`",
+            "destroy 0x19 -> 0x15",
+            "91/91 timer queries",
+            "about 11.01 FPS",
+            "56.40 FPS",
+            "50.312-FPS median",
+            "26.103-FPS median",
+            "430/430 valid Stray libraries",
+            "`r.EyeAdaptationQuality=0`",
+            "generic `waitUntilCompleted` bypass",
+            "Steam semaphore protocol v23",
+            "validated `-applaunch` AppID",
+            "CF853BBD-01B6-3F46-ADA1-EC70FD2DC9DC",
+            "kTCCServiceSystemPolicyAllFiles",
+            "452 seconds were the existing",
         ):
             self.assertIn(witness, AGENTS)
 

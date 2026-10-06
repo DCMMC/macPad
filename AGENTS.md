@@ -559,7 +559,7 @@ After every run, verify the cleanup command succeeded and inspect the process
 list. A forgotten benchmark or recursive log scan can materially heat the
 device and invalidate the next result.
 
-## Imported Project-Memory Ledger (complete audit: 2026-10-07)
+## Local Agent and Codex Project-Memory Ledger (complete audit: 2026-10-07)
 
 The live shared-agent project memory directory contains one index and four
 topic files: macOS build SDK setup, Claude Code in the iOS chroot, the chroot
@@ -568,6 +568,8 @@ durable fact from those files into the repository. It is intentionally
 self-contained: do not depend on a private agent memory store or resurrect
 the old cross-references. Where a 2026-06 observation is historical, that is
 stated explicitly; current source and current build outputs take precedence.
+The later Codex subsection separately audits thread-compaction memory and the
+plaintext history from which its durable facts were recovered.
 
 ### Local agent-memory reconciliation (corrected audit: 2026-10-07)
 
@@ -589,18 +591,161 @@ fields are memory-system bookkeeping, not runtime project facts. The source
 filenames and every durable technical statement are retained below; private
 absolute usernames and the obsolete hard-coded deployment address are not.
 
-The Codex-native stores were also checked directly. `$CODEX_HOME/memories/`
-contained no files. `$CODEX_HOME/memories_1.sqlite` was present; it had
-zero `stage1_outputs` rows and zero jobs. The global `$CODEX_HOME/AGENTS.md`
-contained no project memory. `state_5.sqlite` records project threads with
-`memory_mode=enabled`, but that field is configuration, not memory content;
-the corresponding rollout JSONL files contain no injected memory block.
-Codex rollout JSONL, history, shell snapshots and desktop project-selection
-state remain conversation/operational records and were not promoted wholesale
-into repository facts. Thus the live five-file shared-agent source is fully
-mirrored by this ledger, and no unmatched durable project fact remained after
-this corrected audit. Future durable discoveries belong here and in dated
-`docs/evidence/`, not only in a private memory directory.
+The dedicated Codex long-term-memory stores were also checked directly.
+`$CODEX_HOME/memories/` contained no files. `$CODEX_HOME/memories_1.sqlite`
+was present; it had zero `stage1_outputs` rows and zero jobs. The global
+`$CODEX_HOME/AGENTS.md` contained no project memory. Those observations apply
+only to the dedicated memory pipeline; they do **not** imply that Codex has no
+project memory. Codex thread compactions are a second, separate store and are
+audited below. The five-file shared-agent source is fully mirrored by the four
+topic sections below.
+
+### Codex thread-compaction memory (corrected audit: 2026-10-07)
+
+The earlier audit incorrectly classified Codex rollout/history state as mere
+operational data. For this repository it is a large project-memory source.
+The corrected pre-import snapshot, selected by exact repository `cwd`, found:
+
+- 38 Codex threads in `$CODEX_HOME/state_5.sqlite`;
+- 14 threads with indexed compactions;
+- 1,092 `contextCompaction` items in
+  `$CODEX_HOME/thread_history_1.sqlite`;
+- 12,828 agent messages, 716 user messages and 7,597 file-change records in
+  those project threads;
+- additional local thread catalog and short-summary indexes in
+  `$CODEX_HOME/sqlite/codex-dev.db` and
+  `$CODEX_HOME/sqlite/codex-thread-summaries-dev.db`.
+
+A `contextCompaction` history row contains only an item ID. The corresponding
+rollout JSONL has a `compacted` record containing replacement history,
+guardian history, retained context and an encrypted compaction object. A
+filename search below `$CODEX_HOME/memories/`, or a text search for a literal
+`<memories>` block, therefore misses it. `memory_mode=enabled` is still only
+thread configuration, but the compaction and retained histories are real
+Codex working memory.
+
+The audit read the plaintext user/agent history for all exact-CWD threads,
+deduplicated forked conversations, and reconciled technical claims against
+current source and dated repository evidence. Do not promote every old model
+statement: speculative product discussion, superseded intermediate results,
+unaccepted review branches, transient PIDs/temperatures, unrelated personal
+storage operations, device addresses and credentials are not durable project
+facts. Confirmed facts, rejected approaches and acceptance limits are retained
+below and in the named evidence records.
+
+### Historical native-AGX, VNC and Chrome witnesses recovered from Codex
+
+- The 2026-07-28 diagnostic RFB soak retained one `2388x1668` connection for
+  224.9 seconds. All 20/20 clicks selected the visible GlassDemo AppKit
+  endpoint, its checkbox alternated 10 times each way, native PF550 reached
+  `clean=12000 error=0`, and the WindowServer PID did not change. The short
+  run also recorded roughly 15 MiB of WindowServer RSS growth, so it is not a
+  long leak/thermal acceptance. See
+  `docs/evidence/native-agx-vnc-multiapp-soak-20260728.txt`.
+- Untargeted diagnostic input is resolved by a versioned, nonce-bound probe to
+  live application endpoints. Only a uniquely ranked visible AppKit owner
+  receives the original event; equal-ranked overlaps remain unresolved and
+  events are never broadcast. This is historical RFB recovery behavior, not a
+  reason to put VNC back into the production presentation path.
+- The exact Google Chrome `150.0.7871.187` arm64 port used UUID-bound,
+  invariant-preserving PartitionAlloc geometry transformations rather than
+  fake VM success or an OOM bypass. It produced a real `2388x1668` Retina
+  Chrome window and a working main-process AppKit input endpoint. Treat this
+  as a bounded exact-version result, not generic current-Chrome support. See
+  `docs/evidence/chrome150-secondary-partitionalloc-20260729.txt`.
+- RE and native probes established the exact IOGPUMTLEvent lifecycle mapping
+  `create 0x18 -> 0x14` and `destroy 0x19 -> 0x15` between Ventura 13.4 and
+  iPadOS 16.3. A six-second Chrome WebGL2 regression completed 9,100 draws and
+  91/91 timer queries with zero pending or command/protection errors. Its rAF
+  median was still 78.5 ms, so this did not prove smooth browser presentation.
+  See `docs/evidence/chrome150-event-lifecycle-selector-20260729.txt`.
+- Large-address-space splitting for an otherwise unmodified browser remains a
+  THEORY unless every contiguous reservation, compiled mask and cross-entry
+  protection/deallocation invariant is preserved and independently probed.
+  Never return a smaller or overlapping mapping as fake success.
+
+### Historical Stray/Steam performance and graphics contracts recovered from Codex
+
+- The first accepted native-AGX Stray gameplay run was a real rendered level,
+  not a menu or loading screen. A 30-second `W` interval advanced presents at
+  about 11.01 FPS on a `1194x834` game surface, remained live for 183 seconds
+  and ended thermal `nominal`. See
+  `docs/evidence/stray-native-agx-gameplay-20260818.md`.
+- Later like-for-like evidence reached about 56.40 FPS at `1194x834`, High,
+  85% internal resolution with a narrow Stray-only
+  `CAMetalLayer.displaySyncEnabled=NO` policy, all ten bounded samples
+  `nominal`. The later `1400x900`, High, 35%, 54-cap profile reached a
+  50.312-FPS median at `nominal`. The `2388x1668`, Medium, 35% run reached only
+  a 26.103-FPS median and moved to `serious`; never cite it as near-60.
+- The generic Metal library path parses the MTLB container, validates the
+  exact producer target, retargets AIR, validates the complete output and
+  caches by content. The audit covered 430/430 valid Stray libraries; an
+  unseen conversion took about 740 ms and its cached load about 1.433 ms.
+  This is not permission to rewrite unknown command opcodes or bypass pipeline
+  validation.
+- Stray's unchanged renderer performed a synchronous staging-surface lock and
+  explicit Metal wait for histogram eye adaptation once per frame. The
+  evidence-backed profile uses `r.EyeAdaptationQuality=0`,
+  `r.EyeAdaptation.MethodOverride=1` and `r.UsePreExposure=1`; override 2 was
+  rejected after the game emitted `Shader compilation failures are Fatal.`
+  Do not reintroduce a generic `waitUntilCompleted` bypass.
+- The black-block producer was an iOS/macOS half-float conversion difference:
+  finite writes into `R/RG/RGBA16Float` could become infinity on iOS AGX.
+  Resource-format-bound variants saturate only proven half-float writable
+  slots; 32-bit float and ambiguous bindings keep the ordinary pipeline. The
+  device LLVM 16 artifact is load-bearing; the tested host LLVM 22 artifact
+  loaded as a library but failed real AGX pipeline creation. See
+  `docs/evidence/stray-half-float-runtime-20260824.txt`.
+- Steam semaphore protocol v23 preserves the authoritative named-semaphore
+  generation and falls back to the broker only for real blocking waits. Do not
+  restore the rejected exact-callsite event-wait replacement, suspend the
+  Steam owner, or disable hardware occlusion queries: each reduced FPS,
+  stalled presentation or crashed the game in its recorded A/B.
+- A Steam launch retry must republish the same validated `-applaunch` AppID
+  marker before loading every replacement job. The recorded UI-timeout retry
+  lost that marker and waited for a launch that it had never requested.
+- The Steam/Stray supervisor must avoid global idle process scans. A deployed
+  loop spent about 7.7% CPU in repeated discovery after all Steam owners had
+  exited; bounded generation-aware discovery reduced five subsequent hostd
+  samples to 0.0%. See
+  `docs/evidence/stray-steam-performance-20260821.md`.
+
+### Historical desktop, input and interoperability contracts recovered from Codex
+
+- Ventura QuartzCore UUID `CF853BBD-01B6-3F46-ADA1-EC70FD2DC9DC` selected a
+  client-storage `didModifyData` path whose iOS IOGPU implementation was a
+  no-op. The exact guarded WindowServer fix runs original bookkeeping, then
+  uses the existing validated source/stride and `replaceRegion`; cancelled
+  presentation retires a generation only after its exact command buffer
+  reaches terminal status. This fixed rapid Terminal input coherency without
+  a blanket synchronization or buffer stub. See
+  `docs/evidence/terminal-render-coherency-20260906.md`.
+- DesktopServices interoperability is restored through its real helper/authd
+  protocols and required `kTCCServiceSystemPolicyAllFiles` entitlement, not a
+  forced authorization result. `NSItemProvider` file representations must be
+  staged inside their completion callback before the temporary URL is
+  deleted. Cross-App drag is one-shot because the same long press cannot
+  simultaneously mean UIKit drag, AppKit internal drag and context click.
+  See `docs/evidence/ipados-macos-interop-20260906.md` and
+  `docs/evidence/drag-clipboard-interop-20260906.md`.
+- A cold-start witness took 526 seconds, of which 452 seconds were the existing
+  12-bundle/1,067-Mach-O trust restoration. Moving System Settings pane
+  preparation to its application launch boundary later reduced the observed
+  desktop start to about 111 seconds, which was still an unresolved latency
+  problem. Never remove dependency-closure trust walking merely to improve a
+  timer. See `docs/evidence/coldboot-windowing-readiness-20260912.md` and
+  `docs/evidence/startup-latency-20260912.md`.
+- Rootfs executable preflight uses metadata for macOS targets that are later
+  executed by privileged `launchdchrootexec`; an unprivileged host daemon's
+  `access(X_OK)` is not authoritative for that future execution context. Real
+  service readiness, display sequence and visible pixels remain required.
+- Historical UI/application coverage is routed by evidence family rather than
+  inferred from a process surviving: `docs/evidence/office-*`,
+  `docs/evidence/vscode-*`, `docs/evidence/finder-*`,
+  `docs/evidence/window-*`, `docs/evidence/weather-*`,
+  `docs/evidence/maps-*`, `docs/evidence/terminal-*`, and the dated Steam/
+  Stray/7DTD records. Later source and newer evidence supersede an older
+  thread summary.
 
 ### autosignd on-demand signing (introduced 2026-06-11)
 
