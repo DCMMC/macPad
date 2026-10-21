@@ -1,0 +1,19 @@
+{
+  "/System/Library/CoreServices/SetupAssistantPlugins/GameCenter.icdplugin/Contents/MacOS/GameCenter": "a61bfd5aaf23fb7501da4f98425546d88be882f18e8b23b659c2154e76687716",
+  "/System/Library/CoreServices/SetupAssistantPlugins/IdentityServices.icdplugin/Contents/MacOS/IdentityServices": "f62bd35d0d5db9f1b5b9526e67829be79f4c3927b6078868cc6c0fab047ac004",
+  "/System/Library/CoreServices/SetupAssistantPlugins/iCloudDelegate.icdplugin/Contents/MacOS/iCloudDelegate": "0f1f764a2c0964cb116228f9f0d4e9291fe6524f8665c1e6f2be5fb38fd0eaa8",
+  "/System/Library/Accounts/Authentication/iCloudIDAuthentication.bundle/Contents/MacOS/iCloudIDAuthentication": "86fc9e2c5481ad3ecb96299aea3339268136ba55d7eaeba64436d34ea19779f1",
+  "/System/Library/Accounts/Authentication/AAGKAuthenticationPlugin.bundle/Contents/MacOS/AAGKAuthenticationPlugin": "cac3b280ca8cbced669afa48765ae0e8b0d8cfc4a8ac44163ad7d28b94306c95",
+  "/System/Library/Accounts/Authentication/AAIDSAuthenticationPlugin.bundle/Contents/MacOS/AAIDSAuthenticationPlugin": "ec0677ed9818c09995c275897304e8f0795009466edae025f5d4ddf2a667a968",
+  "/System/Library/Accounts/Authentication/AMSAccountAuthenticationPlugin.bundle/Contents/MacOS/AMSAccountAuthenticationPlugin": "8fac6e5dc2bf64894148ad452fd070dec99392267a707b08b7fa9e65d867fbcc",
+  "/System/Library/Accounts/Authentication/ContactsAccountsAuthenticationPlugin.bundle/Contents/MacOS/ContactsAccountsAuthenticationPlugin": "f90e17964cc5b83fca501492803eb608a1e3769bf9ec9c98e7d30959f4d6cc45",
+  "/System/Library/Accounts/Authentication/EmailAuthenticationPlugin.bundle/Contents/MacOS/EmailAuthenticationPlugin": "139dacfa1039a17d98c5bff64cfbd40592915aa1599b692a91f602d916f5356d",
+  "/System/Library/Accounts/Authentication/ExchangeAuthenticationPlugin.bundle/Contents/MacOS/ExchangeAuthenticationPlugin": "23b181e15b14be1a709999a59b036bf9534ac19a2f2f81d27c900472c6859514",
+  "/System/Library/Accounts/Authentication/GameCenterAccountAuthenticationPlugin.bundle/Contents/MacOS/GameCenterAccountAuthenticationPlugin": "dd8cf10a3021c7321d1accbfd0779c6ed029acac5e9b5a37b338a00bd8368096",
+  "/System/Library/Accounts/Authentication/GoogleAuthenticationPlugin.bundle/Contents/MacOS/GoogleAuthenticationPlugin": "cf85d8f19aec2a64196c74e72bd95c274e95447d6fdd8bb4f84d6e1d98a22258",
+  "/System/Library/Accounts/Authentication/TudouAuthenticationPlugin.bundle/Contents/MacOS/TudouAuthenticationPlugin": "1e62da70226537a0174c25ade592024ed03ea7773efb1c420b49dd5fd26f30da",
+  "/System/Library/Accounts/Authentication/YahooAuthenticationPlugin.bundle/Contents/MacOS/YahooAuthenticationPlugin": "e4d6dc63077baf64da4bce2111a65e4cf4118c0955b9e85a9ee75dbdeed897cc",
+  "/System/Library/Accounts/Authentication/YoukuAuthenticationPlugin.bundle/Contents/MacOS/YoukuAuthenticationPlugin": "922dd29e569ee432cef5cdbc946a2acc3420f3246ec5b3680af2245d4079a3bb",
+  "/System/Library/Accounts/ServiceOwners/AACloudServiceOwner.bundle/Contents/MacOS/AACloudServiceOwner": "2defc1fe0d39e61065d08d04f7d0d0f4296e0618ec7368b539c08f3b7d3951af",
+  "/System/Library/Frameworks/LocalAuthentication.framework/Support/ModulePlugins/ModuleACM.bundle/Contents/MacOS/ModuleACM": "33160712d2d640d8cf12de0f83ba682a17c0b354b287e3c5e5ac0a7cca1d740e"
+}

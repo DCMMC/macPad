@@ -1,0 +1,488 @@
+{
+  "com.macpad.account15.diagnostic.accountsd-private-v24-v1.plist": {
+    "EnvironmentVariables": {
+      "HOME": "/Users/mobile",
+      "LOGNAME": "mobile",
+      "MACPAD_ACCOUNT15_ROLE": "accountsd",
+      "MACPAD_PRIVATE_APPLE_ACCOUNT": "1",
+      "MACPAD_TARGET_MACOS_VERSION": "15.6.1",
+      "MACWS_CFPREFERENCES_CLIENT": "1",
+      "MACWS_CHROOT_HOST_ROOT": "/var/mnt/rootfs",
+      "MACWS_EXTRA_INSERT_LIBRARIES": "",
+      "MACWS_PRIVATE_CACHE_DIR": "/System/Library/dyld",
+      "MACWS_PRIVATE_CACHE_LIFECYCLE": "1",
+      "MACWS_SESSION_CACHE_DIR": "/var/folders/zz/macws_uid501/C/",
+      "MACWS_SESSION_TEMP_DIR": "/var/folders/zz/macws_uid501/T/",
+      "MACWS_SESSION_USER_DIR": "/var/folders/zz/macws_uid501/0/",
+      "MACWS_SYNTHETIC_MOBILE_USER": "1",
+      "MACWS_UTILITY_PROCESS": "1",
+      "TMPDIR": "/tmp",
+      "USER": "mobile"
+    },
+    "ExitTimeOut": 5,
+    "GroupName": "wheel",
+    "KeepAlive": false,
+    "Label": "com.macpad.account15.session.v31.accountsd",
+    "MachServices": {
+      "com.macpad.account15.accountsd.accountmanager": true,
+      "com.macpad.account15.accountsd.oauthsigner": true,
+      "com.macpad.account15.accountsd.oopa": true
+    },
+    "ProgramArguments": [
+      "/var/jb/usr/macOS/bin/launchdchrootexec-sequoia-main-20261005",
+      "501",
+      "20",
+      "/var/mnt/rootfs",
+      "/usr/local/libexec/macpad-account15/accountsd-private/accountsd"
+    ],
+    "RunAtLoad": true,
+    "UserName": "root"
+  },
+  "com.macpad.account15.diagnostic.akd-confined-v23-v1.plist": {
+    "EnvironmentVariables": {
+      "HOME": "/Users/mobile",
+      "LOGNAME": "mobile",
+      "MACPAD_ACCOUNT15_REQUIRE_SANDBOX": "akd",
+      "MACPAD_ACCOUNT15_USER_SESSION": "Aqua",
+      "MACPAD_MAIN15_TRUST": "1",
+      "MACPAD_PRIVATE_APPLE_ACCOUNT": "1",
+      "MACPAD_TARGET_MACOS_VERSION": "15.6.1",
+      "MACWS_CFPREFERENCES_CLIENT": "1",
+      "MACWS_CHROOT_HOST_ROOT": "/var/mnt/rootfs",
+      "MACWS_EXTRA_INSERT_LIBRARIES": "/usr/local/lib/PrivateUserSession-v67.dylib:/usr/local/lib/PrivateAccount15-akd-confined-v23.dylib",
+      "MACWS_PRIVATE_CACHE_DIR": "/System/Library/dyld",
+      "MACWS_PRIVATE_CACHE_LIFECYCLE": "1",
+      "MACWS_SESSION_CACHE_DIR": "/var/folders/zz/macws_uid501/C/",
+      "MACWS_SESSION_TEMP_DIR": "/var/folders/zz/macws_uid501/T/",
+      "MACWS_SESSION_USER_DIR": "/var/folders/zz/macws_uid501/0/",
+      "MACWS_SYNTHETIC_MOBILE_USER": "1",
+      "MACWS_UTILITY_PROCESS": "1",
+      "TMPDIR": "/tmp",
+      "USER": "mobile"
+    },
+    "ExitTimeOut": 5,
+    "GroupName": "wheel",
+    "KeepAlive": false,
+    "Label": "com.macpad.account15.session.v31.akd",
+    "MachServices": {
+      "com.macpad.account15.ak.anisette.xpc": true,
+      "com.macpad.account15.ak.appleidpasskey.xpc": true,
+      "com.macpad.account15.ak.aps": true,
+      "com.macpad.account15.ak.auth.xpc": true,
+      "com.macpad.account15.ak.authorizationservices.xpc": true,
+      "com.macpad.account15.ak.custodian.xpc": true,
+      "com.macpad.account15.ak.inheritance.xpc": true,
+      "com.macpad.account15.ak.privateemail.xpc": true,
+      "com.macpad.account15.ak.puffin.xpc": true,
+      "com.macpad.account15.ak.signinwithapple.xpc": true,
+      "com.macpad.account15.ak.walrus.xpc": true
+    },
+    "ProgramArguments": [
+      "/var/jb/usr/macOS/bin/launchdchrootexec-sequoia-main-20261005",
+      "501",
+      "20",
+      "/var/mnt/rootfs",
+      "/usr/local/libexec/macpad-account15/akd-confined/akd"
+    ],
+    "RunAtLoad": true,
+    "UserName": "root"
+  },
+  "com.macpad.account15.diagnostic.appleaccountd.plist": {
+    "EnvironmentVariables": {
+      "HOME": "/Users/mobile",
+      "LOGNAME": "mobile",
+      "MACPAD_ACCOUNT15_REQUIRE_SANDBOX": "1",
+      "MACPAD_PRIVATE_APPLE_ACCOUNT": "1",
+      "MACPAD_TARGET_MACOS_VERSION": "15.6.1",
+      "MACWS_CFPREFERENCES_CLIENT": "1",
+      "MACWS_CHROOT_HOST_ROOT": "/var/mnt/rootfs",
+      "MACWS_EXTRA_INSERT_LIBRARIES": "/usr/local/lib/PrivateAppleAccount15.dylib",
+      "MACWS_PRIVATE_CACHE_DIR": "/System/Library/dyld",
+      "MACWS_PRIVATE_CACHE_LIFECYCLE": "1",
+      "MACWS_SESSION_CACHE_DIR": "/var/folders/zz/macws_uid501/C/",
+      "MACWS_SESSION_TEMP_DIR": "/var/folders/zz/macws_uid501/T/",
+      "MACWS_SESSION_USER_DIR": "/var/folders/zz/macws_uid501/0/",
+      "MACWS_SYNTHETIC_MOBILE_USER": "1",
+      "MACWS_UTILITY_PROCESS": "1",
+      "TMPDIR": "/tmp",
+      "USER": "mobile"
+    },
+    "ExitTimeOut": 5,
+    "GroupName": "wheel",
+    "KeepAlive": false,
+    "Label": "com.macpad.account15.session.v31.appleaccountd",
+    "MachServices": {
+      "com.macpad.account15.aa.custodian.xpc": true,
+      "com.macpad.account15.aa.daemon.xpc": true,
+      "com.macpad.account15.aa.inheritance.xpc": true,
+      "com.macpad.account15.aa.usernotifications.xpc": true,
+      "com.macpad.account15.aps.aa": true,
+      "com.macpad.account15.aps.appleaccountd": true,
+      "com.macpad.account15.private.alloy.accounts.representative-idswake": true,
+      "com.macpad.account15.usernotifications.delegate.com.apple.appleaccount.notifications": true
+    },
+    "ProgramArguments": [
+      "/var/jb/usr/macOS/bin/launchdchrootexec-sequoia-main-20261005",
+      "501",
+      "20",
+      "/var/mnt/rootfs",
+      "/usr/local/libexec/macpad-account15/AppleAccountService.app/Contents/MacOS/appleaccountd"
+    ],
+    "RunAtLoad": true,
+    "UserName": "root"
+  },
+  "com.macpad.account15.diagnostic.cdp18.plist": {
+    "EnvironmentVariables": {
+      "HOME": "/Users/mobile",
+      "LOGNAME": "mobile",
+      "MACPAD_ACCOUNT15_ROLE": "cdp",
+      "MACPAD_PRIVATE_APPLE_ACCOUNT": "1",
+      "MACPAD_TARGET_MACOS_VERSION": "15.6.1",
+      "MACWS_CFPREFERENCES_CLIENT": "1",
+      "MACWS_CHROOT_HOST_ROOT": "/var/mnt/rootfs",
+      "MACWS_EXTRA_INSERT_LIBRARIES": "/usr/local/lib/PrivateAppleAccount15.dylib",
+      "MACWS_PRIVATE_CACHE_DIR": "/System/Library/dyld",
+      "MACWS_PRIVATE_CACHE_LIFECYCLE": "1",
+      "MACWS_SESSION_CACHE_DIR": "/var/folders/zz/macws_uid501/C/",
+      "MACWS_SESSION_TEMP_DIR": "/var/folders/zz/macws_uid501/T/",
+      "MACWS_SESSION_USER_DIR": "/var/folders/zz/macws_uid501/0/",
+      "MACWS_SYNTHETIC_MOBILE_USER": "1",
+      "MACWS_UTILITY_PROCESS": "1",
+      "TMPDIR": "/tmp",
+      "USER": "mobile"
+    },
+    "ExitTimeOut": 5,
+    "GroupName": "wheel",
+    "KeepAlive": false,
+    "Label": "com.macpad.account15.session.v31.cdp",
+    "MachServices": {
+      "com.macpad.account15.cdp.daemon": true
+    },
+    "ProgramArguments": [
+      "/var/jb/usr/macOS/bin/launchdchrootexec-sequoia-main-20261005",
+      "501",
+      "20",
+      "/var/mnt/rootfs",
+      "/usr/local/libexec/macpad-account15/cdp/cdpd"
+    ],
+    "RunAtLoad": true,
+    "UserName": "root"
+  },
+  "com.macpad.account15.diagnostic.coreauth-agent18.plist": {
+    "EnvironmentVariables": {
+      "HOME": "/Users/mobile",
+      "LOGNAME": "mobile",
+      "MACPAD_ACCOUNT15_LA": "1",
+      "MACPAD_ACCOUNT15_ROLE": "coreauth-agent",
+      "MACPAD_ACCOUNT15_USER_SESSION": "Aqua",
+      "MACPAD_MAIN15_TRUST": "1",
+      "MACPAD_PRIVATE_APPLE_ACCOUNT": "1",
+      "MACPAD_TARGET_MACOS_VERSION": "15.6.1",
+      "MACWS_CFPREFERENCES_CLIENT": "1",
+      "MACWS_CHROOT_HOST_ROOT": "/var/mnt/rootfs",
+      "MACWS_EXTRA_INSERT_LIBRARIES": "/usr/local/lib/PrivateAppleAccount15.dylib:/usr/local/lib/AccountLANamespace18.dylib",
+      "MACWS_PRIVATE_CACHE_DIR": "/System/Library/dyld",
+      "MACWS_PRIVATE_CACHE_LIFECYCLE": "1",
+      "MACWS_SESSION_CACHE_DIR": "/var/folders/zz/macws_uid501/C/",
+      "MACWS_SESSION_TEMP_DIR": "/var/folders/zz/macws_uid501/T/",
+      "MACWS_SESSION_USER_DIR": "/var/folders/zz/macws_uid501/0/",
+      "MACWS_SYNTHETIC_MOBILE_USER": "1",
+      "MACWS_UTILITY_PROCESS": "1",
+      "TMPDIR": "/tmp",
+      "USER": "mobile"
+    },
+    "ExitTimeOut": 5,
+    "GroupName": "wheel",
+    "KeepAlive": false,
+    "Label": "com.macpad.account15.session.v31.coreauth-agent",
+    "MachServices": {
+      "com.macpad.account15.CoreAuthentication.agent": true,
+      "com.macpad.account15.CoreAuthentication.agent.libxpc": true,
+      "com.macpad.account15.user.LocalAuthentication.RemoteUIHost": true,
+      "com.macpad.account15.user.LocalAuthentication.apctk": true,
+      "com.macpad.account15.user.LocalAuthentication.apd": true,
+      "com.macpad.account15.user.LocalAuthentication.appassword": true,
+      "com.macpad.account15.user.LocalAuthentication.aptouchid": true
+    },
+    "ProgramArguments": [
+      "/var/jb/usr/macOS/bin/launchdchrootexec-sequoia-main-20261005",
+      "501",
+      "20",
+      "/var/mnt/rootfs",
+      "/usr/local/libexec/macpad-account15/coreauth-agent/coreauthd"
+    ],
+    "RunAtLoad": true,
+    "UserName": "root"
+  },
+  "com.macpad.account15.diagnostic.coreauth18.plist": {
+    "EnvironmentVariables": {
+      "HOME": "/Users/root",
+      "LOGNAME": "root",
+      "MACPAD_ACCOUNT15_LA": "1",
+      "MACPAD_ACCOUNT15_ROLE": "coreauth",
+      "MACPAD_MAIN15_TRUST": "1",
+      "MACPAD_PRIVATE_APPLE_ACCOUNT": "1",
+      "MACPAD_TARGET_MACOS_VERSION": "15.6.1",
+      "MACWS_CFPREFERENCES_CLIENT": "1",
+      "MACWS_CHROOT_HOST_ROOT": "/var/mnt/rootfs",
+      "MACWS_EXTRA_INSERT_LIBRARIES": "/usr/local/lib/PrivateAppleAccount15.dylib:/usr/local/lib/AccountLANamespace18.dylib",
+      "MACWS_PRIVATE_CACHE_DIR": "/System/Library/dyld",
+      "MACWS_PRIVATE_CACHE_LIFECYCLE": "1",
+      "MACWS_SYNTHETIC_MOBILE_USER": "1",
+      "MACWS_UTILITY_PROCESS": "1",
+      "TMPDIR": "/tmp",
+      "USER": "root"
+    },
+    "ExitTimeOut": 5,
+    "GroupName": "wheel",
+    "KeepAlive": false,
+    "Label": "com.macpad.account15.session.v31.coreauth",
+    "MachServices": {
+      "com.macpad.account15.CoreAuthentication.daemon": true,
+      "com.macpad.account15.CoreAuthentication.daemon.EndpointProvider": true,
+      "com.macpad.account15.CoreAuthentication.daemon.libxpc": true,
+      "com.macpad.account15.LocalAuthentication.AuthenticationHintsProvider": true,
+      "com.macpad.account15.LocalAuthentication.RemoteUIHost": true,
+      "com.macpad.account15.LocalAuthentication.apctk": true,
+      "com.macpad.account15.LocalAuthentication.apd": true,
+      "com.macpad.account15.LocalAuthentication.appassword": true,
+      "com.macpad.account15.LocalAuthentication.aptouchid": true
+    },
+    "ProgramArguments": [
+      "/var/jb/usr/macOS/bin/launchdchrootexec-sequoia-main-20261005",
+      "0",
+      "0",
+      "/var/mnt/rootfs",
+      "/usr/local/libexec/macpad-account15/coreauth/coreauthd"
+    ],
+    "RunAtLoad": true,
+    "UserName": "root"
+  },
+  "com.macpad.account15.diagnostic.corefollowup18.plist": {
+    "EnvironmentVariables": {
+      "HOME": "/Users/mobile",
+      "LOGNAME": "mobile",
+      "MACPAD_ACCOUNT15_ROLE": "corefollowup",
+      "MACPAD_PRIVATE_APPLE_ACCOUNT": "1",
+      "MACPAD_TARGET_MACOS_VERSION": "15.6.1",
+      "MACWS_CFPREFERENCES_CLIENT": "1",
+      "MACWS_CHROOT_HOST_ROOT": "/var/mnt/rootfs",
+      "MACWS_EXTRA_INSERT_LIBRARIES": "/usr/local/lib/PrivateAppleAccount15.dylib",
+      "MACWS_PRIVATE_CACHE_DIR": "/System/Library/dyld",
+      "MACWS_PRIVATE_CACHE_LIFECYCLE": "1",
+      "MACWS_SESSION_CACHE_DIR": "/var/folders/zz/macws_uid501/C/",
+      "MACWS_SESSION_TEMP_DIR": "/var/folders/zz/macws_uid501/T/",
+      "MACWS_SESSION_USER_DIR": "/var/folders/zz/macws_uid501/0/",
+      "MACWS_SYNTHETIC_MOBILE_USER": "1",
+      "MACWS_UTILITY_PROCESS": "1",
+      "TMPDIR": "/tmp",
+      "USER": "mobile"
+    },
+    "ExitTimeOut": 5,
+    "GroupName": "wheel",
+    "KeepAlive": false,
+    "Label": "com.macpad.account15.session.v31.corefollowup",
+    "MachServices": {
+      "com.macpad.account15.corefollowup.agent": true
+    },
+    "ProgramArguments": [
+      "/var/jb/usr/macOS/bin/launchdchrootexec-sequoia-main-20261005",
+      "501",
+      "20",
+      "/var/mnt/rootfs",
+      "/usr/local/libexec/macpad-account15/corefollowup/followupd"
+    ],
+    "RunAtLoad": true,
+    "UserName": "root"
+  },
+  "com.macpad.account15.diagnostic.ctk18.plist": {
+    "EnvironmentVariables": {
+      "HOME": "/Users/mobile",
+      "LOGNAME": "mobile",
+      "MACPAD_ACCOUNT15_CTK": "1",
+      "MACPAD_ACCOUNT15_LA": "1",
+      "MACPAD_ACCOUNT15_ROLE": "ctk",
+      "MACPAD_ACCOUNT15_USER_SESSION": "Aqua",
+      "MACPAD_MAIN15_TRUST": "1",
+      "MACPAD_PRIVATE_APPLE_ACCOUNT": "1",
+      "MACPAD_TARGET_MACOS_VERSION": "15.6.1",
+      "MACWS_CFPREFERENCES_CLIENT": "1",
+      "MACWS_CHROOT_HOST_ROOT": "/var/mnt/rootfs",
+      "MACWS_EXTRA_INSERT_LIBRARIES": "/usr/local/lib/PrivateAppleAccount15.dylib:/usr/local/lib/AccountCTKNamespace18.dylib:/usr/local/lib/AccountLANamespace18.dylib",
+      "MACWS_PRIVATE_CACHE_DIR": "/System/Library/dyld",
+      "MACWS_PRIVATE_CACHE_LIFECYCLE": "1",
+      "MACWS_SESSION_CACHE_DIR": "/var/folders/zz/macws_uid501/C/",
+      "MACWS_SESSION_TEMP_DIR": "/var/folders/zz/macws_uid501/T/",
+      "MACWS_SESSION_USER_DIR": "/var/folders/zz/macws_uid501/0/",
+      "MACWS_SYNTHETIC_MOBILE_USER": "1",
+      "MACWS_UTILITY_PROCESS": "1",
+      "TMPDIR": "/tmp",
+      "USER": "mobile"
+    },
+    "ExitTimeOut": 5,
+    "GroupName": "wheel",
+    "KeepAlive": false,
+    "Label": "com.macpad.account15.session.v31.ctk",
+    "MachServices": {
+      "com.macpad.account15.ctkd.slot-client": true,
+      "com.macpad.account15.ctkd.slot-registry": true,
+      "com.macpad.account15.ctkd.token-client": true
+    },
+    "ProgramArguments": [
+      "/var/jb/usr/macOS/bin/launchdchrootexec-sequoia-main-20261005",
+      "501",
+      "20",
+      "/var/mnt/rootfs",
+      "/usr/local/libexec/macpad-account15/ctk/ctkd",
+      "-tsw"
+    ],
+    "RunAtLoad": true,
+    "UserName": "root"
+  },
+  "com.macpad.account15.diagnostic.foundation2.plist": {
+    "EnvironmentVariables": {
+      "HOME": "/Users/mobile",
+      "LOGNAME": "mobile",
+      "MACPAD_PRIVATE_APPLE_ACCOUNT": "1",
+      "MACPAD_TARGET_MACOS_VERSION": "15.6.1",
+      "MACWS_CFPREFERENCES_CLIENT": "1",
+      "MACWS_CHROOT_HOST_ROOT": "/var/mnt/rootfs",
+      "MACWS_EXTRA_INSERT_LIBRARIES": "/usr/local/lib/PrivateAppleAccount15.dylib",
+      "MACWS_PRIVATE_CACHE_DIR": "/System/Library/dyld",
+      "MACWS_PRIVATE_CACHE_LIFECYCLE": "1",
+      "MACWS_SESSION_CACHE_DIR": "/var/folders/zz/macws_uid501/C/",
+      "MACWS_SESSION_TEMP_DIR": "/var/folders/zz/macws_uid501/T/",
+      "MACWS_SESSION_USER_DIR": "/var/folders/zz/macws_uid501/0/",
+      "MACWS_SYNTHETIC_MOBILE_USER": "1",
+      "MACWS_UTILITY_PROCESS": "1",
+      "TMPDIR": "/tmp",
+      "USER": "mobile"
+    },
+    "GroupName": "wheel",
+    "KeepAlive": false,
+    "Label": "com.macpad.account15.diagnostic.foundation2",
+    "ProgramArguments": [
+      "/var/jb/usr/macOS/bin/launchdchrootexec-sequoia-main-20261005",
+      "501",
+      "20",
+      "/var/mnt/rootfs",
+      "/usr/local/libexec/macpad-account15/AccountFoundationProbe"
+    ],
+    "RunAtLoad": true,
+    "UserName": "root"
+  },
+  "com.macpad.account15.diagnostic.secd-aks-v21-v1.plist": {
+    "EnvironmentVariables": {
+      "HOME": "/Users/mobile",
+      "LOGNAME": "mobile",
+      "MACPAD_ACCOUNT15_AKS_COMPAT": "v1",
+      "MACPAD_ACCOUNT15_REQUIRE_SANDBOX": "secd",
+      "MACPAD_PRIVATE_APPLE_ACCOUNT": "1",
+      "MACPAD_TARGET_MACOS_VERSION": "15.6.1",
+      "MACWS_CFPREFERENCES_CLIENT": "1",
+      "MACWS_CHROOT_HOST_ROOT": "/var/mnt/rootfs",
+      "MACWS_EXTRA_INSERT_LIBRARIES": "/usr/local/lib/PrivateAccount15-secd-aks-v21.dylib",
+      "MACWS_PRIVATE_CACHE_DIR": "/System/Library/dyld",
+      "MACWS_PRIVATE_CACHE_LIFECYCLE": "1",
+      "MACWS_SESSION_CACHE_DIR": "/var/folders/zz/macws_uid501/C/",
+      "MACWS_SESSION_TEMP_DIR": "/var/folders/zz/macws_uid501/T/",
+      "MACWS_SESSION_USER_DIR": "/var/folders/zz/macws_uid501/0/",
+      "MACWS_SYNTHETIC_MOBILE_USER": "1",
+      "MACWS_UTILITY_PROCESS": "1",
+      "TMPDIR": "/tmp",
+      "USER": "mobile"
+    },
+    "ExitTimeOut": 5,
+    "GroupName": "wheel",
+    "KeepAlive": false,
+    "Label": "com.macpad.account15.session.v31.secd",
+    "MachServices": {
+      "com.macpad.account15.security.escrow-update": true,
+      "com.macpad.account15.security.kcsharing": true,
+      "com.macpad.account15.security.octagon": true,
+      "com.macpad.account15.securityd.aps": true,
+      "com.macpad.account15.securityd.ckks": true,
+      "com.macpad.account15.securityd.general": true,
+      "com.macpad.account15.securityd.sos": true,
+      "com.macpad.account15.securityd.xpc": true
+    },
+    "ProgramArguments": [
+      "/var/jb/usr/macOS/bin/launchdchrootexec-sequoia-main-20261005",
+      "501",
+      "20",
+      "/var/mnt/rootfs",
+      "/usr/local/libexec/macpad-account15/aks-adapt/secd"
+    ],
+    "RunAtLoad": true,
+    "UserName": "root"
+  },
+  "com.macpad.account15.diagnostic.securityd.plist": {
+    "EnvironmentVariables": {
+      "HOME": "/Users/root",
+      "LOGNAME": "root",
+      "MACPAD_PRIVATE_APPLE_ACCOUNT": "1",
+      "MACPAD_TARGET_MACOS_VERSION": "15.6.1",
+      "MACWS_CHROOT_HOST_ROOT": "/var/mnt/rootfs",
+      "MACWS_EXTRA_INSERT_LIBRARIES": "/usr/local/lib/PrivateAppleAccount15.dylib",
+      "MACWS_PRIVATE_CACHE_DIR": "/System/Library/dyld",
+      "MACWS_PRIVATE_CACHE_LIFECYCLE": "1",
+      "MACWS_SYNTHETIC_MOBILE_USER": "1",
+      "TMPDIR": "/tmp",
+      "USER": "root"
+    },
+    "ExitTimeOut": 5,
+    "GroupName": "wheel",
+    "KeepAlive": false,
+    "Label": "com.macpad.account15.session.v31.securityd",
+    "MachServices": {
+      "com.macpad.account15.SecurityServer": true
+    },
+    "ProgramArguments": [
+      "/var/jb/usr/macOS/bin/launchdchrootexec-sequoia-main-20261005",
+      "0",
+      "0",
+      "/var/mnt/rootfs",
+      "/usr/local/libexec/macpad-account15/securityd",
+      "-i"
+    ],
+    "RunAtLoad": true,
+    "UserName": "root"
+  },
+  "com.macpad.account15.icloudhelper22.plist": {
+    "EnvironmentVariables": {
+      "HOME": "/Users/mobile",
+      "LOGNAME": "mobile",
+      "MACPAD_ACCOUNT15_ROLE": "icloudhelper",
+      "MACPAD_PRIVATE_APPLE_ACCOUNT": "1",
+      "MACPAD_TARGET_MACOS_VERSION": "15.6.1",
+      "MACWS_CFPREFERENCES_CLIENT": "1",
+      "MACWS_CHROOT_HOST_ROOT": "/var/mnt/rootfs",
+      "MACWS_EXTRA_INSERT_LIBRARIES": "",
+      "MACWS_PRIVATE_CACHE_DIR": "/System/Library/dyld",
+      "MACWS_PRIVATE_CACHE_LIFECYCLE": "1",
+      "MACWS_SESSION_CACHE_DIR": "/var/folders/zz/macws_uid501/C/",
+      "MACWS_SESSION_TEMP_DIR": "/var/folders/zz/macws_uid501/T/",
+      "MACWS_SESSION_USER_DIR": "/var/folders/zz/macws_uid501/0/",
+      "MACWS_SYNTHETIC_MOBILE_USER": "1",
+      "MACWS_UTILITY_PROCESS": "1",
+      "TMPDIR": "/tmp",
+      "USER": "mobile"
+    },
+    "ExitTimeOut": 5,
+    "GroupName": "wheel",
+    "KeepAlive": true,
+    "Label": "com.macpad.account15.session.v31.icloudhelper",
+    "MachServices": {
+      "com.macpad.account15.iCloudHelper": true
+    },
+    "ProgramArguments": [
+      "/var/jb/usr/macOS/bin/launchdchrootexec-sequoia-main-20261005",
+      "501",
+      "20",
+      "/var/mnt/rootfs",
+      "/usr/local/libexec/macpad-account15/iCloudHelper.xpc/Contents/MacOS/com.apple.iCloudHelper"
+    ],
+    "RunAtLoad": true,
+    "UserName": "root"
+  }
+}

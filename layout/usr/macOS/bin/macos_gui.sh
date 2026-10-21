@@ -3470,6 +3470,11 @@ production_preflight() {
 
 cleanup_macos() {
     log "Cleaning up previous macOS GUI services..."
+    # Stop only the opt-in guest account jobs before tearing down the workspace.
+    if [ -f /var/jb/usr/macOS/libexec/appleid-signin/manifest.json ]; then
+        /var/jb/usr/bin/python3 -I /var/jb/usr/macOS/bin/macws_private_account15.py stop >/dev/null ||
+            log "Private Apple Account service cleanup needs attention"
+    fi
     stop_watchdogs
     CLEANUP_TERM_PIDS=""
 
