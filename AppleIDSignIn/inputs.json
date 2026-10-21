@@ -1,0 +1,42 @@
+{
+  "securityd": {
+    "source": "/usr/sbin/securityd",
+    "sha256": "9cf4ef8ca0de46eadc8d6a9d4da0c765b533eaa0c2f7b5b55f98aa59694973db"
+  },
+  "secd": {
+    "source": "/usr/libexec/secd",
+    "sha256": "7566321e9655b774745b53cd840546b9bee5e6f14c4728782d9d3041d8a1ad2d"
+  },
+  "akd": {
+    "source": "/System/Library/PrivateFrameworks/AuthKit.framework/Versions/A/Support/akd",
+    "sha256": "b4ab53893f6b6f718150dd627aeba6431a82311680bfc1dbc52e840bb2eeba0a"
+  },
+  "accountsd": {
+    "source": "/System/Library/Frameworks/Accounts.framework/Versions/A/Support/accountsd",
+    "sha256": "cf61d67e00b1ac69cab1690ed69896b9f78e5948e1b54f0ff5c9355ee0a317b0"
+  },
+  "appleaccountd": {
+    "source": "/usr/libexec/appleaccountd",
+    "sha256": "6d7c3960943dd62e9a60b653c7aefb8e58b78c1b73ea37da43d586969c7f908c"
+  },
+  "coreauth": {
+    "source": "/System/Library/Frameworks/LocalAuthentication.framework/Support/coreauthd",
+    "sha256": "6876148d834fe4eb7157d7732ef3ab0a3962cdae434ae052fd3ed612f2dd0784"
+  },
+  "ctk": {
+    "source": "/System/Library/Frameworks/CryptoTokenKit.framework/ctkd",
+    "sha256": "06373e16e6b94f38528e3465b5c7debbd53e7d33a33417743eaad3b0056f023e"
+  },
+  "corefollowup": {
+    "source": "/System/Library/PrivateFrameworks/CoreFollowUp.framework/Versions/A/Support/followupd",
+    "sha256": "3d72ad4d20fc5bf253930baaf9bf6e746da5bcdcebc0f3a531b2927d659e5027"
+  },
+  "cdp": {
+    "source": "/System/Library/PrivateFrameworks/CoreCDP.framework/Versions/A/Resources/cdpd",
+    "sha256": "eb0ea5eec2de0da415f3fa55d72cbdebe94bc85131d315bed9aca859916bd697"
+  },
+  "icloudhelper": {
+    "source": "/System/Library/PrivateFrameworks/AOSKit.framework/Versions/A/XPCServices/com.apple.iCloudHelper.xpc/Contents/MacOS/com.apple.iCloudHelper",
+    "sha256": "6ba6513c08194ce89981e9dd6ab4e7a57d133063b25d3c653fbedc747dc32374"
+  }
+}

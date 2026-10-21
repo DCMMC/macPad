@@ -1,0 +1,813 @@
+{
+  "securityd": {
+    "com.apple.developer.kernel.extended-virtual-addressing": true,
+    "com.apple.private.amfi.can-execute-cdhash": true,
+    "com.apple.private.applekeystored": true,
+    "com.apple.private.security.container-required": false,
+    "com.apple.private.security.no-container": true,
+    "com.apple.private.security.no-sandbox": true,
+    "com.apple.private.security.storage.SFAnalytics": true,
+    "com.apple.private.security.storage.SystemKeychain": true,
+    "com.apple.private.securityd.keychain": true,
+    "com.apple.private.securityd.stash": true,
+    "com.apple.private.securityd.stash-agent-client": true,
+    "com.apple.private.tcc.allow": [
+      "kTCCServiceSystemPolicyAllFiles"
+    ],
+    "com.apple.security.iokit-user-client-class": [
+      "RootDomainUserClient"
+    ],
+    "com.apple.security.smartcard": true,
+    "get-task-allow": true
+  },
+  "secd": {
+    "allow-obliterate-device": true,
+    "allow-softwareupdated": true,
+    "application-identifier": "com.apple.securityd",
+    "aps-connection-initiate": true,
+    "aps-environment": "serverPreferred",
+    "com.apple.CloudKeychainProxy.client": true,
+    "com.apple.TapToRadarKit.service-access": true,
+    "com.apple.accounts.appleaccount.fullaccess": true,
+    "com.apple.accounts.idms.fullaccess": true,
+    "com.apple.application-identifier": "com.apple.securityd",
+    "com.apple.aps-environment": "serverPreferred",
+    "com.apple.authentication-services.credential-sharing-groups": true,
+    "com.apple.authkit.client.private": true,
+    "com.apple.authkit.devicelist.server-only": true,
+    "com.apple.developer.aps-environment": "serverPreferred",
+    "com.apple.developer.device-information.user-assigned-device-name": true,
+    "com.apple.developer.icloud-container-environment": "Production",
+    "com.apple.developer.icloud-container-identifiers": [
+      "iCloud.com.apple.security.keychain"
+    ],
+    "com.apple.developer.icloud-services": [
+      "CloudKit"
+    ],
+    "com.apple.developer.kernel.extended-virtual-addressing": true,
+    "com.apple.keystore.access-keychain-keys": true,
+    "com.apple.keystore.lockassertion": true,
+    "com.apple.mkb.usersession.info": true,
+    "com.apple.private.MobileGestalt.AllowedProtectedKeys": [
+      "SerialNumber"
+    ],
+    "com.apple.private.accounts.allaccounts": true,
+    "com.apple.private.amfi.can-execute-cdhash": true,
+    "com.apple.private.amfi.version-restriction": 1,
+    "com.apple.private.appleaccount.app-hidden-from-icloud-settings": true,
+    "com.apple.private.applecredentialmanager.allow": true,
+    "com.apple.private.aps-connection-initiate": true,
+    "com.apple.private.associated-domains": true,
+    "com.apple.private.cloudkit.allowUnverifiedAccount": true,
+    "com.apple.private.cloudkit.buddyAccess": true,
+    "com.apple.private.cloudkit.customAccounts": true,
+    "com.apple.private.cloudkit.notifyOnAccountWarmup": true,
+    "com.apple.private.cloudkit.prefix": "com.apple.security.",
+    "com.apple.private.cloudkit.serviceNameForContainerMap": {
+      "com.apple.security.shared.keychain": "com.apple.security.keychain.shared"
+    },
+    "com.apple.private.cloudkit.setEnvironment": true,
+    "com.apple.private.cloudkit.spi": true,
+    "com.apple.private.cloudkit.supportservice": true,
+    "com.apple.private.cloudkit.systemService": true,
+    "com.apple.private.dark-wake-push": true,
+    "com.apple.private.followup": true,
+    "com.apple.private.ids.remoteurlconnection": true,
+    "com.apple.private.imcore.imagent": true,
+    "com.apple.private.imcore.imremoteurlconnection": true,
+    "com.apple.private.imcore.remoteurlconnection": true,
+    "com.apple.private.iokit.nvram-write-access": true,
+    "com.apple.private.keychain.kcsharing.invitation.manager": true,
+    "com.apple.private.lockdown.finegrained-get": [
+      "com.apple.securityd.ae/cookie"
+    ],
+    "com.apple.private.necp.match": true,
+    "com.apple.private.network.socket-delegate": true,
+    "com.apple.private.rtcreportingd": true,
+    "com.apple.private.security.container-required": false,
+    "com.apple.private.security.no-container": true,
+    "com.apple.private.security.no-sandbox": true,
+    "com.apple.private.security.storage.Keychains": true,
+    "com.apple.private.security.storage.SFAnalytics": true,
+    "com.apple.private.sqlite.sqlite-encryption": true,
+    "com.apple.private.tcc.allow": [
+      "kTCCServiceLiverpool"
+    ],
+    "com.apple.private.trustedpeershelper.client": true,
+    "com.apple.securebackupd.access": true,
+    "com.apple.security.exception.mach-lookup.global-name": [
+      "com.apple.accountsd.accountmanager",
+      "com.apple.keychainsharingmessagingd",
+      "com.apple.AuthenticationServices.CredentialSharingGroups",
+      "com.apple.security.KeychainDBMover"
+    ],
+    "com.apple.security.network.client": true,
+    "com.apple.springboard.opensensitiveurl": true,
+    "com.apple.symptom_diagnostics.report": true,
+    "com.apple.usermanagerd.persona.fetch": true,
+    "get-task-allow": true
+  },
+  "akd": {
+    "AvpFairPlayUserClient.access": true,
+    "abs-client": "143531244",
+    "adi-client": "347420559",
+    "application-identifier": "com.apple.akd",
+    "aps-connection-initiate": true,
+    "com.apple.CommCenter.fine-grained": [
+      "spi",
+      "identity"
+    ],
+    "com.apple.CompanionLink": true,
+    "com.apple.PairingManager.Read": true,
+    "com.apple.PairingManager.Write": true,
+    "com.apple.TapToRadarKit.service-access": true,
+    "com.apple.account.dca.fullaccess": true,
+    "com.apple.accounts.idms.fullaccess": true,
+    "com.apple.appletv.pbs.user-presentation-service-access": true,
+    "com.apple.apsd.ios-device-push-token": true,
+    "com.apple.asktod": true,
+    "com.apple.authentication-services-core.allow-authentication-request-proxying": true,
+    "com.apple.authkit.client.internal": true,
+    "com.apple.bluetooth.internal": true,
+    "com.apple.bluetooth.system": true,
+    "com.apple.cdp.statemachine": true,
+    "com.apple.cdp.walrus": true,
+    "com.apple.coreidvd.spi": true,
+    "com.apple.developer.associated-domains": [],
+    "com.apple.developer.device-information.user-assigned-device-name": true,
+    "com.apple.developer.kernel.extended-virtual-addressing": true,
+    "com.apple.devicecheckd": true,
+    "com.apple.frontboard.debugapplications": true,
+    "com.apple.frontboard.launchapplications": true,
+    "com.apple.keystore.lockassertion": true,
+    "com.apple.keystore.sik.access": true,
+    "com.apple.managedconfiguration.mdmd-access": true,
+    "com.apple.mobileactivationd.bridge": true,
+    "com.apple.mobileactivationd.device-identifiers": true,
+    "com.apple.mobileactivationd.spi": true,
+    "com.apple.nano.nanoregistry": true,
+    "com.apple.private.CoreAuthentication.SPI": true,
+    "com.apple.private.LocalAuthentication.DTO": true,
+    "com.apple.private.LocalAuthentication.DTO.ShortExpiration": true,
+    "com.apple.private.LocalAuthentication.Storage": true,
+    "com.apple.private.LocalAuthentication.Storage.BiometricLivenessFlag": true,
+    "com.apple.private.MobileActivation": [
+      "RequestActivationState"
+    ],
+    "com.apple.private.accounts.allaccounts": true,
+    "com.apple.private.adid": true,
+    "com.apple.private.amfi.can-execute-cdhash": true,
+    "com.apple.private.applemediaservices": true,
+    "com.apple.private.appstorecomponents": true,
+    "com.apple.private.appstorecomponents.media-client-id": "com.apple.akd",
+    "com.apple.private.appstorecomponents.media-client-version": "1",
+    "com.apple.private.aps-connection-initiate": true,
+    "com.apple.private.associated-domains": true,
+    "com.apple.private.authentication-services.delete-passkeys-by-rpid": [
+      "apple.com"
+    ],
+    "com.apple.private.authentication-services.internal-authorization-requests": true,
+    "com.apple.private.eligibilityd.setInput": true,
+    "com.apple.private.followup": true,
+    "com.apple.private.ids.messaging": [
+      "com.apple.private.alloy.anisette"
+    ],
+    "com.apple.private.ids.messaging.urgent-priority": [
+      "com.apple.private.alloy.anisette"
+    ],
+    "com.apple.private.ids.phone-number-authentication": true,
+    "com.apple.private.ids.remotecredentials": true,
+    "com.apple.private.imcore.imremoteurlconnection": true,
+    "com.apple.private.keychain.circle.join": true,
+    "com.apple.private.keychain.kcsharing.client": true,
+    "com.apple.private.keychain.sysbound": true,
+    "com.apple.private.managed-settings.effective-read": true,
+    "com.apple.private.managedclient.mdm.checkin": true,
+    "com.apple.private.notificationcenter-system": [
+      {
+        "identifier": "com.apple.AuthKit"
+      }
+    ],
+    "com.apple.private.octagon": true,
+    "com.apple.private.security.container-required": false,
+    "com.apple.private.security.daemon-container": true,
+    "com.apple.private.security.no-container": true,
+    "com.apple.private.security.no-sandbox": true,
+    "com.apple.private.security.storage.Safari": true,
+    "com.apple.private.security.storage.os_eligibility.readonly": true,
+    "com.apple.private.storagekitd.info": true,
+    "com.apple.private.swc.system-app": true,
+    "com.apple.private.system-keychain": true,
+    "com.apple.private.tcc.allow": [
+      "kTCCServiceFaceID"
+    ],
+    "com.apple.private.usernotifications.bundle-identifiers": [
+      "com.apple.Preferences"
+    ],
+    "com.apple.security.attestation.access": true,
+    "com.apple.security.exception.files.absolute-path.read-only": [
+      "/private/var/db/eligibilityd/eligibility.plist",
+      "/private/var/db/os_eligibility/eligibility.plist"
+    ],
+    "com.apple.security.exception.files.home-relative-path.read-only": [
+      "/Library/com.apple.ManagedSettings/EffectiveSettings.plist"
+    ],
+    "com.apple.security.exception.iokit-user-client-class": true,
+    "com.apple.security.exception.mach-lookup.global-name": [
+      "com.apple.SharedWebCredentials",
+      "com.apple.fairplayd.versioned",
+      "com.apple.mobile.keybagd.xpc",
+      "com.apple.mobileactivationd",
+      "com.apple.devicecheckd",
+      "com.apple.AuthenticationServicesCore.AuthenticationServicesAgent",
+      "com.apple.server.bluetooth.le.att.xpc",
+      "com.apple.PairingManager",
+      "com.apple.asktod",
+      "com.apple.security.kcsharing",
+      "com.apple.timed.xpc",
+      "com.apple.appstorecomponentsd.xpc",
+      "com.apple.bluetooth.xpc",
+      "com.apple.managedconfiguration.mdmdservice"
+    ],
+    "com.apple.security.exception.shared-preference.read-only": [
+      "com.apple.nanobuddy",
+      "com.apple.pairedsync"
+    ],
+    "com.apple.security.exception.shared-preference.read-write": [
+      "com.apple.AppStoreComponents",
+      "com.apple.aaa.serverbackoff",
+      "com.apple.AuthKit.AgeRangeSettingsCache"
+    ],
+    "com.apple.security.iokit-user-client-class": [
+      "AvpFairPlayUserClient"
+    ],
+    "com.apple.security.network.client": true,
+    "com.apple.security.system-container": true,
+    "com.apple.security.system-groups": [
+      "systemgroup.com.apple.configurationprofiles"
+    ],
+    "com.apple.security.temporary-exception.shared-preference.read-write": [
+      "com.apple.aaa.serverbackoff"
+    ],
+    "com.apple.security.ts.ipc-posix-sem": true,
+    "com.apple.security.ts.ipc-posix-shm": true,
+    "com.apple.security.ts.ipc-posix-shm.read-only": true,
+    "com.apple.security.ts.nano-paired-storage.subpath.read-only": true,
+    "com.apple.security.ts.nano-paired-storage.subpath.read-write": true,
+    "com.apple.security.ts.nano-preference.read-only": true,
+    "com.apple.security.ts.nano-preference.read-write": true,
+    "com.apple.security.ts.nvram-read": true,
+    "com.apple.security.ts.system-info": true,
+    "com.apple.security.ts.tmpdir": true,
+    "com.apple.security.ts.xpc-service-name": true,
+    "com.apple.sharing.Client": true,
+    "com.apple.sharing.Services": true,
+    "com.apple.sharing.Session": true,
+    "com.apple.springboard.CFUserNotification": true,
+    "com.apple.springboard.activateRemoteAlert": true,
+    "com.apple.springboard.opensensitiveurl": true,
+    "com.apple.symptom_diagnostics.report": true,
+    "com.apple.usermanagerd.persona.background": true,
+    "com.apple.usermanagerd.persona.fetch": true,
+    "fairplay-client": "508119322",
+    "get-task-allow": true,
+    "keychain-access-groups": [
+      "apple",
+      "ichat",
+      "com.apple.akd",
+      "com.apple.cfnetwork",
+      "com.apple.akd.pcsauth",
+      "com.apple.certificates",
+      "com.apple.identities",
+      "com.apple.mdm.attestation",
+      "com.apple.signinwithapple",
+      "com.apple.inheritance.cryptoaccess",
+      "2bit-identity"
+    ],
+    "keychain-cloud-circle": true,
+    "platform-application": true
+  },
+  "accountsd": {
+    "com.apple.CoreRoutine.CloudSync": true,
+    "com.apple.Safari.PasswordBreachHelper": true,
+    "com.apple.SystemConfiguration.SCPreferences-write-access": [
+      "com.apple.accounts.exists.plist"
+    ],
+    "com.apple.account.dca.fullaccess": true,
+    "com.apple.accounts.inactive.fullaccess": true,
+    "com.apple.appleaccount.appleaccount-delete": true,
+    "com.apple.appleidsetup.signout": true,
+    "com.apple.application-identifier": "AAACCOUNTS.com.apple.accountsd",
+    "com.apple.authkit.client.internal": true,
+    "com.apple.cards.all-access": true,
+    "com.apple.chronoservices": true,
+    "com.apple.developer.homekit": true,
+    "com.apple.developer.icloud-services": [
+      "CloudKit"
+    ],
+    "com.apple.developer.kernel.extended-virtual-addressing": true,
+    "com.apple.icloud.findmydeviced.access": true,
+    "com.apple.icloud.findmydeviced.findmydevice-user-agent.access": true,
+    "com.apple.icloud.searchpartyd.beaconmanager": true,
+    "com.apple.imagent": true,
+    "com.apple.managedconfiguration.profiled-access": true,
+    "com.apple.payment.all-access": true,
+    "com.apple.pds.clientid": [
+      "Notes"
+    ],
+    "com.apple.peerpayment.all-access": true,
+    "com.apple.private.ClassKit.internal": true,
+    "com.apple.private.accounts.allaccounts": true,
+    "com.apple.private.accounts.bundleidspoofing": true,
+    "com.apple.private.amfi.can-execute-cdhash": true,
+    "com.apple.private.applemediaservices": true,
+    "com.apple.private.appstored": [
+      "Ocelot"
+    ],
+    "com.apple.private.ckks.currentitempointers_read": true,
+    "com.apple.private.ckks.currentitempointers_write": true,
+    "com.apple.private.ckks.plaintextfields": true,
+    "com.apple.private.clouddocs.account-access": true,
+    "com.apple.private.cloudkit.buddyAccess": true,
+    "com.apple.private.cloudkit.customAccounts": true,
+    "com.apple.private.cloudkit.masquerade": true,
+    "com.apple.private.cloudkit.setEnvironment": true,
+    "com.apple.private.cloudkit.spi": [
+      "accountsDidGrantAccessToBundleID:containerIdentifiers:",
+      "accountsDidRevokeAccessToBundleID:containerIdentifiers:",
+      "accountChangedWithID:"
+    ],
+    "com.apple.private.cloudkit.systemService": true,
+    "com.apple.private.contacts": true,
+    "com.apple.private.corespotlight.internal": true,
+    "com.apple.private.dmd.policy": true,
+    "com.apple.private.email": true,
+    "com.apple.private.followup": true,
+    "com.apple.private.game-center": [
+      "Account"
+    ],
+    "com.apple.private.groupkit.allgroups": true,
+    "com.apple.private.homekit": true,
+    "com.apple.private.iaaccounts": true,
+    "com.apple.private.ids.registration": true,
+    "com.apple.private.ind.client": true,
+    "com.apple.private.ndoagent": true,
+    "com.apple.private.network.socket-delegate": true,
+    "com.apple.private.notificationcenter-system": [
+      {
+        "_NSUserNotificationHideFromPrefs": true,
+        "identifier": "com.apple.accountsd"
+      }
+    ],
+    "com.apple.private.octagon": true,
+    "com.apple.private.personas.propagate": true,
+    "com.apple.private.photos.service.internal.cloud": true,
+    "com.apple.private.photos.service.librarymanagement": true,
+    "com.apple.private.protectedcloudstorage.keysyncing": true,
+    "com.apple.private.rsr-cryptex-access": true,
+    "com.apple.private.security.container-required": false,
+    "com.apple.private.security.no-container": true,
+    "com.apple.private.security.no-sandbox": true,
+    "com.apple.private.security.restricted-application-groups": [
+      "group.com.apple.notes",
+      "com.apple.MailPersonaStorage",
+      "group.com.apple.calendar",
+      "group.tvappservices.container"
+    ],
+    "com.apple.private.security.storage.Accounts": true,
+    "com.apple.private.security.storage.Mail": true,
+    "com.apple.private.security.storage.Notes": true,
+    "com.apple.private.social.facebook.token": true,
+    "com.apple.private.tcc.allow": [
+      "kTCCServiceCalendar",
+      "kTCCServiceAddressBook",
+      "kTCCServicePhotos",
+      "kTCCServiceWillow",
+      "kTCCServiceLiverpool"
+    ],
+    "com.apple.private.tcc.manager": true,
+    "com.apple.private.ubiquity-additional-kvstore-identifiers": [
+      "com.apple.accounts.sync.suggestion"
+    ],
+    "com.apple.private.vfs.allow-low-space-writes": true,
+    "com.apple.rapport.Client": true,
+    "com.apple.securebackupd.access": true,
+    "com.apple.security.application-groups": [
+      "group.com.apple.notes",
+      "com.apple.MailPersonaStorage",
+      "group.com.apple.calendar",
+      "group.tvappservices.container"
+    ],
+    "com.apple.security.exception.mach-lookup.global-name": [
+      "com.apple.identityservicesd.pds"
+    ],
+    "com.apple.security.temporary-exception.files.home-relative-path.read-write": [
+      "/Library/Containers/com.apple.Notes/Data/"
+    ],
+    "com.apple.security.temporary-exception.mach-lookup.global-name": [
+      "com.apple.imagent.desktop.Launched",
+      "com.apple.imagent.desktop.auth",
+      "com.apple.itunescloudd.tcchelper"
+    ],
+    "com.apple.security.temporary-exception.sbpl": [
+      "(read-write-and-issue-extensions (regex (string-append \"^/Volumes/\" (uuid-regex-string) \"(/|$)\")))"
+    ],
+    "com.apple.transparencyd.accounts-support": true,
+    "com.apple.usermanagerd.persona.background": true,
+    "com.apple.usermanagerd.persona.fetch": true,
+    "com.apple.usermanagerd.persona.observer": true,
+    "get-task-allow": true,
+    "keychain-access-groups": [
+      "apple",
+      "appleaccount",
+      "com.apple.ProtectedCloudStorage",
+      "IMCore",
+      "InternetAccounts",
+      "com.apple.identities"
+    ],
+    "keychain-cloud-circle": true
+  },
+  "appleaccountd": {
+    "AvpFairPlayUserClient.access": true,
+    "application-identifier": "com.apple.appleaccountd",
+    "aps-connection-initiate": true,
+    "com.apple.TapToRadarKit.service-access": true,
+    "com.apple.account.dca.fullaccess": "",
+    "com.apple.application-identifier": "com.apple.appleaccountd",
+    "com.apple.authkit.birthday": true,
+    "com.apple.authkit.client.private": true,
+    "com.apple.cdp.recoverykey": true,
+    "com.apple.cdp.walrus": true,
+    "com.apple.cdp.walrus.pcskeys": true,
+    "com.apple.developer.hardened-process": true,
+    "com.apple.developer.icloud-container-environment": "Production",
+    "com.apple.developer.icloud-container-identifiers": [
+      "com.apple.appleaccount.custodian.private",
+      "com.apple.appleaccount.custodian",
+      "com.apple.appleaccount.beneficiary",
+      "com.apple.appleaccount.beneficiary.private"
+    ],
+    "com.apple.developer.icloud-services": [
+      "CloudKit"
+    ],
+    "com.apple.developer.kernel.extended-virtual-addressing": true,
+    "com.apple.frontboard.debugapplications": true,
+    "com.apple.frontboard.launchapplications": true,
+    "com.apple.imagent": true,
+    "com.apple.imagent.chat": true,
+    "com.apple.intelligenceplatform.View": true,
+    "com.apple.keystore.lockassertion": true,
+    "com.apple.mkb.usersession.info": true,
+    "com.apple.mkb.usersession.keybagopaquedata": true,
+    "com.apple.private.accounts.allaccounts": true,
+    "com.apple.private.amfi.can-execute-cdhash": true,
+    "com.apple.private.appleaccount.app-hidden-from-icloud-settings": true,
+    "com.apple.private.aps-connection-initiate": true,
+    "com.apple.private.cloudkit.masquerade": true,
+    "com.apple.private.cloudkit.serviceNameForContainerMap": {
+      "com.apple.appleaccount.beneficiary.private": "com.apple.appleaccount.beneficiary",
+      "com.apple.appleaccount.custodian.private": "com.apple.appleaccount.custodian"
+    },
+    "com.apple.private.cloudkit.systemService": true,
+    "com.apple.private.contacts": true,
+    "com.apple.private.familycircle": true,
+    "com.apple.private.followup": true,
+    "com.apple.private.ids.idquery-cache": true,
+    "com.apple.private.ids.messaging": [
+      "com.apple.private.alloy.accounts.representative"
+    ],
+    "com.apple.private.ids.messaging.urgent-priority": [
+      "com.apple.private.alloy.accounts.representative"
+    ],
+    "com.apple.private.imcore.imagent": true,
+    "com.apple.private.intelligenceplatform.views.read-only": [
+      "entityTagging",
+      "visualIdentifier",
+      "hasAssociationSubgraph",
+      "phPersonIdentifierMap"
+    ],
+    "com.apple.private.keychain.sysbound": true,
+    "com.apple.private.notificationcenter-system": [
+      {
+        "identifier": "com.apple.AppleAccount"
+      }
+    ],
+    "com.apple.private.octagon": true,
+    "com.apple.private.security.container-required": false,
+    "com.apple.private.security.no-container": true,
+    "com.apple.private.security.no-sandbox": true,
+    "com.apple.private.security.storage.appleaccountd": true,
+    "com.apple.private.tcc.allow": [
+      "kTCCServiceLiverpool",
+      "kTCCServiceAddressBook"
+    ],
+    "com.apple.private.usernotifications.bundle-identifiers": [
+      "com.apple.appleaccount.notifications"
+    ],
+    "com.apple.security.exception.files.absolute-path.read-only": [
+      "/private/var/mnt/rootfs/"
+    ],
+    "com.apple.security.exception.files.home-relative-path.read-write": [
+      "/Library/com.apple.appleaccountd/",
+      "/Library/HTTPStorages",
+      "/Library/HTTPStorages/com.apple.appleaccountd/",
+      "/Library/Caches/com.apple.AppleAccount/"
+    ],
+    "com.apple.security.exception.iokit-user-client-class": [
+      "AppleKeyStoreUserClient"
+    ],
+    "com.apple.security.exception.mach-lookup.global-name": [
+      "com.apple.mobile.usermanagerd.xpc",
+      "com.apple.SBUserNotification",
+      "com.apple.familycircle.agent",
+      "com.apple.ak.auth.xpc",
+      "com.apple.ak.anisette.xpc",
+      "com.apple.ak.custodian.xpc",
+      "com.apple.ak.inheritance.xpc",
+      "com.apple.ak.walrus.xpc",
+      "com.apple.accountsd.accountmanager",
+      "com.apple.analyticsd",
+      "com.apple.apsd",
+      "com.apple.cloudd",
+      "com.apple.contactsd",
+      "com.apple.corefollowup.agent",
+      "com.apple.identityservicesd.embedded.auth",
+      "com.apple.identityservicesd.idquery.desktop.auth",
+      "com.apple.identityservicesd.idquery.embedded.auth",
+      "com.apple.securityd.xpc",
+      "com.apple.security.octagon",
+      "com.apple.SBUserNotification",
+      "com.apple.SystemConfiguration.configd",
+      "com.apple.frontboard.systemappservices",
+      "com.apple.usernotifications.usernotificationservice",
+      "com.apple.usernotifications.listener",
+      "com.apple.cdp.daemon",
+      "com.apple.securityd",
+      "com.apple.usernotifications.usernotificationservice",
+      "com.apple.AppSSO.service-xpc",
+      "com.apple.usymptomsd",
+      "com.apple.intelligenceplatform.View",
+      "com.apple.lsd.xpc"
+    ],
+    "com.apple.security.exception.shared-preference.read-only": [
+      "com.apple.gamecenter",
+      "com.apple.UIKit"
+    ],
+    "com.apple.security.exception.shared-preference.read-write": [
+      "com.apple.appleaccountd",
+      "com.apple.appleaccount"
+    ],
+    "com.apple.security.iokit-user-client-class": [
+      "AvpFairPlayUserClient"
+    ],
+    "com.apple.security.network.client": true,
+    "com.apple.security.personal-information.addressbook": true,
+    "com.apple.security.system-groups": [
+      "systemgroup.com.apple.nsurlstoragedresources"
+    ],
+    "com.apple.security.temporary-exception.iokit-user-client-class": "AppleKeyStoreUserClient",
+    "com.apple.security.temporary-exception.shared-preference.read-only": [
+      "com.apple.appleaccount"
+    ],
+    "com.apple.security.ts.cloudkit-client": true,
+    "com.apple.security.ts.tmpdir": "com.apple.appleaccountd",
+    "com.apple.springboard.CFUserNotification": true,
+    "com.apple.springboard.opensensitiveurl": true,
+    "com.apple.springboard.remote-alert": true,
+    "com.apple.usermanagerd.persona.fetch": true,
+    "get-task-allow": true,
+    "keychain-access-groups": [
+      "com.apple.inheritance.cryptoaccess"
+    ],
+    "platform-application": true
+  },
+  "corefollowup": {
+    "com.apple.developer.kernel.extended-virtual-addressing": true,
+    "com.apple.private.amfi.can-execute-cdhash": true,
+    "com.apple.private.followup": true,
+    "com.apple.private.notificationcenter-system": [
+      {
+        "_NSUserNotificationHideFromPrefs": true,
+        "identifier": "com.apple.followup.alert"
+      }
+    ],
+    "com.apple.private.security.container-required": false,
+    "com.apple.private.security.no-container": true,
+    "com.apple.private.security.no-sandbox": true,
+    "com.apple.private.security.storage.CoreFollowUp": true,
+    "get-task-allow": true
+  },
+  "coreauth": {
+    "com.apple.MobileAsset.KextDenyList": true,
+    "com.apple.ahp": true,
+    "com.apple.apfs.wvek": true,
+    "com.apple.developer.kernel.extended-virtual-addressing": true,
+    "com.apple.keystore.access-keychain-keys": true,
+    "com.apple.keystore.device": true,
+    "com.apple.keystore.device.verify": true,
+    "com.apple.keystore.filevault": true,
+    "com.apple.private.CoreAuthentication.SPI": true,
+    "com.apple.private.CoreKDL.allow": true,
+    "com.apple.private.DFRSystemModalPresentation": true,
+    "com.apple.private.LocalAuthentication.EndpointProvider": true,
+    "com.apple.private.LocalAuthentication.StatusDump": true,
+    "com.apple.private.LocalAuthentication.UI": true,
+    "com.apple.private.SkyLight.event.monitor": true,
+    "com.apple.private.amfi.can-execute-cdhash": true,
+    "com.apple.private.applecredentialmanager.allow": true,
+    "com.apple.private.applecredentialmanager.securestore.PSSO.allow": true,
+    "com.apple.private.applecredentialmanager.securestore.allow": true,
+    "com.apple.private.applecredentialmanager.securestore.macbuddy.allow": true,
+    "com.apple.private.applecredentialmanager.securestore.upp.config.allow": true,
+    "com.apple.private.appletamanager.allow": true,
+    "com.apple.private.assets.accessible-asset-types": [
+      "com.apple.MobileAsset.com.apple.MobileAsset.KextDenyList"
+    ],
+    "com.apple.private.biometrickit.allow-match": true,
+    "com.apple.private.hid.client.event-monitor": true,
+    "com.apple.private.intelligenceplatform.client-identifier": "com.apple.coreauthd",
+    "com.apple.private.intelligenceplatform.use-cases": {
+      "DialogAnalyticsWriter": {
+        "Streams": {
+          "LocalAuthentication.UI.Dialogs": {
+            "mode": "read-write"
+          }
+        }
+      }
+    },
+    "com.apple.private.lasecureio.remote": true,
+    "com.apple.private.network.intcoproc.restricted": true,
+    "com.apple.private.security.container-required": false,
+    "com.apple.private.security.no-container": true,
+    "com.apple.private.security.no-sandbox": true,
+    "com.apple.private.sharing.unlock-manager": true,
+    "com.apple.private.touchbarserver.LASecureIO": true,
+    "com.apple.private.trac.bridge.allow": true,
+    "com.apple.security.exception.mach-lookup.global-name": [
+      "com.apple.backlightd",
+      "com.apple.biome.access.user"
+    ],
+    "com.apple.security.iokit-user-client-class": [
+      "AppleCredentialManagerUserClient",
+      "AppleKeyStoreUserClient"
+    ],
+    "com.apple.sharing.DeviceDiscovery": true,
+    "get-task-allow": true
+  },
+  "ctk": {
+    "application-identifier": "com.apple.ctkd",
+    "com.apple.application-identifier": "com.apple.ctkd",
+    "com.apple.developer.kernel.extended-virtual-addressing": true,
+    "com.apple.frontboard.launchapplications": true,
+    "com.apple.keystore.access-keychain-keys": true,
+    "com.apple.keystore.sik.access": true,
+    "com.apple.private.amfi.can-execute-cdhash": true,
+    "com.apple.private.applecredentialmanager.allow": true,
+    "com.apple.private.audit.user": true,
+    "com.apple.private.extension-host.ctk-tokens": true,
+    "com.apple.private.keychain.allow-update-tokens": true,
+    "com.apple.private.security.container-required": false,
+    "com.apple.private.security.no-container": true,
+    "com.apple.private.security.no-sandbox": true,
+    "com.apple.security.exception.iokit-user-client-class": [
+      "AppleKeyStoreUserClient",
+      "AppleCredentialManagerUserClient"
+    ],
+    "com.apple.security.exception.mach-lookup.global-name": [
+      "com.apple.CoreAuthentication.agent"
+    ],
+    "com.apple.security.smartcard": true,
+    "com.apple.springboard.remote-alert": true,
+    "get-task-allow": true,
+    "keychain-access-groups": [
+      "com.apple.token"
+    ]
+  },
+  "icloudhelper": {
+    "com.apple.authkit.client.internal": true,
+    "com.apple.developer.kernel.extended-virtual-addressing": true,
+    "com.apple.icloud.findmydeviced.access": true,
+    "com.apple.private.AuthorizationServices": [
+      "com.apple.opendirectoryd.linkidentity"
+    ],
+    "com.apple.private.accounts.allaccounts": true,
+    "com.apple.private.adid": true,
+    "com.apple.private.admin.writeconfig": true,
+    "com.apple.private.amfi.can-execute-cdhash": true,
+    "com.apple.private.aps-connection-initiate": true,
+    "com.apple.private.iaaccounts": true,
+    "com.apple.private.ids.registration": true,
+    "com.apple.private.security.container-required": false,
+    "com.apple.private.security.no-container": true,
+    "com.apple.private.security.no-sandbox": true,
+    "com.apple.private.tcc.allow": [
+      "kTCCServiceAddressBook"
+    ],
+    "com.apple.securebackupd.access": true,
+    "get-task-allow": true,
+    "keychain-access-groups": [
+      "com.apple.ProtectedCloudStorage",
+      "com.apple.PublicCloudStorage"
+    ]
+  },
+  "cdp": {
+    "com.apple.TapToRadarKit.service-access": true,
+    "com.apple.accounts.appleaccount.fullaccess": true,
+    "com.apple.authkit.client.internal": true,
+    "com.apple.developer.device-information.user-assigned-device-name": true,
+    "com.apple.developer.kernel.extended-virtual-addressing": true,
+    "com.apple.private.accounts.allaccounts": true,
+    "com.apple.private.amfi.can-execute-cdhash": true,
+    "com.apple.private.ckks": true,
+    "com.apple.private.ckks.currentitempointers_read": true,
+    "com.apple.private.ckks.currentitempointers_write": true,
+    "com.apple.private.ckks.plaintextfields": true,
+    "com.apple.private.followup": true,
+    "com.apple.private.keychain.circle.join": true,
+    "com.apple.private.keychain.sysbound": true,
+    "com.apple.private.octagon": true,
+    "com.apple.private.octagon.walrus": true,
+    "com.apple.private.protectedcloudstorage.keysyncing": true,
+    "com.apple.private.rtcreportingd": true,
+    "com.apple.private.security.container-required": false,
+    "com.apple.private.security.initial-sync": true,
+    "com.apple.private.security.no-container": true,
+    "com.apple.private.security.no-sandbox": true,
+    "com.apple.securebackupd.access": true,
+    "com.apple.security.exception.files.absolute-path.read-only": [
+      "/private/var/db/com.apple.countryd/"
+    ],
+    "com.apple.security.temporary-exception.mach-lookup.global-name": [
+      "com.apple.TapToRadarKit.service"
+    ],
+    "get-task-allow": true,
+    "keychain-access-groups": [
+      "apple",
+      "com.apple.certificates",
+      "com.apple.identities",
+      "appleaccount",
+      "com.apple.ProtectedCloudStorage",
+      "com.apple.security.ckks",
+      "com.apple.cdp.rk"
+    ],
+    "keychain-cloud-circle": true,
+    "restore-keychain": true
+  },
+  "coreauth-agent": {
+    "com.apple.MobileAsset.KextDenyList": true,
+    "com.apple.ahp": true,
+    "com.apple.apfs.wvek": true,
+    "com.apple.developer.kernel.extended-virtual-addressing": true,
+    "com.apple.keystore.access-keychain-keys": true,
+    "com.apple.keystore.device": true,
+    "com.apple.keystore.device.verify": true,
+    "com.apple.keystore.filevault": true,
+    "com.apple.private.CoreAuthentication.SPI": true,
+    "com.apple.private.CoreKDL.allow": true,
+    "com.apple.private.DFRSystemModalPresentation": true,
+    "com.apple.private.LocalAuthentication.EndpointProvider": true,
+    "com.apple.private.LocalAuthentication.StatusDump": true,
+    "com.apple.private.LocalAuthentication.UI": true,
+    "com.apple.private.SkyLight.event.monitor": true,
+    "com.apple.private.amfi.can-execute-cdhash": true,
+    "com.apple.private.applecredentialmanager.allow": true,
+    "com.apple.private.applecredentialmanager.securestore.PSSO.allow": true,
+    "com.apple.private.applecredentialmanager.securestore.allow": true,
+    "com.apple.private.applecredentialmanager.securestore.macbuddy.allow": true,
+    "com.apple.private.applecredentialmanager.securestore.upp.config.allow": true,
+    "com.apple.private.appletamanager.allow": true,
+    "com.apple.private.assets.accessible-asset-types": [
+      "com.apple.MobileAsset.com.apple.MobileAsset.KextDenyList"
+    ],
+    "com.apple.private.biometrickit.allow-match": true,
+    "com.apple.private.hid.client.event-monitor": true,
+    "com.apple.private.intelligenceplatform.client-identifier": "com.apple.coreauthd",
+    "com.apple.private.intelligenceplatform.use-cases": {
+      "DialogAnalyticsWriter": {
+        "Streams": {
+          "LocalAuthentication.UI.Dialogs": {
+            "mode": "read-write"
+          }
+        }
+      }
+    },
+    "com.apple.private.lasecureio.remote": true,
+    "com.apple.private.network.intcoproc.restricted": true,
+    "com.apple.private.security.container-required": false,
+    "com.apple.private.security.no-container": true,
+    "com.apple.private.security.no-sandbox": true,
+    "com.apple.private.sharing.unlock-manager": true,
+    "com.apple.private.touchbarserver.LASecureIO": true,
+    "com.apple.private.trac.bridge.allow": true,
+    "com.apple.security.exception.mach-lookup.global-name": [
+      "com.apple.backlightd",
+      "com.apple.biome.access.user"
+    ],
+    "com.apple.security.iokit-user-client-class": [
+      "AppleCredentialManagerUserClient",
+      "AppleKeyStoreUserClient"
+    ],
+    "com.apple.sharing.DeviceDiscovery": true,
+    "get-task-allow": true
+  }
+}
